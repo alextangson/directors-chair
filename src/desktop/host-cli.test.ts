@@ -65,6 +65,21 @@ describe("autocrew host", () => {
     const home = path.dirname(booted());
     expect(hostInstructions("codex", { dataDir, home })).toContain(`~${path.sep}${path.basename(dataDir)}`);
   });
+
+  it("prints the cursor mcp file and never the token value", () => {
+    const out = hostInstructions("cursor", { dataDir: booted(), port: 4317 });
+    expect(out).toContain(".cursor/mcp.json");
+    expect(out).toContain("AUTOCREW_HOST=cursor");
+    expect(out).toContain(path.join("tokens", "cursor.token"));
+    expect(existsSync(path.join(dataDir, "tokens", "cursor.token"))).toBe(true);
+    expect(out).not.toMatch(TOKEN_VALUE);
+  });
+
+  it("does not create a cursor token before the server has ever started", () => {
+    const out = hostInstructions("cursor", { dataDir });
+    expect(out).toContain("npm start");
+    expect(existsSync(path.join(dataDir, "tokens", "cursor.token"))).toBe(false);
+  });
 });
 
 /**
@@ -156,5 +171,15 @@ describe("autocrew host --dir", () => {
     const out = hostInstructions("codex", { dataDir: booted(), dir: ws });
     expect(out).not.toContain("人设没写成");
     expect(readFileSync(path.join(ws, "AGENTS.md"), "utf-8")).toContain("AutoCrew 总编辑 + 写手");
+  });
+
+  it("ignores --dir for cursor and writes no AGENTS.md", () => {
+    const out = hostInstructions("cursor", { dataDir: booted(), dir: ws, role: "colorist", personaDir });
+    expect(out).toContain(".cursor/rules/autocrew-host.mdc");
+    expect(out).toContain(".cursor/skills");
+    expect(out).toContain("--dir 这次被忽略");
+    expect(out).not.toContain("agent.cordis.yml");
+    expect(existsSync(path.join(ws, "AGENTS.md"))).toBe(false);
+    expect(existsSync(path.join(ws, "CLAUDE.md"))).toBe(false);
   });
 });

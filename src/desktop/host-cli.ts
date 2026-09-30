@@ -1,5 +1,5 @@
 /**
- * `autocrew host <codex|claude-code|dsh> [--dir <workspace>] [--role …]`（P3 §7.1）
+ * `autocrew host <codex|claude-code|dsh|workbuddy|cursor> [--dir <workspace>] [--role …]`（P3 §7.1）
  * ——把一个宿主接上本机编辑部。
  *
  * 做两件事：确保 `<dataDir>/tokens/<host>.token` 存在并把接入步骤打出来；
@@ -18,7 +18,7 @@ import { getHostStateDir } from "../storage/storage-roots.js";
 import { ensureHostToken } from "./host-tokens.js";
 import { connectWorkbuddy } from "./workbuddy-connect.js";
 
-export const KNOWN_HOSTS = ["codex", "claude-code", "dsh", "workbuddy"] as const;
+export const KNOWN_HOSTS = ["codex", "claude-code", "dsh", "workbuddy", "cursor"] as const;
 export type KnownHost = (typeof KNOWN_HOSTS)[number];
 
 /** `--role`：写哪一份人设。 */
@@ -35,6 +35,8 @@ const PERSONA_FILE: Record<KnownHost, string | null> = {
   dsh: null,
   // WorkBuddy 反向接入：人设不落文件，接入由 workbuddy-connect 写它自己的 mcp.json
   workbuddy: null,
+  // Cursor 的人设是仓库里的 .cursor/rules 与 .cursor/skills，不写工作目录
+  cursor: null,
 };
 
 export interface HostCliOptions {
@@ -155,6 +157,18 @@ function claudeCodeSteps(tokenPath: string, endpoint: string): string[] {
   ];
 }
 
+function cursorSteps(): string[] {
+  return [
+    "仓库里的 .cursor/mcp.json 已经指向转发器，不用再手写配置。",
+    "它启动 node，参数是 ${workspaceFolder}/bin/autocrew.mjs 和 mcp。",
+    "环境变量 AUTOCREW_HOST=cursor，转发器只读上面这份令牌，不回落到 server-token。",
+    "",
+    "1) 确保 AutoCrew 在跑：npm start",
+    "2) 用 Cursor 打开本仓库，重载 MCP。服务器名是 autocrew。",
+    "3) 写稿、改稿、审稿、发布时按 .cursor/skills 里的技能做。",
+  ];
+}
+
 function dshSteps(tokenPath: string): string[] {
   return [
     "dsh 走的是进程内的工具桥，不经 HTTP，接入步骤在：",
@@ -192,7 +206,9 @@ export function hostInstructions(host: string, options: HostCliOptions = {}): st
     ? codexSteps(tokenPath, endpoint)
     : host === "claude-code"
       ? claudeCodeSteps(tokenPath, endpoint)
-      : dshSteps(tokenPath);
+      : host === "cursor"
+        ? cursorSteps()
+        : dshSteps(tokenPath);
 
   const lines = [
     `宿主 ${host} 的令牌已就绪：${tokenPath}`,
@@ -219,6 +235,12 @@ function workbuddyLines(dataDir: string, home: string): string {
 
 /** `--dir` 那一段：写成功报落点与做法，写失败报人话原因——绝不把失败吞掉当没写。 */
 function personaLines(host: KnownHost, options: HostCliOptions, home: string): string[] {
+  if (host === "cursor") {
+    return [
+      "Cursor 的人设在仓库里的 .cursor/rules/autocrew-host.mdc 与 .cursor/skills，",
+      "不写工作目录。--dir 这次被忽略。",
+    ];
+  }
   const dir = options.dir as string;
   const role = options.role ?? "editor-writer";
   if (!isKnownRole(role)) {
