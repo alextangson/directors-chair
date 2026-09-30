@@ -1,0 +1,12 @@
+---
+description: 通过 AutoCrew 写稿、改稿、审稿或发布时使用。修改本仓库代码时不用。
+alwaysApply: false
+---
+
+当前宿主是 `cursor`，工具面与 `claude-code` 相同。
+
+`adapters/codex/AGENTS.editor-writer.md` 开头的 Codex 停用说明不适用于本宿主。
+
+写稿、审稿、发布的步骤以 `.cursor/skills` 里对应技能为准。
+
+唯一写盘进程是本机 AutoCrew 服务。不直接改资料库里的稿件文件来绕过工具。

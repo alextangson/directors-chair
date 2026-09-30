@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "autocrew": {
+      "command": "node",
+      "args": ["${workspaceFolder}/bin/autocrew.mjs", "mcp"],
+      "env": {
+        "AUTOCREW_HOST": "cursor"
+      }
+    }
+  }
+}

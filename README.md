@@ -276,7 +276,7 @@ MCP 初始化自带流程说明，亦可读取 `autocrew://writing-guide` 或使
 
 这些技能是操作指引，不意味着同名独立 agent 已经运行。实际分工由工具的任务、材料包、审稿结果和交接记录证明。
 
-### 接宿主（Claude Code / Codex / WorkBuddy / dsh）
+### 接宿主（Claude Code / Codex / WorkBuddy / dsh / Cursor）
 
 **只有一个进程写盘。** `http://127.0.0.1:4317/mcp` 是唯一的 MCP 传输：Codex 的远端客户端直连它，
 Claude Code 的 `autocrew mcp` 只是一个 stdio 转发器（把 JSON-RPC 原样转发到同一个端点）。
@@ -287,7 +287,7 @@ Claude Code 的 `autocrew mcp` 只是一个 stdio 转发器（把 JSON-RPC 原�
 
 ```bash
 npm start                 # 先起服务（令牌目录由它创建）
-autocrew host codex       # 或 claude-code / workbuddy / dsh
+autocrew host codex       # 或 claude-code / workbuddy / dsh / cursor
 ```
 
 命令会建好 `~/.autocrew/tokens/<host>.token`（0600）并打印接入步骤。**这个文件等于你的编辑部钥匙**
@@ -300,6 +300,7 @@ autocrew host codex       # 或 claude-code / workbuddy / dsh
 | Codex | `export AUTOCREW_MCP_TOKEN=$(cat ~/.autocrew/tokens/codex.token)`，再 `codex mcp add autocrew --url http://127.0.0.1:4317/mcp --bearer-token-env-var AUTOCREW_MCP_TOKEN` |
 | WorkBuddy | `autocrew host workbuddy`，或工作台「设置 → 接入更多」的宿主卡上点「连接 WorkBuddy」：发令牌，并把一条 `autocrew` 合并进 `~/.workbuddy/mcp.json`（写前备份到 `mcp.json.autocrew-bak`，别的条目原样保留，文件读不懂就不写）。重启 WorkBuddy 后生效。之后在稿件页或对话栏点「复制给 WorkBuddy」，把那句话粘进 WorkBuddy 就能接着处理这篇稿 |
 | dsh | 走进程内工具桥，见 `adapters/dsh/README.md` |
+| Cursor | 用 Cursor 打开本仓库。`npm start` 之后执行 `npx autocrew host cursor` 发令牌，再重载 MCP。配置已在 `.cursor/mcp.json`，技能经 `.cursor/skills` 链到 `skills/` |
 
 Codex 提醒：`codex exec`（非交互）会自动取消 MCP 工具调用，除非加
 `--dangerously-bypass-approvals-and-sandbox`（openai/codex #24135、#16685）。日常用交互式会话。
