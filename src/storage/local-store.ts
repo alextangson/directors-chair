@@ -12,6 +12,7 @@ import { isContentId, isSafeFilename, isTopicId } from "./entity-id.js";
 import { writeJsonAtomic, writeTextAtomic } from "./json-atomic.js";
 import { resolveDataDir } from "./storage-roots.js";
 import { moveFileVerified } from "./move-file.js";
+import { historyRefusal, type IMPORTED_HISTORY } from "./imported-history.js";
 import { EDITING_VIA_HANDOFF, EDITING_VIA_ONTOLOGY, isVideoPlatform, stageGuardError } from "./stage-guard.js";
 // 纯类型 import（编译后擦除，不产生 storage → modules 的运行时依赖）：
 // 审稿结论的形状归审稿模块定义，这里复制一份就是把真相分成两处。
@@ -22,8 +23,9 @@ import type { WritingFeedback } from "../modules/writing/writing-feedback.js";
 import type { AngleCard } from "../modules/research/brief-store.js";
 // 证据账本的落盘形状归账本模块定义（P1 §3.3），这里同样只引用
 import type { EvidenceLedgerSnapshot } from "../modules/research/evidence-ledger.js";
+import type { DraftFinalRecord, DraftPathRecord } from "../modules/draft/draft-types.js";
 import type { ContentVideoLink } from "../modules/video/handoff/types.js";
-import { applyScriptEdit, modelTransitionRefusal, planScriptEdit, projectInLock, recordScriptTransition, type Editor } from "./production-hooks.js";
+import { applyScriptEdit, FOUNDER_ONLY_STATUSES, modelTransitionRefusal, planScriptEdit, projectInLock, recordScriptTransition, type Editor } from "./production-hooks.js";
 
 /**
  * 创始人选定的写作角度（角度卡 spec §1.3）。指针 + **生效卡快照**两样都存：
@@ -36,6 +38,18 @@ export interface SelectedAngle {
   angleId: string;
   card: AngleCard;
   selectedAt: string;
+  /** 选题会规则：只有创始人定的卡才放行开写；没有这两格的旧选择不算数 */
+  chosenBy?: "founder";
+  /** 创始人选卡时的原话（宿主照抄，诚信制） */
+  founderWords?: string;
+}
+
+/** 创始人自己给的角度（「就写这个角度」）：同样要原话，按选题文本指纹判过期 */
+export interface FounderAngle {
+  direction: string;
+  founderWords: string;
+  chosenAt: string;
+  topicHash: string;
 }
 
 export interface Topic {
@@ -62,6 +76,8 @@ export interface Topic {
   angles?: string[];
   /** 创始人选中/改写的角度卡（角度卡 spec §1.3）；未选 = 字段不落，写稿走「未经角度点选」 */
   selectedAngle?: SelectedAngle;
+  /** 创始人自己写的角度（选题会的另一条出口） */
+  founderAngle?: FounderAngle;
   scoredAt?: string;
   createdAt: string;
   /**
@@ -71,6 +87,10 @@ export interface Topic {
   renewedAt?: string;
   /** 软删除时间戳(回收站语义,qingmo 设计细节);null/缺省 = 活跃 */
   deletedAt?: string | null;
+  /** 选题会片单位（选题会 spec §4）：选中≠开工，只是进本周片单；会议记录在 meetings/<meetingDate>.json */
+  meetingSlot?: { meetingDate: string; slotId: string };
+  /** 装好后试跑建的示例选题（onboarding-connect O20）：其下稿件继承，不进数据回流和写作学习，可一键删 */
+  example?: boolean;
 }
 
 /**
@@ -233,6 +253,10 @@ export interface VideoKit {
   source?: "host" | "engine";
   /** 做包时当前登记（video.final.register_hash）：换版后旧包作废（本体 §5 发布出口） */
   registerHash?: string;
+  /** 这个平台标题用的方法 id（title-method-library），创始人自己写的记「自拟」；旧发布包没有 = 统计归「未标记」 */
+  titleMethod?: string;
+  /** 交包时的 3 个四平台通用候选（各带方法 id 和理由） */
+  titleCandidates?: Array<{ title: string; method: string; reason: string }>;
 }
 
 export interface AdoptionRecord {
@@ -298,6 +322,13 @@ export interface ManualPublication {
 }
 
 export interface Content {
+  /** 示例稿（O20）：建稿时从选题继承；不进数据回流、不参与写作规则 / 手册学习，可一键删 */
+  example?: boolean;
+  /**
+   * 系统建稿时垫的占位正文（create_variant 不带正文）：选题会卡口只认与它一字不差的正文为占位，
+   * 前缀长得像的正文不算。只由系统写，content update 不开放这个字段。
+   */
+  generatedPlaceholder?: string;
   /** 稿件摘要（spec §3 A）：只对 outlineDraftHash 那版正文有效，正文一改即失效（见 series-memory.validOutline） */
   outline?: Outline;
   outlineDraftHash?: string;
@@ -361,8 +392,10 @@ export interface Content {
   performanceData: Record<string, number>;
   /** 采纳裁决（三键落库；未裁决 = 不参与采纳率分母） */
   adoption?: AdoptionRecord;
-  /** 视频发布件（IA v5 V5.4b）:发布文案/分镜/封面——口播稿是"读的",发布件是"发的" */
+  /** 旧单平台发布包（已迁移到 videoKits，只读兼容） */
   videoKit?: VideoKit;
+  /** 按平台的视频发布包（一条视频发多平台）；读写一律经 storage/video-kits.ts，旧 videoKit 读时迁移 */
+  videoKits?: Record<string, VideoKit>;
   /** 最近一次生成/处理失败的原因（防呆:失败留痕,成功后清空）。UI 据此显示中断徽章与重试 */
   lastError?: string | null;
   /**
@@ -409,6 +442,22 @@ export interface Content {
    * 落在稿件上，而不只在回执里——导入稿补证入口（与后续交接快速通道）只认这里。
    */
   writingSource?: { kind: "manual_import"; importedAt: string; reason: string };
+  /** 走灵感 → A-roll 薄路径（autocrew_draft）的稿：立意与审稿意见。只由该工具写，content update 不开放 */
+  draftPath?: DraftPathRecord;
+  /**
+   * 「开始写 / 交给 X 写」交出去的那一刻（spec 2026-10-15 §B5）：交给谁、什么时候；agent 用 autocrew_draft start 接手时记 pickedUpAt。
+   * 只由看板的交出动作和 draft start 写；看板据此说「已交给 X，等它接手」还是「X 在写」。
+   */
+  writingHandoff?: { host: string; at: string; pickedUpAt?: string; pickedUpBy?: string };
+  /** 创始人在工作台点「定了」（绑定稿件指纹）。只由工作台会话写，交接据此认定稿 */
+  draftFinal?: DraftFinalRecord;
+  /** 补录的历史作品记录（imported-history.ts）：没有正文，不进任何生产流程 */
+  source?: typeof IMPORTED_HISTORY;
+  /**
+   * 历史作品记录的「存档原稿」（老作品补齐规格 2026-10-04 ②）：从旧资料库只读复制的 draft.md。
+   * 只供查看——不是 body，不进写稿 / 审稿 / 剪辑 / 发布任何流程（历史记录本身已被各入口拒收）。
+   */
+  archiveDraft?: { body: string; sourcePath: string; oldContentId: string; oldTitle?: string; inferred: boolean; copiedAt: string };
   /**
    * 发出去的写作包（P3 §5.2）。`submittedAt` 缺席 + 状态 `drafting` = **包发出去了、稿没回来**，
    * 稿卡据此说「写作包已发给 X，未收到稿（N 分钟）」而不是误报「还在后台写」。
@@ -579,13 +628,10 @@ async function inSeriesScope(id: string, dataDir?: string): Promise<boolean> {
  */
 function contentWrite<T>(id: string, dataDir: string | undefined, fn: () => Promise<T>): Promise<T> {
   if (holdsSeriesLock()) return serializeContentWrite(id, fn);
-  return (async () => {
-    if (!(await inSeriesScope(id, dataDir))) {
-      const out = await serializeContentWrite(id, async () => (await inSeriesScope(id, dataDir)) ? RETRY_UNDER_SERIES_LOCK : fn());
-      if (out !== RETRY_UNDER_SERIES_LOCK) return out as T;
-    }
-    return seriesTransaction(() => serializeContentWrite(id, fn));
-  })();
+  // 调用当下就排进单稿队列，范围判断放到锁里：锁外先 await 读一次，谁先读完谁先排，
+  // 先调用的改稿会被后调用的旧快照抢到前面（CI 上 draft-match「共用队列」那条就是这么挂的）
+  const first = serializeContentWrite(id, async () => (await inSeriesScope(id, dataDir)) ? RETRY_UNDER_SERIES_LOCK : fn());
+  return first.then((out) => out !== RETRY_UNDER_SERIES_LOCK ? out as T : seriesTransaction(() => serializeContentWrite(id, fn)));
 }
 
 /** ProductionService 用：在稿件写锁里读 + 用不取锁的原语写（锁不可重入，别在里面再调 updateContent） */
@@ -643,6 +689,20 @@ export async function getTopic(id: string, dataDir?: string): Promise<Topic | nu
     return JSON.parse(raw);
   } catch {
     return null;
+  }
+}
+
+/** 严格读选题：不存在 → null；读不出或解析不了 → 抛（不把坏记录当成「没有这条选题」） */
+export async function getTopicStrict(id: string, dataDir?: string): Promise<Topic | null> {
+  if (!isTopicId(id)) return null;
+  const file = path.join(getDataDir(dataDir), "topics", `${id}.json`);
+  let raw: string;
+  try { raw = await fs.readFile(file, "utf-8"); } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  try { return JSON.parse(raw) as Topic; } catch (err) {
+    throw new Error(`选题记录 topics/${id}.json 读不出：${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -714,9 +774,15 @@ async function contentProjectDir(id: string, title: string, dataDir?: string, in
 }
 
 export async function saveContent(
-  content: Omit<Content, "id" | "createdAt" | "updatedAt" | "assets" | "versions" | "siblings" | "hashtags" | "publishedAt" | "publishUrl" | "performanceData"> & Partial<Pick<Content, "siblings" | "hashtags" | "publishedAt" | "publishUrl" | "performanceData">>,
+  input: Omit<Content, "id" | "createdAt" | "updatedAt" | "assets" | "versions" | "siblings" | "hashtags" | "publishedAt" | "publishUrl" | "performanceData"> & Partial<Pick<Content, "siblings" | "hashtags" | "publishedAt" | "publishUrl" | "performanceData">> & {
+    /** 谁在写这份正文（选题会卡口要看）；带真正文建稿却不标来源会被拒 */
+    _provenance?: WriteProvenance;
+  },
   dataDir?: string,
 ): Promise<Content> {
+  const { _provenance: provenance, ...content } = input;
+  // 选题会唯一卡口：带真正文新建 = 这篇稿的第一份正文
+  await guardFirstBody(null, { body: content.body, topicId: content.topicId, generatedPlaceholder: content.generatedPlaceholder }, provenance, dataDir);
   // 初始态也过阶段门（spec §1.2 收口）：from=to 时只有「这个阶段属不属于这种平台」会响，
   // 挡住的正是「把公众号稿直接建在剪辑阶段」这类跳阶段建稿。
   const initial = normalizeLegacyStatus(content.status);
@@ -725,9 +791,12 @@ export async function saveContent(
 
   const id = `content-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const now = new Date().toISOString();
+  // O20：示例选题下建的稿一律是示例稿——所有建稿路径都经过这里，不靠各入口各自记得
+  const example = content.example ?? (content.topicId ? (await getTopic(content.topicId, dataDir))?.example : undefined);
 
   const full: Content = {
     ...content,
+    ...(example ? { example: true } : {}),
     id,
     siblings: content.siblings ?? [],
     hashtags: content.hashtags ?? [],
@@ -822,6 +891,45 @@ async function listContentsRaw(dataDir?: string): Promise<Content[]> {
   return contents.map(withNormalizedStatus).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+export { TOPIC_PLACEHOLDER_BODY_PREFIX, isPlaceholderBody } from "./first-body-guard.js";
+import { guardFirstBody, topicPlaceholderBody, type WriteProvenance } from "./first-body-guard.js";
+
+/**
+ * 严格全量读（含已删）：任何一条读不出、解析不了就抛，不跳过。
+ * 给「读漏一条就会判错」的决策用（片单闸口：漏读一篇已有稿 ≠ 没有稿）。
+ */
+export async function listContentsStrict(dataDir?: string): Promise<Content[]> {
+  if (readProjectRegistry(dataDir)) {
+    const out: Content[] = [];
+    for (const id of await contentIds(dataDir)) {
+      const c = await getContent(id, dataDir);
+      if (!c) throw new Error(`稿件 ${id} 读不出`);
+      out.push(c);
+    }
+    return out;
+  }
+  const dir = path.join(getDataDir(dataDir), "contents");
+  let entries: import("node:fs").Dirent[];
+  try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+  const read = async (file: string, name: string): Promise<Content> => {
+    try { return withNormalizedStatus(JSON.parse(await fs.readFile(file, "utf-8"))); } catch (err) {
+      throw new Error(`稿件记录 contents/${name} 读不出：${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  // 同 listContents：目录里的 meta.json 优先，平铺的旧 <id>.json 只补目录里没有的 id
+  const byId = new Map<string, Content>();
+  for (const e of entries) if (e.isDirectory()) { const c = await read(path.join(dir, e.name, "meta.json"), `${e.name}/meta.json`); byId.set(c.id, c); }
+  for (const e of entries) {
+    if (e.isDirectory() || !e.name.endsWith(".json")) continue;
+    const c = await read(path.join(dir, e.name), e.name);
+    if (!byId.has(c.id)) byId.set(c.id, c);
+  }
+  return [...byId.values()];
+}
+
 /** 稿件移入回收站(软删除,可恢复)。不存在 → null */
 export async function softDeleteContent(id: string, dataDir?: string): Promise<Content | null> {
   return updateContent(id, { deletedAt: new Date().toISOString() }, dataDir);
@@ -879,6 +987,33 @@ export async function getContent(id: string, dataDir?: string): Promise<Content 
 }
 
 /**
+ * 严格读稿件：不存在 → null；读不出 / 解析不了 → 抛。不像 getContent 那样把坏记录当成「没有」，
+ * 也不在目录稿读坏时退回平铺旧副本（那份可能是过期的）。
+ */
+export async function getContentStrict(id: string, dataDir?: string): Promise<Content | null> {
+  if (!isContentId(id)) return null;
+  const parse = (raw: string, where: string): Content => {
+    try { return withNormalizedStatus(JSON.parse(raw)); } catch (err) {
+      throw new Error(`稿件记录 ${where} 读不出：${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+  if (readProjectRegistry(dataDir)) {
+    try { return await getContent(id, dataDir); } catch (err) {
+      if (isFileMissing(err)) return null;
+      throw err;
+    }
+  }
+  const projDir = contentDir(id, dataDir);
+  try { return parse(await fs.readFile(projectFile(projDir, "meta.json"), "utf-8"), `${id}/meta.json`); } catch (err) {
+    if (!isFileMissing(err)) throw err;
+  }
+  try { return parse(await fs.readFile(path.join(getDataDir(dataDir), "contents", `${id}.json`), "utf-8"), `${id}.json`); } catch (err) {
+    if (isFileMissing(err)) return null;
+    throw err;
+  }
+}
+
+/**
  * 状态在类型上就不许从这里写（阶段制 spec §1.2 收口）：`status` 的唯一写入通道是
  * `transitionStatus`——只有它在写锁内跑过阶段门。放开这里等于让任何一处 update 跳阶段。
  */
@@ -891,6 +1026,8 @@ export type ContentUpdates = Partial<Omit<Content, "status">> & {
    * 缺省按 agent 算 → 认稿随正文哈希失效。不进 meta。
    */
   _editor?: Editor;
+  /** 谁写的正文（选题会卡口）：第一份真正文不标来源会被拒；不进 meta */
+  _provenance?: WriteProvenance;
 };
 
 /** 收口通道内部用：全仓只有 `transitionStatusLocked` 能带 status 走这条路 */
@@ -914,6 +1051,15 @@ export function reviewContextHash(
 export async function updateContent(id: string, updates: ContentUpdates, dataDir?: string): Promise<Content | null> {
   if (!isContentId(id)) return null;
   return contentWrite(id, dataDir, () => updateContentLocked(id, updates, dataDir));
+}
+
+/** 锁内按当前稿算补丁再写（逐平台发布包这类「改一格、别的原样」的合并写） */
+export async function updateContentWith(id: string, patch: (current: Content) => ContentUpdates, dataDir?: string): Promise<Content | null> {
+  if (!isContentId(id)) return null;
+  return contentWrite(id, dataDir, async () => {
+    const current = await getContent(id, dataDir);
+    return current ? updateContentLocked(id, patch(current), dataDir) : null;
+  });
 }
 
 /**
@@ -1002,6 +1148,8 @@ async function updateContentLocked(id: string, updates: StatusfulUpdates, dataDi
     throw err;
   }
   const existing: Content = portableProjectRecord(JSON.parse(raw), projDir, true);
+  // 选题会唯一卡口：所有改正文的写口（含流转补丁、带期望正文的写）都汇到这里
+  await guardFirstBody(existing, { body: updates.body, topicId: "topicId" in updates ? updates.topicId : undefined }, updates._provenance, dataDir);
   const now = new Date().toISOString();
   // 本体钩子（§2.5 冻结、§13-C 认稿去留）：所有写正文的口都从这里过
   const scriptPlan = updates.body !== undefined
@@ -1056,7 +1204,7 @@ async function updateContentLocked(id: string, updates: StatusfulUpdates, dataDi
     if (!readProjectRegistry(dataDir)) await writeTextAtomic(projectFile(projDir, "versions", `v${nextVersion}.md`), versionEntry.body);
   }
 
-  const { _versionMeta: _dropVersionMeta, _editor: _dropEditor, ...fields } = updates;
+  const { _versionMeta: _dropVersionMeta, _editor: _dropEditor, _provenance: _dropProvenance, ...fields } = updates;
   const updated: Content = {
     ...existing,
     ...fields,
@@ -1396,7 +1544,7 @@ export async function getVersion(contentId: string, version: number, dataDir?: s
   }
 }
 
-export async function revertToVersion(contentId: string, version: number, dataDir?: string): Promise<Content | null> {
+export async function revertToVersion(contentId: string, version: number, dataDir: string | undefined, provenance: WriteProvenance | undefined): Promise<Content | null> {
   const [body, versions] = await Promise.all([
     getVersion(contentId, version, dataDir),
     listVersions(contentId, dataDir),
@@ -1405,7 +1553,7 @@ export async function revertToVersion(contentId: string, version: number, dataDi
   const target = versions.find((item) => item.version === version);
   return updateContent(
     contentId,
-    { body, ...(target?.title ? { title: target.title } : {}), _versionNote: `回滚到 v${version}` },
+    { body, ...(target?.title ? { title: target.title } : {}), _versionNote: `回滚到 v${version}`, _provenance: provenance },
     dataDir,
   );
 }
@@ -1620,6 +1768,8 @@ export interface TransitionOptions {
   expectedStatus?: ContentStatus;
   /** 在状态写锁内再次核对正文，避免审稿落盘后编辑器改稿再被旧结论推进。 */
   expectedDraft?: Pick<Content, "title" | "body" | "platform">;
+  /** 认稿时创始人看着的那一版正文的哈希（等你拍板 2a 整分支审 4 P1）：写锁内核对，别的会话改过就拒 */
+  expectedBodyHash?: string;
   diffNote?: string;
   /** 记这次交接的宿主（§4.1）。缺省时回落到当前认领人，再回落 `local-user` */
   host?: string;
@@ -1724,10 +1874,16 @@ async function transitionStatusLocked(
 ): Promise<TransitionResult> {
   const content = await getContent(contentId, dataDir);
   if (!content) return { ok: false, error: `Content ${contentId} not found` };
+  // 历史作品记录不走状态机——force（看板强推）也越不过
+  const history = historyRefusal(content);
+  if (history) return { ok: false, blocked: true, error: history };
 
   const currentStatus = normalizeLegacyStatus(content.status);
   const label = (s: ContentStatus) => CONTENT_STATUS_LABEL[s] ?? s;
 
+  if (opts?.expectedBodyHash && createHash("sha256").update(content.body ?? "").digest("hex") !== opts.expectedBodyHash) {
+    return { ok: false, staleDraft: true, error: "稿子刚改过，重新看一眼" };
+  }
   if (opts?.expectedDraft && (content.title !== opts.expectedDraft.title || content.body !== opts.expectedDraft.body || content.platform !== opts.expectedDraft.platform)) {
     return { ok: false, staleDraft: true, error: "稿件已变化，本次状态推进未应用；请重新审阅当前稿" };
   }
@@ -1767,6 +1923,8 @@ async function transitionStatusLocked(
   // 从范围外进入系列白名单状态才记时间；白名单内部流转（draft_ready→approved…）不算重新进入
   const entersSeries = SERIES_STATES.has(targetStatus) && !SERIES_STATES.has(currentStatus);
   const updates: StatusfulUpdates = { ...(patch ?? {}), status: targetStatus, ...(entersSeries ? { seriesEnteredAt: now } : {}) };
+  // 创始人的「定了」（薄路径 draftFinal）只对认稿状态作数：从认稿及之后拉回写稿段就清掉，交接不再认它
+  if (content.draftFinal && FOUNDER_ONLY_STATUSES.has(currentStatus) && !FOUNDER_ONLY_STATUSES.has(targetStatus)) updates.draftFinal = undefined;
 
   // 交接台账（§6.1）：五处里的三处是状态转换。写在锁内、与状态同一次落盘——
   // 分两次写就会出现「状态已推进但账没记」的中间态。
@@ -1841,7 +1999,7 @@ export async function describeAllowedTransitions(
 export async function createPlatformVariant(
   topicId: string,
   platform: string,
-  opts?: { title?: string; body?: string; writingSource?: Content["writingSource"] },
+  opts?: { title?: string; body?: string; writingSource?: Content["writingSource"]; provenance?: WriteProvenance },
   dataDir?: string,
 ): Promise<{ ok: boolean; content?: Content; error?: string }> {
   const topic = await getTopic(topicId, dataDir);
@@ -1860,15 +2018,18 @@ export async function createPlatformVariant(
   }
 
   // Create the new content
+  const placeholder = topicPlaceholderBody(topicId, topic.description ?? "");
   const content = await saveContent(
     {
       title: opts?.title || `${topic.title} (${platform})`,
-      body: opts?.body || `<!-- Generated from topic: ${topicId} -->\n\n${topic.description}`,
+      body: opts?.body || placeholder,
+      ...(opts?.body ? {} : { generatedPlaceholder: placeholder }),
       platform,
       topicId,
       status: "topic_saved",
       tags: [...topic.tags],
       ...(opts?.writingSource ? { writingSource: opts.writingSource } : {}),
+      ...(opts?.provenance ? { _provenance: opts.provenance } : {}),
     },
     dataDir,
   );

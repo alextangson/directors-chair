@@ -140,6 +140,8 @@ export interface VideoService {
   warmupAsr(): Promise<{ status: string }>;
   asrStatus(): Promise<{ status: string; detail?: string }>;
   shutdown(): Promise<void>;
+  /** 正在跑 + 排着的剪辑任务数（一键更新的忙碌判断用） */
+  busyCount(): number;
 }
 
 export interface VideoServiceOptions {
@@ -178,6 +180,11 @@ export function createVideoService(opts: VideoServiceOptions): VideoService {
     .then(() => runner.resumeCleanup())
     .then((n) => (n > 0 ? report(`${n} 篇成片的收尾清理没做完，已重排`) : undefined))
     .catch((err: unknown) => report(`启动回收失败：${String(err)}`));
+
+  // 预热归服务进程管：启动时读一次（允许恢复），上一个进程被重启打断的「预热中」当场改成就绪 / 失败，
+  // 不用等有人打开设置页；原片比对因此不会在每次更新重启后一直报「正在预热」（第 14 轮跟进）
+  void effectiveAsrStatus(dataDir, process.env, { recoverInterrupted: true })
+    .catch((err: unknown) => report(`读 ASR 预热状态失败：${String(err)}`));
 
   function serialize<T>(fn: () => Promise<T>): Promise<T> {
     const next = chain.then(fn, fn);
@@ -406,9 +413,11 @@ export function createVideoService(opts: VideoServiceOptions): VideoService {
       return { status: record.status };
     },
     asrStatus: async () => {
-      const record: AsrStatusRecord = await effectiveAsrStatus(dataDir);
+      // 服务自己读：只有这里可以把「上一个进程留下、没人认领的预热中」当中断改写（第 14 轮 P2）
+      const record: AsrStatusRecord = await effectiveAsrStatus(dataDir, process.env, { recoverInterrupted: true });
       return { status: record.status, ...(record.detail ? { detail: record.detail } : {}) };
     },
     shutdown: () => runner.shutdown(),
+    busyCount: () => runner.busyCount(),
   };
 }

@@ -27,7 +27,7 @@ export interface PlatformPublication {
   raw: string | null;
   /** 平台审核：reviewing / approved / rejected 之外的原值照写 */
   review: string | null;
-  /** 发布时间（定时的取定时时间，公开的取实际时间，手动的取标记时间） */
+  /** 发布时间（定时的取定时时间，公开的取实际时间，手动的取标记时间；审核中 / 被驳回的有定时取定时，没定时退回提交时间，仅供显示） */
   time: string | null;
   reason: string | null;
   url: string | null;
@@ -36,10 +36,19 @@ export interface PlatformPublication {
   /** 该平台上用的标题 / 平台作品 id：数据关联（§33）的额外匹配键 */
   title?: string | null;
   postId?: string | null;
+  /** 计划里这个平台实发的简介 / 标签（发布台「实发文案」） */
+  caption?: string | null;
+  tags?: string[];
   /** 发布前把关的 check_id（发布审查闸门：技能在计划里每个平台带上） */
   checkId?: string | null;
   /** 实际提交时间，只认计划里的 submitted_at（创始人 09-30 从严）；授权时间、定时公开时间都不算。发布前把关与重开后的轮次都按它判 */
   submittedAt?: string | null;
+  /** 计划里写的定时公开时间（publication.scheduled_at 或条目 scheduled_at） */
+  scheduledAt?: string | null;
+  /** 计划里明写的实际公开时间（只有 published_at）；没有 = 不知道 */
+  publishedAt?: string | null;
+  /** 把关判定用的证据时间：审核中 / 被驳回的按提交 → 核实 → 定时取最早能证明投出的那个，其余同 time */
+  evidenceAt?: string | null;
 }
 
 export type PublishRecord =
@@ -86,7 +95,8 @@ export function parsePlatformEntry(entry: unknown, now: number): PlatformPublica
   const state = stateOf(status, reviewRaw, scheduledAt, now);
   const time = state === "public" ? validTime(pub?.published_at) ?? validTime(pub?.verified_at)
     : state === "scheduled" || state === "overdue" ? scheduledAt
-    : state === "reviewing" || state === "rejected" ? validTime(pub?.submitted_at) ?? validTime(pub?.verified_at) ?? scheduledAt
+    // 审核中但已知定时：公开时间就是定时时间，提交时间只进 submittedAt（2026-10-03 抖音审核中被按提交时间算成 9 月发布）
+    : state === "reviewing" || state === "rejected" ? scheduledAt ?? validTime(pub?.submitted_at) ?? validTime(pub?.verified_at)
     : null;
   return {
     platform, state, raw: status,
@@ -96,8 +106,12 @@ export function parsePlatformEntry(entry: unknown, now: number): PlatformPublica
     reason: state === "rejected" ? str(pub?.reject_reason) ?? str(pub?.reason) ?? str(pub?.evidence) : null,
     url: str(pub?.url) ?? str(pub?.post_url),
     campaigns: campaignsOf(entry), manual: null,
-    title: str(entry.title), postId: str(pub?.post_id) ?? str(entry.post_id), checkId: str(entry.check_id) ?? str(pub?.check_id),
+    title: str(entry.title), caption: str(entry.caption), tags: Array.isArray(entry.tags) ? entry.tags.map(str).filter((t): t is string => Boolean(t)) : [], postId: str(pub?.post_id) ?? str(entry.post_id), checkId: str(entry.check_id) ?? str(pub?.check_id),
     submittedAt: validTime(pub?.submitted_at),
+    scheduledAt,
+    // 只认计划里明写的公开时间（verified_at 是核实时间，不冒充公开时间）
+    publishedAt: state === "public" ? validTime(pub?.published_at) : null,
+    evidenceAt: state === "reviewing" || state === "rejected" ? validTime(pub?.submitted_at) ?? validTime(pub?.verified_at) ?? scheduledAt : time,
   };
 }
 

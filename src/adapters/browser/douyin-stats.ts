@@ -1,57 +1,37 @@
 /**
- * 抖音创作者后台数据拉取 —— **CDP 网络拦截**路线(spec §4.2 传输策略总表)。
+ * 抖音创作者后台数据回流 —— **旁听**(规格 docs/2026-10-03-metrics-pull-human-like-spec.md)。
  *
- * 为什么不像视频号那样 in-page fetch:抖音接口带 `msToken`/`a_bogus` 签名,裸 fetch 缺参
- * 会被风控打回 `status_code: 8`。所以改成旁听——打开作品管理页,让页面自己带齐签名去请求,
- * 我们只在 `Network.responseReceived` 上接住它的 JSON 响应,解析后关页。
+ * 打开作品管理页,页面自己带齐签名去请求作品列表,我们只接住它收到的 JSON 响应;要更多就像人一样往下滚
+ * (列表是无限滚动),每次滚动前随机停 2–6 秒。代码不向抖音后台发任何请求。
  *
- * 三个坑(端点文档 §1,来源为社区仓库,**待真实抓包校准**):
- * ① `items[].id` 是超长 JSON number,`JSON.parse` 直接丢精度 → 解析前先把它包成字符串;
- * ② `metrics.*` 数值全是字符串 → 统一 `Number()` + NaN 防御(`toCount`);
- * ③ 登录判定:信封 `status_code: 8` = 未登录/风控;什么都没拦到时用 DOM 兜底
- *    (页面文本命中「扫码登录」= needs_login),**URL/title 不可靠**,不拿它们判。
- *
- * 状态判定矩阵见文件末 `pullDouyinStats` 的注释。
+ * 坑(端点文档 §1):① `items[].id` 是超长 JSON number → 解析前先包成字符串;② `metrics.*` 全是字符串 →
+ * `toCount` 统一转;③ 信封 `status_code: 8` = 未登录。
  */
-import { connectWithEventTap, waitForEvent, type CdpEvent, type EventTap } from "./cdp-network-tap.js";
+import type { CapturedResponse } from "./ego-session.js";
 import type { OutcomeMetrics } from "../../modules/flywheel/outcome-schema.js";
 import type { PullResult, TypedRow } from "./pull-types.js";
-import {
-  PAGE_ROW_LIMIT,
-  assign,
-  classifyThrown,
-  failure,
-  firstString,
-  idOf,
-  isRecord,
-  isoFromSeconds,
-  keepValidRows,
-  looksLikeHtml,
-  okResult,
-  parseJsonSafe,
-  protectLongNumbers,
-  schemaChanged,
-  sleep,
-  withTab,
-} from "./pull-shared.js";
+import { assign, envelopeOf, failure, firstString, idOf, isRecord, isoFromSeconds, protectLongNumbers, schemaChanged } from "./pull-shared.js";
+import { runPassivePull, type PageParse, type PassivePlatform, type PassivePullOptions } from "./passive-pull.js";
+import { LOGIN_TEXT_COMMON, RISK_TEXT_COMMON, RISK_URL_COMMON } from "./gates.js";
 
 /** 作品管理页:页面自己会去打列表接口,我们只旁听 */
 export const DOUYIN_MANAGE_URL = "https://creator.douyin.com/creator-micro/content/manage";
-/** 现行主路 + 旧路(端点文档说两套并存,社区仓库互相矛盾 → 都认) */
-const LIST_URL_PATTERNS = ["/web/api/creator/item/list", "/janus/douyin/creator/pc/work_list"];
-/** 拦截等待窗口:页面加载 + 首个列表响应 */
-const DEFAULT_WAIT_MS = 20_000;
-/** 首个响应命中后再等一会儿,接住页面自己发的后续分页请求 */
-const DEFAULT_SETTLE_MS = 1_500;
-/** 信封:未登录/风控 */
+/** 现行主路 + 旧路(两套并存 → 都认) */
+export const LIST_URL_PATTERNS = ["/web/api/creator/item/list", "/janus/douyin/creator/pc/work_list"];
+/** 信封:未登录 */
 const ENVELOPE_NOT_LOGGED_IN = 8;
 
-export function isDouyinListUrl(url: string): boolean {
-  return LIST_URL_PATTERNS.some((p) => url.includes(p));
-}
-
-/** 抖音会丢精度的 id 字段(端点文档 §1 坑 ①) */
+/** 抖音会丢精度的 id 字段 */
 const DOUYIN_ID_KEYS = ["id", "item_id", "aweme_id", "group_id", "object_id"];
+
+/**
+ * 作品 id 取值顺序（2026-10-03 真实 work_list 抓包核实）：旧路 `aweme_list[].item_id` 在**响应原文里**
+ * 就已是被抖音截成 …000 的数字，文本层保护救不回来；完整 id 只在字符串字段 `aweme_id` / `id_str`
+ * 和主路 `items[].id`（原文完整、靠 protectBigIntIds 保位）里。所以字符串字段优先，item_id 垫底。
+ */
+function douyinItemId(base: Bag): string {
+  return idOf(base.aweme_id, base.id_str, base.id, base.item_id);
+}
 
 /** 精度保护:`"id":7412345678901234567` 过 `JSON.parse` 会变成 7412345678901234000 */
 export function protectBigIntIds(text: string): string {
@@ -79,7 +59,10 @@ function mapItem(base: Bag, metricBags: Bag[]): TypedRow {
   assign(metrics, "completionRate", pick("completion_rate"));
   assign(metrics, "completion5s", pick("completion_rate_5s"));
   assign(metrics, "coverClickRate", pick("cover_click_rate"));
-  const id = idOf(base.id, base.item_id, base.aweme_id);
+  assign(metrics, "bounce2s", pick("bounce_rate_2s"));
+  assign(metrics, "avgWatchSeconds", pick("avg_view_second"));
+  assign(metrics, "fanViewShare", pick("fan_view_proportion"));
+  const id = douyinItemId(base);
   const coverUrl = coverUrlOf(base);
   return {
     title: firstString(base.item_title, base.description, base.desc, base.title),
@@ -108,11 +91,21 @@ function bagOf(v: unknown): Bag {
   return isRecord(v) ? v : {};
 }
 
-/** 旧路 work_list:`aweme_list[]` 出基础字段与计数,率类指标在同索引的 `items[].metrics` */
+/**
+ * 旧路 work_list:`aweme_list[]` 出基础字段与计数,率类指标在 `items[].metrics`。
+ * 两个数组**不同长也不同序**(2026-10-03 抓包:aweme_list 含定时未发的作品,items 只有已发的),
+ * 只按作品 id 配对;配不上就不取率类指标,绝不按索引猜(按索引会把别的作品的完播率安到这条上)。
+ */
 function rowsFromLegacy(awemeList: unknown[], items: unknown[]): TypedRow[] {
-  return awemeList.map((entry, i) => {
+  const byId = new Map<string, Bag>();
+  for (const it of items) {
+    const bag = bagOf(it);
+    const id = douyinItemId(bag);
+    if (id) byId.set(id, bag);
+  }
+  return awemeList.map((entry) => {
     const base = bagOf(entry);
-    const paired = bagOf(items[i]);
+    const paired = byId.get(douyinItemId(base)) ?? {};
     return mapItem(base, [bagOf(base.statistics), bagOf(paired.metrics), base]);
   });
 }
@@ -125,183 +118,66 @@ function rowsFromItems(items: unknown[]): TypedRow[] {
   });
 }
 
-export type DouyinParse =
-  | { kind: "ok"; rows: TypedRow[]; hasMore: boolean }
-  /** 非 ok:直接就是最终 PullResult(rows 恒空 = 零写入) */
-  | { kind: "stop"; result: PullResult };
-
 /**
- * 解析一条拦截到的列表响应(纯函数,fixture 单测锚定)。
+ * 解析页面收到的一条列表响应(纯函数,fixture 单测锚定)。
  * 任何一步不认得的形状 → `schema_changed` + 空 rows,绝不猜。
  */
-export function parseDouyinItemList(bodyText: string): DouyinParse {
-  if (looksLikeHtml("", bodyText)) return { kind: "stop", result: failure("schema_changed", "html_response:item_list") };
-  const parsed = parseJsonSafe(protectBigIntIds(bodyText));
-  if (!parsed.ok) return { kind: "stop", result: failure("schema_changed", "json_parse:item_list") };
-  if (!isRecord(parsed.value)) return { kind: "stop", result: schemaChanged("item_list.envelope") };
-  const json = parsed.value;
-
+export function parseDouyinItemList(resp: CapturedResponse): PageParse {
+  const env = envelopeOf(resp, "item_list", DOUYIN_ID_KEYS);
+  if (!env.ok) return { kind: "stop", result: env.result };
+  const json = env.json;
   const statusCode = typeof json.status_code === "number" ? json.status_code : 0;
   if (statusCode === ENVELOPE_NOT_LOGGED_IN) {
     return { kind: "stop", result: failure("needs_login", `envelope:${ENVELOPE_NOT_LOGGED_IN}`) };
   }
   if (statusCode !== 0) return { kind: "stop", result: failure("error", `envelope:${statusCode}`) };
-
   const awemeList = json.aweme_list;
   const items = json.items;
-  let rows: TypedRow[];
-  if (Array.isArray(awemeList)) rows = rowsFromLegacy(awemeList, Array.isArray(items) ? items : []);
-  else if (Array.isArray(items)) rows = rowsFromItems(items);
-  else return { kind: "stop", result: schemaChanged("items") };
-
-  return { kind: "ok", rows, hasMore: json.has_more === true || json.has_more === 1 };
-}
-
-/** 多条拦截响应合并:任一条判出终止态就整体终止(未登录优先于「解析不出」) */
-export function mergeDouyinParses(parses: DouyinParse[], limit = PAGE_ROW_LIMIT): PullResult & { rejected?: number } {
-  const stops = parses.filter((p): p is Extract<DouyinParse, { kind: "stop" }> => p.kind === "stop");
-  const oks = parses.filter((p): p is Extract<DouyinParse, { kind: "ok" }> => p.kind === "ok");
-  if (oks.length === 0) {
-    const login = stops.find((s) => s.result.status === "needs_login");
-    return login?.result ?? stops[0]?.result ?? schemaChanged("items");
-  }
-  const merged: TypedRow[] = [];
-  const seen = new Set<string>();
-  let rejected = 0;
-  let hasMore = false;
-  for (const ok of oks) {
-    const valid = keepValidRows(ok.rows);
-    rejected += valid.rejected;
-    for (const row of valid.rows) {
-      const key = row.platformItemId ?? `${row.title}@${row.publishedAt ?? ""}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      merged.push(row);
-    }
-    hasMore = hasMore || ok.hasMore;
-  }
-  return { ...okResult(merged.slice(0, limit), hasMore || merged.length > limit), rejected };
-}
-
-/** CDP 能力面(结构上由 CdpSession 满足);测试塞桩,不连浏览器 */
-export interface DouyinCdp {
-  cmd(method: string, params?: Record<string, unknown>, sessionId?: string): Promise<Record<string, unknown>>;
-  eval(expression: string, sessionId: string, awaitPromise?: boolean): Promise<unknown>;
-  openTab(url: string): Promise<{ targetId: string; sessionId: string }>;
-  closeTarget(targetId: string): Promise<void>;
-  close(): void;
-}
-
-export interface PullDouyinOptions {
-  waitMs?: number;
-  settleMs?: number;
-  limit?: number;
-  /** 测试注入点:默认连常驻 chrome-cdp */
-  connect?: () => Promise<{ session: DouyinCdp; tap: EventTap }>;
-}
-
-/** 收集命中的 requestId(页面可能连打好几个列表请求,全接住) */
-function collectListRequests(tap: EventTap, sessionId: string): { ids: string[]; stop: () => void } {
-  const ids: string[] = [];
-  const stop = tap.on((ev: CdpEvent) => {
-    if (ev.method !== "Network.responseReceived") return;
-    if (ev.sessionId && ev.sessionId !== sessionId) return;
-    const res = isRecord(ev.params.response) ? ev.params.response : {};
-    const url = typeof res.url === "string" ? res.url : "";
-    const requestId = typeof ev.params.requestId === "string" ? ev.params.requestId : "";
-    if (requestId && isDouyinListUrl(url) && !ids.includes(requestId)) ids.push(requestId);
-  });
-  return { ids, stop };
-}
-
-async function readBody(cdp: DouyinCdp, sessionId: string, requestId: string): Promise<string | null> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const r = await cdp.cmd("Network.getResponseBody", { requestId }, sessionId);
-      const body = typeof r.body === "string" ? r.body : "";
-      return r.base64Encoded === true ? Buffer.from(body, "base64").toString("utf8") : body;
-    } catch {
-      // 响应体还没进缓冲区是常态,退一步再取;两次都拿不到就当这条没拦到
-      await sleep(300);
-    }
-  }
-  return null;
+  if (Array.isArray(awemeList)) return { kind: "ok", rows: rowsFromLegacy(awemeList, Array.isArray(items) ? items : []) };
+  if (Array.isArray(items)) return { kind: "ok", rows: rowsFromItems(items) };
+  return { kind: "stop", result: schemaChanged("items") };
 }
 
 /**
- * DOM 兜底(只在**什么都没拦到**时才用):页面文本命中登录墙 = needs_login,否则 timeout。
- * 页面文本只用于判定,**永不进 errorCode**(spec §4.1 脱敏红线)。
+ * 在 ego 子进程里跑(自包含,不能引用外部符号):这一页最早的作品发布时间 + 平台说还有没有下一页
+ * + 信封终止态(status_code 8 = 未登录 → 立刻停,不再滚)。
+ * 决定还滚不滚;判不出就返回 null,交给 3 页上限兜底。
  */
-async function probeLoginByDom(cdp: DouyinCdp, sessionId: string): Promise<PullResult> {
-  try {
-    const raw = await cdp.eval("document.body ? document.body.innerText.slice(0,4000) : ''", sessionId);
-    const text = typeof raw === "string" ? raw : "";
-    if (/扫码登录|手机号登录|请先登录|登录后查看/.test(text)) return failure("needs_login", "dom_login_wall");
-    return failure("timeout", "no_list_response");
-  } catch {
-    return failure("timeout", "dom_probe_failed");
+export const DOUYIN_INSPECT_SRC = `(responses) => {
+  let oldest = null, more = null, terminal = null;
+  for (const r of responses) {
+    let j; try { j = JSON.parse(r.body); } catch { continue; }
+    if (j && j.status_code === 8) terminal = "login";
+    const list = Array.isArray(j.aweme_list) ? j.aweme_list : Array.isArray(j.items) ? j.items : [];
+    for (const it of list) { const t = Number(it && it.create_time); if (t > 0 && (oldest === null || t * 1000 < oldest)) oldest = t * 1000; }
+    if (j.has_more === true || j.has_more === 1) more = true; else if (more === null && (j.has_more === false || j.has_more === 0)) more = false;
   }
-}
+  return { oldestMs: oldest, hasMore: more, terminal };
+}`;
 
-async function pullInTab(cdp: DouyinCdp, tap: EventTap, tab: { sessionId: string }, opts: PullDouyinOptions): Promise<PullResult> {
-  const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
-  const settleMs = opts.settleMs ?? DEFAULT_SETTLE_MS;
-  await cdp.cmd("Network.enable", {}, tab.sessionId);
-  const collector = collectListRequests(tap, tab.sessionId);
-  try {
-    await cdp.cmd("Page.navigate", { url: DOUYIN_MANAGE_URL }, tab.sessionId);
-    if (collector.ids.length === 0) {
-      // 收集器在导航前就订阅了,`waitForEvent` 在导航后才订阅——两者之间到达的响应只有
-      // 收集器看得见。所以等完之后再问一次收集器,别把已经拦到的当成「什么都没拦到」。
-      await waitForEvent(
-        tap,
-        (ev) => ev.method === "Network.responseReceived" && isDouyinListUrl(String(bagOf(ev.params.response).url ?? "")),
-        waitMs,
-      );
-    }
-    // 窗口内一条都没拦到:先分清是登录墙还是慢/接口没发
-    if (collector.ids.length === 0) return await probeLoginByDom(cdp, tab.sessionId);
-    await sleep(settleMs);
-    const parses: DouyinParse[] = [];
-    for (const requestId of collector.ids) {
-      const body = await readBody(cdp, tab.sessionId, requestId);
-      if (body !== null) parses.push(parseDouyinItemList(body));
-    }
-    // 拦到了事件却一个响应体都读不出来 → 归 timeout(不是接口漂移,别误报 canary)
-    if (parses.length === 0) return failure("timeout", "response_body_unavailable");
-    return mergeDouyinParses(parses, opts.limit ?? PAGE_ROW_LIMIT);
-  } finally {
-    collector.stop();
-  }
-}
+export const DOUYIN_PLATFORM: PassivePlatform = {
+  label: "douyin",
+  url: DOUYIN_MANAGE_URL,
+  patterns: LIST_URL_PATTERNS,
+  gates: { riskUrl: RISK_URL_COMMON, loginText: LOGIN_TEXT_COMMON, riskText: RISK_TEXT_COMMON },
+  next: { kind: "scroll" },
+  inspectSrc: DOUYIN_INSPECT_SRC,
+  parseResponse: parseDouyinItemList,
+};
 
 /**
- * 抓取抖音作品数据。状态判定矩阵:
+ * 抓取抖音作品数据。状态判定:
  *
  * | 输入 | 状态 |
  * |---|---|
- * | 拦到列表响应,`status_code:0` + `items`/`aweme_list` 合法 | `ok`(行超 200 → `hasMore:true`) |
- * | 拦到列表响应,`status_code:8` | `needs_login` |
- * | 拦到列表响应,`status_code` 其他非 0 | `error`(`envelope:<码>`) |
- * | 拦到了,但 HTML 伪装 200 / JSON 解析失败 / 无 `items` 与 `aweme_list` | `schema_changed` + 空 rows |
- * | 窗口内什么都没拦到,页面文本有「扫码登录」 | `needs_login` |
- * | 窗口内什么都没拦到,页面文本无登录线索 | `timeout` |
- * | 拦到事件但响应体两次都读不出 | `timeout` |
- * | chrome-cdp 连不上/连接断开 | `browser_unreachable` |
+ * | 收到列表响应,`status_code:0` + `items`/`aweme_list` 合法 | `ok` |
+ * | 收到列表响应,`status_code:8` | `needs_login` |
+ * | 收到列表响应,`status_code` 其他非 0 | `error`(`envelope:<码>`) |
+ * | HTML 伪装 / JSON 解析失败 / 无 `items` 与 `aweme_list` | `schema_changed` + 空 rows |
+ * | 等不到列表响应,页面是登录墙 / 风控页 | `needs_login` / `risk_control` |
+ * | 等不到列表响应,也不是登录墙 | `error`(`no_data_response`) |
+ * | 其余(通道故障、超时、中途出错、翻页)见 passive-pull.judgeBrowse | |
  */
-export async function pullDouyinStats(opts: PullDouyinOptions = {}): Promise<PullResult> {
-  let deps: { session: DouyinCdp; tap: EventTap };
-  try {
-    deps = await (opts.connect ?? connectWithEventTap)();
-  } catch (err) {
-    return classifyThrown(err);
-  }
-  try {
-    // 先开空白页再导航:Network.enable 必须早于页面发出列表请求,否则拦了个寂寞
-    return await withTab(deps.session, "about:blank", (tab) => pullInTab(deps.session, deps.tap, tab, opts));
-  } catch (err) {
-    return classifyThrown(err);
-  } finally {
-    deps.session.close();
-  }
+export function pullDouyinStats(opts: PassivePullOptions = {}): Promise<PullResult> {
+  return runPassivePull(DOUYIN_PLATFORM, opts);
 }

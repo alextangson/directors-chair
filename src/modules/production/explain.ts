@@ -9,7 +9,7 @@ import { bodyHash, scriptApprovalFor } from "../../storage/production-store.js";
 import { emptyProductionDoc, type ProductionDoc } from "../../storage/production-types.js";
 import { isVideoPlatform } from "../../storage/stage-guard.js";
 import type { LegacyImport } from "./legacy.js";
-import { candidatesOf, deriveStage, UNREGISTERED_PUBLISH, writingBadge, type CandidateView, type PublishEvidence, type Rule, type Stage } from "./derive.js";
+import { candidatesOf, deriveStage, publishReceipts, UNREGISTERED_PUBLISH, writingBadge, type CandidateView, type PublishEvidence, type Rule, type Stage } from "./derive.js";
 
 export type Column = "写稿中" | "待录制" | "剪辑中" | "待发布" | "已发布";
 
@@ -32,6 +32,8 @@ export interface Explanation {
   candidates: CandidateView[];
   publishable: boolean;
   evidence: string[];
+  /** 只有发布回执、本轮没有对当前正文的认稿（导入的、先剪后认的）：照样已发布，只提醒不挡（吸收 5） */
+  no_script_approval?: boolean;
   /** 未启用时：推导出来会是什么（启用前的差异清单读它） */
   shadow?: Explanation;
 }
@@ -106,17 +108,43 @@ function legacyRegisteredNote<T extends { rule: string | null; alerts: string[];
   return recut ? { ...r, alerts: [LEGACY_REGISTERED_RECUT, ...alerts] } : { ...r, alerts, badges: [LEGACY_REGISTERED, ...r.badges] };
 }
 
+/** 本轮原片的提示（停用前自动挂上的那些）：只加 badge，不影响阶段 */
+export function arollBadges(doc: ProductionDoc): string[] {
+  const out: string[] = [];
+  for (const f of doc.facts.filter((x) => x.round === doc.round && x.kind === "aroll" && x.state === "accepted")) {
+    if (f.auto_attached) out.push(f.source === "reconcile" ? "从收件箱自动挂上，不对就点「不是」" : "核对后自动挂上，不对就点「不是」");
+  }
+  return out;
+}
+
 /** 本体规则下的结果（不管启没启用） */
 export function deriveExplanation(input: ExplainInput): Explanation {
   const { content, doc, publish } = input;
-  if (content.deletedAt || content.status === "archived" || content.status === "topic_saved") return nonProduction(null, "other", null);
-  if (!isVideoPlatform(content.platform)) return nonProduction(legacyColumn(content, publish), "other", null);
+  if (content.deletedAt || content.status === "archived") return nonProduction(null, "other", null);
+  if (!isVideoPlatform(content.platform)) return content.status === "topic_saved" ? nonProduction(null, "other", null) : nonProduction(legacyColumn(content, publish), "other", null);
   const d = doc ?? emptyProductionDoc();
+  const approved = Boolean(scriptApprovalFor(d, content.body ?? ""));
+  // 只有回执、没有认稿（吸收 5）：列 = 已发布，标「没走认稿」；不冻结、不补认稿、不改正文。topic_saved 只在有已投出回执时才上看板
+  // 全部被驳回也要先判（吸收 12）：不然最后一个已投出的被驳回就掉回写稿中，红字和「重新提交」都没了
+  const rc = publishReceipts(d);
+  if (!approved && (rc.live.length || (rc.rejected.length && !rc.pending.length))) return noApprovalPublished(d, content);
+  if (content.status === "topic_saved") return nonProduction(null, "other", null);
   // 写稿段也把候选带出来：认稿前发现的疑似 A-roll 要在卡上看得见（E4）
-  if (!scriptApprovalFor(d, content.body ?? "")) return { ...nonProduction("写稿中", "writing", writingBadge(d)), candidates: candidatesOf(d) };
+  if (!approved) {
+    const w = nonProduction("写稿中", "writing", writingBadge(d));
+    return { ...w, badges: [...w.badges, ...arollBadges(d)], candidates: candidatesOf(d) };
+  }
   const r = legacyRegisteredNote(deriveStage(d, content.body ?? "", publish), d, content);
-  const badges = content.status === "publishing" && r.stage !== "已发布" ? [...r.badges, "发布中"] : r.badges;
+  const badges = [...(content.status === "publishing" && r.stage !== "已发布" ? [...r.badges, "发布中"] : r.badges), ...(r.stage === "已发布" ? [] : arollBadges(d))];
   return { column: r.stage, phase: "production", stage: r.stage, rule: r.rule, status: STAGE_STATUS[r.stage], missing: r.missing, badges, alerts: r.alerts, reason: r.reason, candidates: r.candidates, publishable: r.publishable, evidence: r.evidence };
+}
+
+export const NO_SCRIPT_APPROVAL = "没走认稿";
+
+function noApprovalPublished(d: ProductionDoc, content: ExplainInput["content"]): Explanation {
+  const r = legacyRegisteredNote(deriveStage(d, content.body ?? "", { verified: false }), d, content);
+  return { column: r.stage, phase: "production", stage: r.stage, rule: r.rule, status: STAGE_STATUS[r.stage], missing: r.missing, badges: [NO_SCRIPT_APPROVAL, ...r.badges],
+    alerts: r.alerts, reason: r.reason, candidates: r.candidates, publishable: false, evidence: r.evidence, no_script_approval: true };
 }
 
 export function explain(input: ExplainInput): Explanation {

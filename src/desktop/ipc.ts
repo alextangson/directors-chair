@@ -1,4 +1,5 @@
 import { getStorageSettings, previewStorageSettings, setStorageSettings, cancelStorageSettings } from "./settings-storage.js";
+import { deleteExampleTopic } from "../tools/topic-create.js";
 /**
  * IPC contract + handler registry for the Electron desktop shell.
  *
@@ -74,15 +75,15 @@ import { getStorageSettings, previewStorageSettings, setStorageSettings, cancelS
  *   content:asset_remove { content_id, filename }
  *   today:summary       {}
  */
-import { getChiefEditor } from "./chief-editor/service.js";
-import { routeRetryToAgent } from "./chief-editor/retry-route.js";
+import { beginWork } from "../modules/update/active-work.js";
+import { LONG_RUNNING_CHANNELS } from "../modules/update/long-running.js";
 import { buildDispatchContext, parseDispatch } from "./dispatch-context.js";
-import { isLocalBackend } from "./chief-editor/backends.js";
-import { resolveTurnBackend, maybeRunLocalTurn, agentBackendsHandler, agentPendingHandler, agentAnswerHandler, agentSettingsHandler, conversationRenameHandler } from "./chief-editor/ipc-handlers.js";
+import { conversationRenameHandler } from "./conversation-handlers.js";
 import { buildTodaySummary } from "./today-summary.js";
 import { buildDashboardSummary } from "./dashboard-summary.js";
 import { executeFlywheel } from "../tools/flywheel.js";
 import { startGenerateScript, retryGenerateScript } from "../modules/writing/generate-script.js";
+import { recordFounderAngle, ANGLE_GATE_COPY, aiContentWriteRefusal, founderDirectionFor, newDraftAngleRefusal } from "../modules/research/angle-gate.js";
 import { listWorkspaces, createWorkspace, switchWorkspace } from "./workspace-store.js";
 import { executeStyle } from "../tools/style.js";
 import { executeContentSave } from "../tools/content-save.js";
@@ -140,13 +141,14 @@ import {
 import { testEngineRoute } from "./settings-probe.js";
 import { getEngineHealth } from "./engine-health.js";
 import { hostsListHandler, hostsRevokeHandler } from "./host-tokens.js";
-import { connectWorkbuddy, workbuddyInstalled, WORKBUDDY_HOST } from "./workbuddy-connect.js";
+import { WORKBUDDY_HOST } from "./workbuddy-connect.js";
 import { wechatPullHandler } from "./wechat-pull.js";
 import {
   pullStatusHandler,
   pullNowHandler,
   pullToggleHandler,
 } from "./metrics-pull-handlers.js";
+import { ledgerHandler } from "./ledger-handler.js";
 import { emitEngineEvent, readRecentEvents } from "./event-hub.js";
 import { makeEnsureBrief } from "./write-research-gate.js";
 import { claimJob, releaseJob, holdJobUntilSettled, GENERATE_JOB_KEY } from "./job-claims.js";
@@ -172,7 +174,7 @@ import {
   inboxDigestSendNowHandler,
 } from "./inbox-handlers.js";
 import { getInboxSettings, setInboxSettings } from "./settings-inbox.js";
-import { getVideoSettings, setVideoSettings } from "./settings-video.js";
+import { getVideoSettings, setVideoSettingsViaInvoke } from "./settings-video.js";
 import {
   videoAsrStatusHandler,
   videoAsrWarmupHandler,
@@ -257,6 +259,8 @@ import {
   campaignSetAutonomyHandler,
   campaignTransitionHandler,
 } from "./campaign-handlers.js";
+import { provenanceFromAuth } from "../storage/first-body-guard.js";
+import { DRAFT_IPC_HANDLERS } from "./draft-handlers.js";
 
 // ── Contract ─────────────────────────────────────────────────────────────────
 // Channel list lives in channels.ts (dependency-free so the sandboxed preload
@@ -275,6 +279,8 @@ export type IpcHandlerContext = {
   onChatDelta?: (e: { turnId: string; seq: number; ev: "delta" | "reset" | "done"; text?: string }) => void;
   requestApproval?: (binding: ApprovalBinding) => { token: string; expiresAt: string };
   consumeApproval?: (token: string, binding: ApprovalBinding) => { ok: true } | { ok: false; error: string };
+  /** 调用方怎么认证的：session = 浏览器里登录的人；bearer = 令牌（宿主/模型也拿得到） */
+  authMethod?: "session" | "bearer";
 };
 export type IpcHandler = (
   payload: Record<string, unknown>,
@@ -318,7 +324,7 @@ export const CHANNEL_ACTIONS = {
  * Exported for action-injection testability.
  */
 export function wrapExecute(fn: ExecuteFn, action: string): IpcHandler {
-  return async (payload: Record<string, unknown>): Promise<Record<string, unknown>> => {
+  return async (payload: Record<string, unknown>, ctx?: IpcHandlerContext): Promise<Record<string, unknown>> => {
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
       return {
         ok: false,
@@ -326,7 +332,8 @@ export function wrapExecute(fn: ExecuteFn, action: string): IpcHandler {
       };
     }
     try {
-      return await fn({ ...payload, action });
+      // 写正文的来源按可信的认证方式注入（会话 = 人，令牌 = 模型），不信 payload 自带的标记
+      return await fn({ ...payload, action, _provenance: provenanceFromAuth(ctx?.authMethod) });
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -526,18 +533,41 @@ async function publishWechatDraftApprovedHandler(
 
 // ── generate:script — 后台化写稿（契约 P1:任务生命周期与 HTTP 请求解耦） ─────
 
+/**
+ * 只配了引擎钥匙的试跑（onboarding-connect O19）：命令行带上创始人原话 + 立意，先记成创始人自定角度再过选题会闸口。
+ * 两样缺一样就不记（闸口照常拒）；选题不存在照实报。
+ */
+export async function founderAngleFromPayload(topicId: string | undefined, payload: Record<string, unknown>, dataDir?: string): Promise<Record<string, unknown> | null> {
+  const direction = typeof payload.direction === "string" ? payload.direction.trim() : "";
+  const words = typeof payload.founder_words === "string" ? payload.founder_words.trim() : "";
+  if (!topicId || !direction || !words) return null;
+  const topic = await getTopic(topicId, dataDir);
+  if (!topic || topic.deletedAt) return { ok: false, code: "topic_not_found", error: `选题不存在或已删除：${topicId}` };
+  if (!await recordFounderAngle(topic, direction, words, dataDir)) return { ok: false, code: "angle_failed", error: "立意没记上：选题记录写不进去" };
+  return null;
+}
+
 async function generateBackgroundHandler(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
     return { ok: false, error: "Invalid payload: expected object" };
   }
   const dataDir = (payload._dataDir as string) || undefined;
+  // 选题会闸口：后台写稿每次都开新稿，选题必须先开过选题会、由创始人定了角度
+  const topicId = typeof payload.topic_id === "string" && payload.topic_id ? payload.topic_id : undefined;
+  const angled = await founderAngleFromPayload(topicId, payload, dataDir);
+  if (angled) return angled;
+  const refused = await newDraftAngleRefusal(topicId, dataDir);
+  if (refused) return refused;
+  // 创始人最近一次是自定角度：按他那句写
+  const founderDirection = await founderDirectionFor(topicId, dataDir);
   try {
     const started = await startGenerateScript(
       {
         topic: String(payload.topic ?? ""),
         platform: payload.platform as never,
         research: typeof payload.research === "string" ? payload.research : undefined,
-        topicId: typeof payload.topic_id === "string" && payload.topic_id ? payload.topic_id : undefined,
+        topicId,
+        ...(founderDirection ? { direction: founderDirection } : {}),
         // 缺省启用；只有显式 false 才关掉对标拆解卡注入（收件箱设计 §3.5）
         ...(payload.use_patterns === false ? { usePatterns: false } : {}),
       },
@@ -568,10 +598,9 @@ async function generateRetryHandler(payload: Record<string, unknown>): Promise<R
   const contentId = typeof payload.content_id === "string" ? payload.content_id.trim() : "";
   if (!contentId) return { ok: false, error: "generate:retry 需要 content_id" };
   const dataDir = (payload._dataDir as string) || undefined;
-  // 本机 agent 写到一半中断的稿：回原对话由同一个本机后端接着写，不走内置引擎（v1.2 §4）
-  const retryClient = typeof payload.client_id === "string" && payload.client_id ? payload.client_id : undefined;
-  const routed = await routeRetryToAgent(contentId, getDataDir(dataDir), retryClient);
-  if (routed) return routed;
+  // 选题会闸口：重写一张空占位稿 = 在给它的选题开第一篇，和新开写同一判定；真稿的重写放行
+  const refused = await aiContentWriteRefusal(contentId, dataDir);
+  if (refused) return refused;
   const key = GENERATE_JOB_KEY(contentId);
   if (!claimJob(key)) return { ok: false, error: "这篇已经在写了——等它跑完再重试" };
   let held = false;
@@ -608,14 +637,11 @@ async function chatTurnHandler(
     const dispatch = parseDispatch(payload.dispatch);
     if (!dispatch) return { ok: false, error: "派活信息不完整，没有发出" };
     const dispatchDir = (payload._dataDir as string) || undefined;
-    const target = isLocalBackend(await resolveTurnBackend(payload, dispatchDir)) ? "local" : "builtin";
-    const built = await buildDispatchContext(dispatch, dispatchDir, target);
+    const built = await buildDispatchContext(dispatch, dispatchDir);
     if (!built.ok) return { ok: false, error: built.error };
     payload = { ...payload, _dispatch_context: built.text };
   }
-  // 本机 agent 后端（总编辑接本机 agent spec）：对话后端以服务端记录为准，本机后端不走下面的内置引擎链
-  const local = await maybeRunLocalTurn(payload, ctx);
-  if (local) return local;
+  // 对话只走内置引擎（2026-10-02 起去掉本机 Claude / Codex 后端）：旧对话 meta 里记着本机后端也照样续在内置引擎上
   const conversationId =
     typeof payload.conversation_id === "string" && payload.conversation_id !== "" ? payload.conversation_id : undefined;
   const dataDir = (payload._dataDir as string) || undefined;
@@ -775,11 +801,6 @@ async function chatTurnStatusHandler(payload: Record<string, unknown>): Promise<
   const turnId = typeof payload.turn_id === "string" ? payload.turn_id : "";
   if (!turnId) return { ok: false, error: "chat:turn_status 需要 turn_id" };
   const view = await getTurnStatus(turnId, (payload._dataDir as string) || undefined);
-  // 本机 agent 轮次在守护进程重启后已被标中断（对话里留了一句）：按 done 让前端重载那段对话
-  if (view.status === "unknown") {
-    const run = getChiefEditor()?.runs.get(turnId);
-    if (run && run.status !== "running" && run.status !== "awaiting_approval") return { ok: true, data: { status: "done", conversationId: run.conversationId } };
-  }
   return { ok: true, data: view };
 }
 
@@ -880,7 +901,7 @@ async function contentVersionsHandler(payload: Record<string, unknown>): Promise
   }
 }
 
-async function contentRevertHandler(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function contentRevertHandler(payload: Record<string, unknown>, ctx?: IpcHandlerContext): Promise<Record<string, unknown>> {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
     return { ok: false, error: "Invalid payload: expected object" };
   }
@@ -891,7 +912,7 @@ async function contentRevertHandler(payload: Record<string, unknown>): Promise<R
     return { ok: false, error: "需要合法 version（正整数）" };
   }
   try {
-    const content = await revertToVersion(id, version, (payload._dataDir as string) || undefined);
+    const content = await revertToVersion(id, version, (payload._dataDir as string) || undefined, provenanceFromAuth(ctx?.authMethod));
     if (!content) return { ok: false, error: "回滚失败：稿件或版本不存在" };
     return { ok: true, data: { content } };
   } catch (err) {
@@ -915,7 +936,7 @@ async function rewriteSelectionHandler(payload: Record<string, unknown>): Promis
 }
 
 /** 收下一版对话式修改：存新版本 + 采纳即学习闸门（有 before+feedback 才沉淀）。 */
-async function draftAdoptRevisionHandler(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function draftAdoptRevisionHandler(payload: Record<string, unknown>, ctx?: IpcHandlerContext): Promise<Record<string, unknown>> {
   const contentId = typeof payload.content_id === "string" ? payload.content_id : "";
   if (!isContentId(contentId)) return { ok: false, error: "需要合法 content_id" };
   const body = typeof payload.body === "string" ? payload.body : "";
@@ -939,6 +960,8 @@ async function draftAdoptRevisionHandler(payload: Record<string, unknown>): Prom
         body,
         ...(title ? { title } : {}),
         _versionNote: note,
+        // 浏览器会话里人点「收下」= 人手；令牌调用（宿主/模型可达）按模型算
+        _provenance: provenanceFromAuth(ctx?.authMethod),
         ...(changed && feedback ? { writingFeedback: appendWritingFeedback(before0.writingFeedback, feedback, feedbackScope, {
           ...(feedbackScope === "selection" && typeof payload.selection === "string" ? { selection: payload.selection } : {}),
         }) } : {}),
@@ -950,7 +973,7 @@ async function draftAdoptRevisionHandler(payload: Record<string, unknown>): Prom
     // 采纳即学习闸门：正文确有变化才把 before→after 喂给蒸馏管线（延迟学习，不确认不学）
     if (!before || before === body) return { ok: true, content: updated };
     try {
-      await recordDiff(contentId, "body", before, body, dataDir, feedback || undefined, updated.platform);
+      await recordDiff(contentId, "ai", "body", before, body, dataDir, feedback || undefined, updated.platform);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return { ok: true, content: updated, warning: `diff 记录失败：${msg}，稿件已正常保存` };
@@ -984,7 +1007,7 @@ async function styleRecordEditHandler(payload: Record<string, unknown>): Promise
     // 纠正路由需要平台归属（PRD-v4 §4.3）——按 content_id 反查，查不到不阻断记录
     const content = await getContent(contentId, dataDir).catch(() => null);
     // field 固定为 "body"（v1 工作台只改正文；title 编辑信号需求出现再扩 payload）
-    await recordDiff(contentId, "body", before, after, dataDir, undefined, content?.platform);
+    await recordDiff(contentId, "founder", "body", before, after, dataDir, undefined, content?.platform);
     return { ok: true, data: {} };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -1223,6 +1246,26 @@ async function dashboardSummaryHandler(payload: Record<string, unknown>): Promis
   }
 }
 
+/**
+ * 在请求里跑很久的通道（模型调用、外网推送 / 抓取、长任务编排）：一键更新时（self-update，Codex 审第 2 轮 P1）
+ * 它们在跑就不重启，锁在手时不开新的。后台起跑、请求先回的入口（写稿、封面、配图）在各自的 start 函数里登记。
+ */
+export { LONG_RUNNING_CHANNELS };
+
+function trackLongRunning(handlers: Record<IpcChannel, IpcHandler>): Record<IpcChannel, IpcHandler> {
+  const out = { ...handlers };
+  for (const ch of Object.keys(out) as IpcChannel[]) {
+    if (!LONG_RUNNING_CHANNELS.has(ch)) continue;
+    const inner = out[ch];
+    out[ch] = async (payload, ctx) => {
+      const work = beginWork(ch);
+      if (!work.ok) return { ok: false, code: "updating", error: work.error };
+      try { return await (ctx === undefined ? inner(payload) : inner(payload, ctx)); } finally { work.end(); }
+    };
+  }
+  return out;
+}
+
 // ── buildIpcHandlers ──────────────────────────────────────────────────────────
 
 /**
@@ -1259,10 +1302,6 @@ export function buildIpcHandlers(deps?: Partial<Record<IpcChannel, IpcHandler>>)
     "article_images:remove_slot": articleImagesRemoveSlotHandler,
     "article_images:upload": articleImagesUploadHandler,
     "chat:turn": chatTurnHandler,
-    "agent:backends": (p) => agentBackendsHandler(p, async (dir) => chatModelOptions(await loadEngineConfig(dir)).length > 0),
-    "agent:pending": agentPendingHandler,
-    "agent:answer": agentAnswerHandler,
-    "agent:settings": agentSettingsHandler,
     "conversations:rename": conversationRenameHandler,
     "chat:abort": chatAbortHandler,
     "chat:turn_status": chatTurnStatusHandler,
@@ -1279,10 +1318,8 @@ export function buildIpcHandlers(deps?: Partial<Record<IpcChannel, IpcHandler>>)
     "hosts:revoke": async (p) => {
       const r = await hostsRevokeHandler(p);
       // W7：WorkBuddy 的 mcp.json 条目不替人删，只提示可一并删除
-      return r.ok && p.host === WORKBUDDY_HOST ? { ...r, message: `${String(r.message)}。~/.workbuddy/mcp.json 里的 autocrew 条目还在，可一并删除。` } : r;
+      return r.ok && p.host === WORKBUDDY_HOST ? { ...r, message: `${String(r.message)}。WorkBuddy 配置里的 autocrew 条目还在：在「设置 · 宿主」点断开会一并删掉` } : r;
     },
-    "hosts:workbuddy_status": async () => ({ ok: true, data: { installed: workbuddyInstalled() } }),
-    "hosts:workbuddy_connect": async () => connectWorkbuddy(),
     "settings:search_get": getSearchSettings,
     "settings:search_set": setSearchSettings,
     "settings:publish_get": getPublishSettings,
@@ -1315,6 +1352,7 @@ export function buildIpcHandlers(deps?: Partial<Record<IpcChannel, IpcHandler>>)
     "flywheel:pull_now": pullNowHandler,
     "flywheel:pull_toggle": pullToggleHandler,
     "flywheel:hypotheses_list": hypothesesListHandler,
+    "calibration:ledger": ledgerHandler,
     "dialog:pick_file": dialogUnavailableHandler,
     "knowledge:status": knowledgeStatusHandler,
     "radar:status": getRadarStatus,
@@ -1340,8 +1378,10 @@ export function buildIpcHandlers(deps?: Partial<Record<IpcChannel, IpcHandler>>)
     "topic:create": topicCreateHandler,
     "topic:update": topicUpdateHandler,
     "topic:delete": topicDeleteHandler,
+    "topic:delete_example": (p) => deleteExampleTopic(String(p.id ?? ""), (p._dataDir as string) || undefined),
     "topic:restore": topicRestoreHandler,
     "topic:select_angle": topicSelectAngleHandler,
+    ...DRAFT_IPC_HANDLERS,
     "topic:clear_angle": topicClearAngleHandler,
     "trash:list": trashListHandler,
     "content:versions": contentVersionsHandler,
@@ -1422,7 +1462,7 @@ export function buildIpcHandlers(deps?: Partial<Record<IpcChannel, IpcHandler>>)
     "video:asr_warmup": videoAsrWarmupHandler,
     "video:asr_status": videoAsrStatusHandler,
     "video:settings_get": getVideoSettings,
-    "video:settings_set": setVideoSettings,
+    "video:settings_set": setVideoSettingsViaInvoke,
   };
 
   // 引擎事件桥（P1 一期）：把值得进工作日志的结果映射为事件。
@@ -1443,8 +1483,7 @@ export function buildIpcHandlers(deps?: Partial<Record<IpcChannel, IpcHandler>>)
     };
   }
 
-  if (!deps) return defaults;
-  return { ...defaults, ...deps };
+  return trackLongRunning(deps ? { ...defaults, ...deps } : defaults);
 }
 
 // ── workspace:* — 多工作区（一人多 IP,dataDir 只由 server 端从注册表解析） ────
@@ -1546,6 +1585,8 @@ export async function topicCreateHandler(
         source,
         ...(typeof payload.reason === "string" && payload.reason ? { reason: payload.reason } : {}),
         ...(typeof payload.link === "string" && payload.link ? { link: payload.link } : {}),
+        // 装好后的试跑示例（onboarding-connect O20）
+        ...(payload.example === true ? { example: true } : {}),
         ...(idea
           ? {
               score: idea.totalScore,
@@ -1605,7 +1646,7 @@ async function topicDeleteHandler(payload: Record<string, unknown>): Promise<Rec
  * 2. `angle_id` 必须在那版简报里；改写版（可选 `card`）还要过一遍字段与证据引用校验，
  *    创始人能改任何文字，但改不出简报里没有的证据。
  */
-async function topicSelectAngleHandler(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function topicSelectAngleHandler(payload: Record<string, unknown>, ctx?: IpcHandlerContext): Promise<Record<string, unknown>> {
   const topicId = typeof payload.topic_id === "string" ? payload.topic_id.trim() : "";
   const angleId = typeof payload.angle_id === "string" ? payload.angle_id.trim() : "";
   const revision = payload.brief_revision;
@@ -1614,6 +1655,10 @@ async function topicSelectAngleHandler(payload: Record<string, unknown>): Promis
     return { ok: false, error: "brief_revision 必须是整数" };
   }
   const dataDir = (payload._dataDir as string) || undefined;
+  // 只有浏览器会话（人在界面上点）才能用「桌面点选」当原话；令牌调用（宿主/模型可达）必须带创始人原话
+  const givenWords = typeof payload.founder_words === "string" ? payload.founder_words.trim() : "";
+  if (!givenWords && ctx?.authMethod !== "session") return { ok: false, code: "founder_words_required", error: ANGLE_GATE_COPY.needFounderWords };
+  const founderWords = givenWords || `（桌面界面点选 ${angleId}）`;
   try {
     const topic = await getTopic(topicId, dataDir);
     if (!topic) return { ok: false, error: `Topic ${topicId} not found` };
@@ -1631,7 +1676,8 @@ async function topicSelectAngleHandler(payload: Record<string, unknown>): Promis
     if (typeof card === "string") return { ok: false, error: card };
     const updated = await updateTopic(
       topicId,
-      { selectedAngle: { briefRevision: snap.revision, angleId, card, selectedAt: new Date().toISOString() } },
+      // 桌面界面上是创始人本人点的卡（人手操作）：记成创始人选定，原话缺省就记这次点选
+      { selectedAngle: { briefRevision: snap.revision, angleId, card, selectedAt: new Date().toISOString(), chosenBy: "founder", founderWords }, founderAngle: undefined },
       dataDir,
     );
     // 两个后端都从「最近工作区动作」得知创作者选了哪个角度（bug A3）
@@ -1647,7 +1693,8 @@ async function topicClearAngleHandler(payload: Record<string, unknown>): Promise
   const topicId = typeof payload.topic_id === "string" ? payload.topic_id.trim() : "";
   if (!topicId) return { ok: false, error: "topic_id 必填" };
   try {
-    const topic = await updateTopic(topicId, { selectedAngle: undefined }, (payload._dataDir as string) || undefined);
+    // 撤回 = 清掉创始人的角度决定（选卡与自定角度一起清，旧的那句不能借机复活）
+    const topic = await updateTopic(topicId, { selectedAngle: undefined, founderAngle: undefined }, (payload._dataDir as string) || undefined);
     if (!topic) return { ok: false, error: `Topic ${topicId} not found` };
     await appendAction((payload._dataDir as string) || undefined, { kind: "angle_cleared", title: topic.title });
     return { ok: true, topic };

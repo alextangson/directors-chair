@@ -9,6 +9,7 @@
  */
 import { loadProfile, personaSummary, isRuleActive } from "../modules/profile/creator-profile.js";
 import { listContents, listTopics, normalizeLegacyStatus, type Content } from "../storage/local-store.js";
+import { isImportedHistory } from "../storage/imported-history.js";
 import { listOutcomes } from "../modules/flywheel/outcome-store.js";
 import type { PerformanceOutcome } from "../modules/flywheel/outcome-schema.js";
 import {
@@ -63,10 +64,11 @@ export interface DashboardSummary {
   outcomesAvailable: boolean;
   /**
    * 登录态过期待办（回流 spec §4.4）：已启用自动回流的平台里，上次抓取判定为 needs_login 的。
-   * 扫码是唯一能让数据继续流的动作，所以它必须出现在工作台，而不是只躺在数据回流页。
+   * 去 ego lite 登录是唯一能让数据继续流的动作，所以它必须出现在工作台，而不是只躺在数据回流页。
+   * action 是待办那句话：「在 ego lite 里登录 XX 后台」（回流抓取用的是 ego lite 里的登录态）。
    */
   pullLoginTodos: Array<{
-    platform: string; label: string; consoleUrl: string;
+    platform: string; label: string; consoleUrl: string; action: string;
     lastSuccessAt: string | null;
   }>;
   /**
@@ -167,6 +169,7 @@ async function loadPullLoginTodos(dataDir?: string): Promise<DashboardSummary["p
       platform: p,
       label: PULL_PLATFORM_LABELS[p],
       consoleUrl: PULL_PLATFORM_CONSOLES[p],
+      action: `在 ego lite 里登录${PULL_PLATFORM_LABELS[p]}后台`,
       lastSuccessAt: state.platforms[p].lastSuccessAt,
     }));
   } catch {
@@ -179,7 +182,7 @@ export async function buildDashboardSummary(dataDir?: string, now = Date.now()):
   try { profile = await loadProfile(dataDir); } catch { /* 降级 */ }
 
   let contents: Content[] = [];
-  try { contents = await listContents(dataDir); } catch { /* 降级 */ }
+  try { contents = (await listContents(dataDir)).filter((c) => !isImportedHistory(c)); } catch { /* 降级 */ }
 
   let topics: Awaited<ReturnType<typeof listTopics>> = [];
   try { topics = await listTopics(dataDir); } catch { /* 降级 */ }

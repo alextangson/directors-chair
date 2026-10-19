@@ -16,8 +16,10 @@ import { readProductionDoc } from "../../storage/production-store.js";
 import { cardPanel } from "./panel.js";
 import { explainContent } from "./read.js";
 import { reconcileAll } from "./reconcile.js";
-import { openStoryboard, pageRefs, STORYBOARD_HINT } from "./storyboard.js";
+import { openStoryboard, pageRefs, setStoryboardReadHook, STORYBOARD_HINT } from "./storyboard.js";
 import { reopenScript } from "./reopen.js";
+import { executeAsk, founderAnswer, STORYBOARD_APPROVE } from "./asks.js";
+import { setSettleMs, STILL_SETTLING } from "./hash-cache.js";
 import { founderApprove, makeEnv, projectRoot, record, videoContent, type Env } from "./testkit.js";
 
 let env: Env;
@@ -69,7 +71,7 @@ describe("§3 只收脚本生成的审阅页（E1–E6）", () => {
     const { c, pr } = await approved();
     const r = await makeReview(pr);
     const res = await report(c.id, r.file);
-    expect(res).toMatchObject({ ok: true, kind: "storyboard", state: "accepted", path: "03-broll/review-v001/review.html", next_action: expect.stringContaining("打开审阅页") });
+    expect(res).toMatchObject({ ok: true, kind: "storyboard", state: "accepted", path: "03-broll/review-v001/review.html", next_action: expect.stringContaining("ask kind=分镜") });
     const f = (await readProductionDoc(c.id, env.dir))!.facts.find((x) => x.kind === "storyboard")!;
     expect(f).toMatchObject({ version: 1, sha256: sha(await fs.readFile(r.file)), receipt_sha256: sha(await fs.readFile(r.receipt)) });
     expect((await explainContent((await getContent(c.id, env.dir))!, env.dir)).stage).toBe("待录制");
@@ -255,5 +257,81 @@ describe("Codex 审 storyboard 回归", () => {
     expect(await run({ error: "spawn open ENOENT" })).toMatchObject({ ok: false, code: "open_failed", error: expect.stringContaining("ENOENT") });
     expect(await run({ exit: 1 })).toMatchObject({ ok: false, code: "open_failed", error: expect.stringContaining("退出码 1") });
     expect(await run({ exit: 0 })).toMatchObject({ ok: true, opened: true });
+  });
+});
+
+describe("分镜「还在写」的门（fix/hash-cpu Codex P2 storyboard.ts:89）", () => {
+  afterEach(() => setSettleMs(null));
+  const back = async (files: string[], ms: number) => { const t = new Date(Date.now() - ms); for (const f of files) await fs.utimes(f, t, t); };
+
+  it("record：刚写的页 / 回执 / 素材按 record 的 10 秒门拒收；过了 10 秒就收", async () => {
+    setSettleMs(60_000);
+    const { c, pr } = await approved();
+    const r = await makeReview(pr);
+    const media = path.join(r.root, "opus/boards/B01.svg");
+    expect(await report(c.id, r.file)).toMatchObject({ ok: false, code: "storyboard_unsettled" });
+    await back([r.file, r.receipt], 20_000);
+    expect(await report(c.id, r.file)).toMatchObject({ ok: false, code: "storyboard_unsettled" }); // 素材还新
+    await back([media], 20_000);
+    expect(await report(c.id, r.file)).toMatchObject({ ok: true, kind: "storyboard" });
+  });
+
+  it("创始人通过分镜：素材一分钟内动过 → 拒绝并说「还在写」，不记通过", async () => {
+    const { c, pr } = await approved();
+    const r = await makeReview(pr);
+    await report(c.id, r.file);
+    const fact = (await readProductionDoc(c.id, env.dir))!.facts.find((x) => x.kind === "storyboard")!;
+    const ask = await executeAsk({ _dataDir: env.dir, content_id: c.id, request_id: "sb1", kind: "分镜", question: "分镜行不行", storyboard_fact_id: fact.id,
+      options: [{ id: STORYBOARD_APPROVE, label: "通过" }, { id: "redo", label: "重做" }] });
+    expect(ask).toMatchObject({ ok: true });
+    setSettleMs(60_000);
+    const now = new Date();
+    await fs.utimes(path.join(r.root, "opus/boards/B01.svg"), now, now);
+    const ans = await founderAnswer((await getContent(c.id, env.dir))!, env.dir, String(ask.ask_id), STORYBOARD_APPROVE, "");
+    expect(ans).toMatchObject({ ok: false, code: "file_unsettled", error: STILL_SETTLING });
+    expect((await readProductionDoc(c.id, env.dir))!.decisions.some((d) => d.type === "storyboard_approval")).toBe(false);
+  });
+});
+
+describe("读的途中文件被改（fix/hash-cpu Codex r2 P2）", () => {
+  afterEach(() => setStoryboardReadHook(null));
+  /** 读完 target 那一刻把它改掉一次（换字节、修改时间拨到很早，过得了「一分钟」门，只有读前读后身份比对能逮住） */
+  const mutateOnce = (target: string, bytes: string) => {
+    let done = false;
+    setStoryboardReadHook(async (file) => {
+      if (done || file !== target) return;
+      done = true;
+      await fs.writeFile(file, bytes);
+      const t = new Date(Date.now() - 600_000);
+      await fs.utimes(file, t, t);
+    });
+  };
+
+  async function askedStoryboard() {
+    const { c, pr } = await approved();
+    const r = await makeReview(pr);
+    await report(c.id, r.file);
+    const fact = (await readProductionDoc(c.id, env.dir))!.facts.find((x) => x.kind === "storyboard")!;
+    const ask = await executeAsk({ _dataDir: env.dir, content_id: c.id, request_id: "sb1", kind: "分镜", question: "分镜行不行", storyboard_fact_id: fact.id,
+      options: [{ id: STORYBOARD_APPROVE, label: "通过" }, { id: "redo", label: "重做" }] });
+    return { c, r, askId: String(ask.ask_id) };
+  }
+
+  for (const which of ["html", "receipt"] as const) {
+    it(`创始人通过分镜时${which === "html" ? "审阅页" : "回执"}在读的途中变了 → 拒绝，不按旧快照通过`, async () => {
+      const { c, r, askId } = await askedStoryboard();
+      const target = which === "html" ? r.file : r.receipt;
+      mutateOnce(await fs.realpath(target), `${await fs.readFile(target, "utf8")} `);
+      const ans = await founderAnswer((await getContent(c.id, env.dir))!, env.dir, askId, STORYBOARD_APPROVE, "");
+      expect(ans).toMatchObject({ ok: false, code: "file_unsettled" });
+      expect((await readProductionDoc(c.id, env.dir))!.decisions.some((d) => d.type === "storyboard_approval")).toBe(false);
+    });
+  }
+
+  it("record：素材在算哈希的途中变了 → 拒收「还在写」", async () => {
+    const { c, pr } = await approved();
+    const r = await makeReview(pr);
+    mutateOnce(await fs.realpath(path.join(r.root, "opus/boards/B01.svg")), "<svg>changed mid-hash</svg>");
+    expect(await report(c.id, r.file)).toMatchObject({ ok: false, code: "storyboard_unsettled" });
   });
 });

@@ -83,12 +83,22 @@ describe("回流状态行（§42 / §43）", () => {
   it("没开 / 开了正常 / 登录过期变红 / 读不出来变红", () => {
     expect(pullLine([{ ...base, platform: "douyin", label: "抖音", enabled: false, lastStatus: "never" }], null)).toEqual({ state: "自动回流没开", problem: null });
     expect(pullLine([{ ...base, platform: "douyin", label: "抖音", enabled: true, lastStatus: "ok" }], null).problem).toBeNull();
-    expect(pullLine([{ ...base, platform: "douyin", label: "抖音", enabled: true, lastStatus: "needs_login" }], null).problem).toMatch(/抖音.*扫码/);
+    expect(pullLine([{ ...base, platform: "douyin", label: "抖音", enabled: true, lastStatus: "needs_login" }], null).problem).toMatch(/在 ego lite 里登录抖音后台/);
     expect(pullLine(null, "boom").problem).toMatch(/boom/);
   });
   it("封面没下载成写进状态行（§I.57）", () => {
     const r = pullLine([{ ...base, platform: "douyin", label: "抖音", enabled: true, lastStatus: "ok", lastCoverError: "cover_download_failed:2/12:http_403" }], null);
     expect(r.state).toBe("自动回流已开（抖音）（抖音封面 2/12 张没下载成）");
+  });
+});
+
+describe("当前写入权丢失盖过旧的浏览器未连接", () => {
+  const base = { consoleUrl: "", inFlight: false, lastSuccessAt: null, lastAttemptAt: null, nextEligibleAt: null, failureCount: 0 };
+  it("pullLine 报写入权丢失与恢复办法，不报浏览器", () => {
+    const r = pullLine([{ ...base, platform: "douyin", label: "抖音", enabled: true, lastStatus: "browser_unreachable", writeRefusal: { code: "library_writer_lost", at: "2026-10-04T01:00:00.000Z" } }], null);
+    expect(r.problem).toMatch(/资料库写入权已丢失/);
+    expect(r.problem).toMatch(/重启/);
+    expect(r.problem).not.toMatch(/浏览器/);
   });
 });
 

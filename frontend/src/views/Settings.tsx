@@ -15,11 +15,12 @@ import { Section } from "./settings-kit";
 import { EngineSection } from "./SettingsEngine";
 import { SettingsStorage } from "./SettingsStorage";
 import { SettingsJianying } from "./SettingsJianying";
+import { SettingsArollSources } from "./SettingsArollSources";
 import { SettingsAsr } from "./SettingsAsr";
 import { Integrations } from "./Integrations";
 import { SettingsPublishGate } from "./SettingsPublishGate";
 import { SettingsData } from "./SettingsData";
-import { TRUST_NOTICE } from "../chat/backend-choice";
+import { SettingsUpdate } from "./SettingsUpdate";
 import type { Route } from "../routes";
 
 export type SettingsTab = "models" | "integrations" | "data";
@@ -31,9 +32,10 @@ const TABS: Array<{ id: SettingsTab; label: string }> = [
 ];
 
 /** 从主导航收进来的几页（看板规格 §27）：路由照旧，入口在这里 */
-const MORE_PAGES: Array<{ view: "inbox" | "calibration" | "logs" | "library"; label: string; note: string }> = [
+const MORE_PAGES: Array<{ view: "inbox" | "calibration" | "playbooks" | "logs" | "library"; label: string; note: string }> = [
   { view: "inbox", label: "灵感收件箱", note: "随手记、转发进来的碎片" },
   { view: "calibration", label: "品牌校准", note: "口吻、受众、写作规则" },
+  { view: "playbooks", label: "写作手册", note: "体裁手册与团队技能：AI 照着什么干活" },
   { view: "logs", label: "任务日志", note: "AI 做过的每一件事" },
   { view: "library", label: "素材库", note: "图片、视频、参考文件" },
 ];
@@ -85,15 +87,12 @@ export function Settings(props: { tab?: SettingsTab; onTab?: (tab: SettingsTab) 
       {tab === "models" && (
         <>
           {props.nav && <MorePages nav={props.nav} />}
+          <SettingsUpdate />
           <SettingsStorage />
+          <SettingsArollSources />
           <SettingsJianying />
           <SettingsAsr />
           <EngineSection />
-
-          <Section title="总编辑用本机 agent" status="本机 Claude" on>
-            <p className="muted">{TRUST_NOTICE}</p>
-            <p className="muted">在右栏输入框下方切换后端。本机 Claude 用你的 Claude 订阅，本机 Codex 用你的 ChatGPT 订阅。WorkBuddy 不在这里切换：到「接入更多 · 宿主」连接后，在 WorkBuddy 里直接调用 AutoCrew。内置引擎只在你手动选它时用，本机 agent 出错不会自动换过去。</p>
-          </Section>
 
           <Section title="工作区" status={ws ? `当前 ${ws.workspaces.find((w) => w.id === ws.active)?.name ?? ws.active}` : ""} on>
             <p className="muted">一人多 IP：每个工作区是独立编辑部（定位/灵感/稿件/画像全隔离）。</p>

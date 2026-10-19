@@ -19,7 +19,66 @@ async function toolsFor(host: string) {
  * 同日发布前把关给 autocrew_publish 加 check / propose_preference 的参数（已压到最少：overrides、value 不展开嵌套），
  * 实测 27,983 → 28,263，上限随之从 28,000 提到 28,500。
  */
-export const BUDGET = { total: 28_500, perTool: 4_000, instructions: 1_500 };
+/*
+ * 2026-09-30 等你拍板 2a：autocrew_content 加 ask / answer_ask / withdraw_ask / mark_ready 与它们的参数（review、paths、pair_with、
+ * fact_id、question、options、attachments、ask_id、option_id、founder_quote、asks_offset；kind 加六种请示），参数说明已压到零、
+ * options / attachments 不展开嵌套，工具说明重写后与原来等长；实测 28,498 → 28,978，上限随之从 28,500 提到 29,000。
+ */
+/*
+ * 2026-10-02 合 0.5.0：main 的选题会给 autocrew_insights 加 meeting_* 动作与参数（2,727 → 2,847），与 2a 各自都在预算内，
+ * 合起来实测 28,968 → 29,088，上限随之从 29,000 提到 29,200。
+ */
+/*
+ * 2026-10-03 发布标题方法库：autocrew_pre_publish 加 title_methods 动作与 kit.title_candidates / title_method（候选不展开嵌套），
+ * 工具说明补一句三个动作；实测 29,232，上限随之从 29,200 提到 29,400。
+ * 2026-10-03 判断要对账：autocrew_insights 加 calib_* 动作（status/blind/predict/retro/bump/observe/learn）与一个 calib 参数，
+ * 用法全放 tool-guide 资源、工具说明只加一句；实测 29,088 → 约 29,230，上限随之从 29,200 提到 29,400。
+ */
+/*
+ * 2026-10-03 回流认领：autocrew_insights 加 work_bind / history_create / history_delete 与一个 work 参数，
+ * 用法放 tool-guide、工具说明只加一句；实测 29,470，上限随之从 29,400 提到 29,600。
+ */
+/*
+ * 2026-10-04 灵感 → A-roll 薄路径：新增 autocrew_draft（7 个动作、20 个参数，说明已压到一句）；实测 30,728，上限随之从 29,600 提到 30,800。
+ * 2026-10-04 首次验收：angle 加 chosen_option、citations 项加 kind 枚举；实测 30,850，上限随之从 30,800 提到 31,000。
+ */
+/*
+ * 2026-10-06 对话拍板：新增 autocrew_review_inbox（list / send_back / confirm，10 个参数，说明压到一句）；
+ * 单个 805 字，实测 31,656，上限随之从 31,000 提到 31,800。
+ */
+/*
+ * 2026-10-06 对话里「发之前再看一眼」：autocrew_review_inbox 的 decision 枚举加 3 个发布检查决定；实测 31,874，上限随之从 31,800 提到 31,900。
+ */
+/*
+ * 2026-10-06 手动收件：autocrew_review_inbox 的 action 加 inbox_list / inbox_attach / sync 与 file、sha256、confirm_other 三个参数
+ * （复用这个工具，不新开工具；参数说明在 tools/list 里本来就去掉了），短说明只加一句；实测 32,036，上限随之从 31,900 提到 32,100。
+ */
+/*
+ * 2026-10-10 对话里的改稿意见也能被吸取：autocrew_draft 加 feedback 参数、autocrew_review_inbox 加 target_rule_id 与 3 个写作规则决定，
+ * 两个短说明各补半句；实测 32,223，上限随之从 32,100 提到 32,300。
+ */
+/*
+ * 2026-10-11 认稿与画面闪帧也能在对话里定：autocrew_review_inbox 的 decision 枚举加 4 个决定、加 sliver_key，短说明补「认稿、闪帧」；
+ * 实测 32,329，上限随之从 32,300 提到 32,400。
+ */
+/*
+ * 2026-10-11 AI 发布回执直接认：autocrew_content 加 pub_state / scheduled_at（定时也能报），autocrew_review_inbox 加 platform
+ * （对话里「X 平台没发」纠正直接认的回执）；参数说明压到零，实测 32,421，上限随之从 32,400 提到 32,500。
+ */
+/*
+ * 2026-10-13 体裁手册：新增 autocrew_playbook（list / get / propose / rollback，10 个参数，短说明压到一句），autocrew_draft 加 genre、
+ * autocrew_review_inbox 的 decision 加 approve_playbook / reject_playbook；实测 33,189，上限随之从 32,500 提到 33,200。
+ */
+/*
+ * 2026-10-15 等你拍板合并批：autocrew_review_inbox 的 decision 加 playbook_batch、加 items（同一份手册改动一次定完）；
+ * 实测 33,217，上限随之从 33,200 提到 33,300。
+ */
+/*
+ * 2026-10-15 写法与范文（与上面的合并批一起合进来）：autocrew_draft 加 exemplars / opening / feedback_history / propose_promotion 四个动作与
+ * exemplars、candidates、test_read、target、cites、text、exemplar_id 七个参数（说明在宿主侧压到零），短说明重写；
+ * autocrew_review_inbox 的 decision 加 approve_promotion / reject_promotion。与合并批合起来实测 33,535，上限从 33,300 提到 33,600。
+ */
+export const BUDGET = { total: 33_600, perTool: 4_000, instructions: 1_500 };
 
 describe("M7 预算：外部宿主看到的 tools/list 与 initialize", () => {
   it.each(["workbuddy", "claude-code"])("%s：总量、单个工具、instructions 都在预算内；超了列出谁超、多少字", async (host) => {
@@ -38,7 +97,8 @@ describe("M1 契约不变：工具名、参数名、类型、必填、枚举、�
   const fixture = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "__fixtures__", "tool-contract.json"), "utf-8")) as Record<string, Array<{ name: string; shape: unknown }>>;
   it.each(HOSTS)("%s 看到的工具清单与参数形状", async (host) => {
     const now = (await toolsFor(host)).map((t) => ({ name: t.name, shape: schemaShape(t.inputSchema) }));
-    expect(now).toEqual(fixture[host]);
+    // 2026-10-02 起 codex 与别的命名宿主能力一样：它看到的就是 workbuddy 那一份，不另存一份快照
+    expect(now).toEqual(fixture[host === "codex" ? "workbuddy" : host]);
   });
 });
 
@@ -83,7 +143,7 @@ describe("长说明搬进按需资源", () => {
     expect(uris).toContain(`${TOOL_GUIDE_PREFIX}autocrew_writer`);
     expect(uris.some((u) => u.includes("<"))).toBe(false);
     const codex = await handleMcpRequest({ jsonrpc: "2.0", id: 8, method: "resources/list" }, access("codex"));
-    expect((codex!.result as { resources: Array<{ uri: string }> }).resources.map((x) => x.uri)).not.toContain(`${TOOL_GUIDE_PREFIX}autocrew_writer`);
+    expect((codex!.result as { resources: Array<{ uri: string }> }).resources.map((x) => x.uri)).toEqual(uris);
   });
   it("短说明点名资源；instructions 点名写作守则", async () => {
     const tools = await toolsFor("workbuddy");

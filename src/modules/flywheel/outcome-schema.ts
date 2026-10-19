@@ -16,6 +16,12 @@ export interface OutcomeMetrics {
   /** 封面点击率，百分比 0-100：平台直接给的（抖音 metrics.cover_click_rate，09-27 真实接口核实）。
    *  有它就用它；没有时展示层才退回 播放 ÷ 曝光 推算 */
   coverClickRate?: number;
+  /** 2秒跳出率，百分比 0-100（抖音 metrics.bounce_rate_2s，比例串 ×100）。决定抖音给不给第二波流量 */
+  bounce2s?: number;
+  /** 平均播放时长，秒（抖音 metrics.avg_view_second）。不是比率，负数拒收 */
+  avgWatchSeconds?: number;
+  /** 粉丝播放占比，百分比 0-100（抖音 metrics.fan_view_proportion，比例串 ×100）。爆款可低于 1% */
+  fanViewShare?: number;
   likes?: number;
   comments?: number;
   shares?: number;
@@ -46,6 +52,11 @@ export interface PerformanceOutcome {
   recordedAt: string;
   needsReview: boolean;
   reviewReasons: string[];
+  /**
+   * 撤销标记（append-only 的「删除」）：删历史作品记录时给它名下的行追加一条同键 retracted 行，
+   * latest-wins 后这一键就消失，原始未归属行重新露出来。journal 本身仍然不改写。
+   */
+  retracted?: true;
 }
 
 export interface OutcomeValidation {
@@ -59,17 +70,29 @@ const RATE_METRICS = [
   ["completionRate", "完播率"],
   ["completion5s", "5s完播率"],
   ["coverClickRate", "封面点击率"],
+  ["bounce2s", "2秒跳出率"],
+  ["fanViewShare", "粉丝播放占比"],
 ] as const;
 
-/** 完播类指标检查：超出 0-100 拒收，(0,1) 疑似小数比例转人工 */
-function rateMetricIssues(m: OutcomeMetrics): { rejects: string[]; reviews: string[] } {
+/**
+ * 抖音完播率低于 1% 是真实值，不是量纲错（2026-10-02 创始人后台截图：6 分 14 秒长视频完播率 0.63%，
+ * 同一条 5 秒完播 26.56%）——长视频的完播率天然很低，不再按「疑似小数比例」转人工。
+ * 粉丝播放占比同理：爆款主要靠推荐流，粉丝占比 0.4% 是真值（2026-10-10 数据分析核过）。
+ */
+const DOUYIN_SUB_ONE_REAL = new Set<string>(["completionRate", "fanViewShare"]);
+function subOneIsReal(platform: string | undefined, key: string): boolean {
+  return DOUYIN_SUB_ONE_REAL.has(key) && !!platform && normalizePlatform(platform) === "douyin";
+}
+
+/** 完播类指标检查：超出 0-100 拒收，(0,1) 疑似小数比例转人工（抖音完播率除外，见 subOneIsReal） */
+function rateMetricIssues(m: OutcomeMetrics, platform?: string): { rejects: string[]; reviews: string[] } {
   const rejects: string[] = [];
   const reviews: string[] = [];
   for (const [key, label] of RATE_METRICS) {
     const v = m[key];
     if (v === undefined) continue;
     if (v < 0 || v > 100) rejects.push(`${label} ${v} 超出 0-100`);
-    else if (v > 0 && v < 1) reviews.push(`${label} ${v} 低于 1%，确认导出值不是小数比例（如 0.325 = 32.5%）`);
+    else if (v > 0 && v < 1 && !subOneIsReal(platform, key)) reviews.push(`${label} ${v} 低于 1%，确认导出值不是小数比例（如 0.325 = 32.5%）`);
   }
   return { rejects, reviews };
 }
@@ -81,6 +104,41 @@ export function normalizePlatform(platform: string): string {
   return PLATFORM_ALIASES[platform] ?? platform;
 }
 
+const SHANGHAI_OFFSET_MS = 8 * 3600_000;
+
+/**
+ * 发布时间 → Asia/Shanghai 日历日（YYYY-MM-DD）。回流的 publishedAt 是 UTC（pull-shared），
+ * metricDate 是本地日期：直接截前 10 位，北京时间 0–8 点发的作品会差一天，
+ * CSV 行与自动行也会分裂成两个作品。带时区（Z / ±hh:mm）的按北京时间取日；
+ * 只有日期、或没写时区的原样截前 10 位（不猜时区）。已是 +08:00 的行结果不变。
+ */
+export function shanghaiDate(value: string): string {
+  if (!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value.trim()) || !/T|\s\d/.test(value)) return value.slice(0, 10);
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) return value.slice(0, 10);
+  return new Date(ms + SHANGHAI_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+/**
+ * 抖音作品 id 是 19 位整数，超过 JS 安全整数；2026-10-03 之前入账的 id 被数字解析截成了
+ * 「最短双精度写法」（…000 结尾）。这种 id 不可信：不参与绑定、不能拿来人工绑定，
+ * 等下一次抓取带正确 id 的行按 latest-wins 覆盖。判据：超过安全整数且与自身的双精度写法完全相同
+ * ——真实 id 恰好落在可精确表示的双精度上的概率约千分之一，宁可让这极少数等一轮重抓。
+ */
+export function isTruncatedItemId(platform: string, itemId: string): boolean {
+  if (normalizePlatform(platform) !== "douyin") return false;
+  const id = itemId.trim();
+  if (!/^\d{17,}$/.test(id)) return false;
+  const n = Number(id);
+  return n > Number.MAX_SAFE_INTEGER && String(n) === id;
+}
+
+/**
+ * 只关归属、不关指标的复核理由前缀：按标题认到的稿在该平台已精确绑定了另一条作品，本行留未归属。
+ * 指标级复核（metric-review.reasonMetric）据此保留全部指标；人工绑定认领这一行时清掉。
+ */
+export const ATTRIBUTION_REVIEW_PREFIX = "归属待确认：";
+
 export function normalizeTitle(title: string): string {
   return title
     .toLowerCase()
@@ -88,6 +146,8 @@ export function normalizeTitle(title: string): string {
 }
 
 export function validateOutcome(input: {
+  /** 有平台时才能认出平台特有的真实小值（抖音完播率 <1%）；缺省按通用规则 */
+  platform?: string;
   metrics: OutcomeMetrics;
   publishedAt: string | null;
   metricDate: string;
@@ -116,10 +176,10 @@ export function validateOutcome(input: {
   if (m.impressions !== undefined && Number.isFinite(m.impressions) && !Number.isInteger(m.impressions)) {
     reasons.push(`曝光量 ${m.impressions} 不是整数`);
   }
-  const rate = rateMetricIssues(m);
+  const rate = rateMetricIssues(m, input.platform);
   reasons.push(...rate.rejects);
   if (input.publishedAt) {
-    const pubDate = input.publishedAt.slice(0, 10);
+    const pubDate = shanghaiDate(input.publishedAt);
     if (input.metricDate < pubDate) {
       reasons.push(`数据日期 ${input.metricDate} 早于发布日期 ${pubDate}`);
     }
@@ -149,6 +209,6 @@ export function outcomeKey(o: {
   const norm = normalizeTitle(o.platformTitle) || o.platformTitle;
   const item = o.contentId
     ? o.contentId
-    : `${norm}@${o.publishedAt ? o.publishedAt.slice(0, 10) : "unknown"}`;
+    : `${norm}@${o.publishedAt ? shanghaiDate(o.publishedAt) : "unknown"}`;
   return `${normalizePlatform(o.platform)}:${item}:${o.metricDate}`;
 }

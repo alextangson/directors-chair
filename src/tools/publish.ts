@@ -1,4 +1,6 @@
 import { isModelCall, isVideoPlatform } from "../storage/stage-guard.js";
+import { videoKitFor } from "../storage/video-kits.js";
+import { historyGuard } from "./history-guard.js";
 import { isOntologyActive, isOntologyEnabled } from "../storage/production-store.js";
 import { recordPublishClaim } from "../modules/production/record.js";
 import { founderDecision } from "../modules/production/decisions.js";
@@ -7,6 +9,7 @@ import { writeTextAtomic } from "../storage/json-atomic.js";
 import { contentFile, resolveContentProject } from "../storage/content-project.js";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { updatingRefusal } from "../modules/update/preflight.js";
 import { Type } from "@sinclair/typebox";
 import { getContent, updateContent, transitionStatus, getDataDir, getCoverReview } from "../storage/local-store.js";
 import { publishWechatMpDraft } from "../modules/publish/wechat-mp.js";
@@ -42,6 +45,7 @@ export const publishSchema = Type.Object({
   wechat_publish_script: Type.Optional(Type.String({ description: "Override path to the WeChat publish.py script." })),
   hashtags: Type.Optional(Type.Array(Type.String(), { description: "Hashtags for the content. Overrides content hashtags if provided." })),
   publish_url: Type.Optional(Type.String({ description: "The URL where content was published (for confirm_published action)." })),
+  round: Type.Optional(Type.Integer({ description: "confirm_published：这条稿当前轮次（卡上给的）；对不上 = 已重开，拒。" })),
   force: Type.Optional(Type.Boolean({ description: "Bypass the pre-publish checklist gate. Use only when the user explicitly insists." })),
   digest: Type.Optional(Type.String({ description: "For 'digest' action: manual 摘要 to save (empty clears it). Omit to AI-generate." })),
   schedule: Type.Optional(Type.String({ description: "Optional platform-local scheduled time carried into the ego lite browser hand-off." })),
@@ -51,7 +55,7 @@ export const publishSchema = Type.Object({
   instruction_id: Type.Optional(Type.String({ description: "For 'check': the ins-… id from the last line of the workbench 「让 Codex 发布」 text, if the founder pasted one. Omit when there is none." })),
   overrides: Type.Optional(Type.Unknown({ description: "For 'check': [{platform, rule, founder_quote}] — only when the founder explicitly asked to break a blocked rule (rule = the blocked item's rule name, founder_quote verbatim); shown verbatim in summary_table." })),
   kind: Type.Optional(Type.String({ description: "For 'propose_preference': cover_ratio (platform + ratio list) or rule (free-text publish rule)." })),
-  platform: Type.Optional(Type.String({ description: "For 'propose_preference': platform the preference applies to (required for cover_ratio)." })),
+  platform: Type.Optional(Type.String({ description: "For 'propose_preference': platform the preference applies to (required for cover_ratio). For 'confirm_published' on video drafts: required — which platform it went out on (one content_id serves all four video platforms). For 'clipboard': which video platform's kit to copy." })),
   value: Type.Optional(Type.Unknown({ description: "For 'propose_preference': ratio list like [\"3:4\",\"4:3\"] for cover_ratio, or the rule text for rule." })),
   founder_quote: Type.Optional(Type.String({ description: "For 'propose_preference': the founder's exact words behind this preference." })),
 });
@@ -115,6 +119,8 @@ export async function executePublish(
   // getDataDir 统一解析(session-8 收编私有副本的第七处漏网):认 AUTOCREW_DATA_DIR 重定向,
   // 否则隔离工作区/smoke 里 clipboard 会去真实 ~/.autocrew 找稿件
   const dataDir = getDataDir((params._dataDir as string) || undefined);
+  const history = await historyGuard(params.content_id, dataDir);
+  if (history) return history;
 
   // --- check: 发布前把关（只写检查留档，不改业务状态）；propose_preference: 只记提议，创始人在网页确认 ---
   if (action === "check") return executePublishCheck({ ...params, _dataDir: dataDir }, deps?.check);
@@ -135,17 +141,23 @@ export async function executePublish(
     if (!content) {
       return { ok: false, error: `Content not found: ${contentId}` };
     }
-    const platform = (content.platform || "xiaohongshu") as ClipboardPlatform;
+    // 视频稿四平台共用一条稿：带 platform 取那个平台的发布包；文字稿只认自己的平台
+    const asked = typeof params.platform === "string" ? params.platform.trim() : "";
+    const platform = (asked && VIDEO_PLATFORMS.has(asked) && VIDEO_PLATFORMS.has(content.platform ?? "") ? asked : content.platform || "xiaohongshu") as ClipboardPlatform;
     const hashtags = (params.hashtags as string[] | undefined) || content.hashtags || [];
     // V5.4b:视频平台有发布件 → 发的是发布件(平台标题+发布文案,已含标签),不是口播稿截断
-    if (content.videoKit?.caption && VIDEO_PLATFORMS.has(platform)) {
-      const kit = content.videoKit;
+    const kit = VIDEO_PLATFORMS.has(platform) ? videoKitFor(content, platform) : undefined;
+    if (kit?.caption) {
       const output = formatForClipboard(platform, kit.postTitle || content.title, kit.caption, []);
       return { ok: true, data: { ...output, fromVideoKit: true } };
     }
     const output = formatForClipboard(platform, content.title, content.body, hashtags);
     return { ok: true, data: output };
   }
+
+  // 一键更新进行中（self-update §3）：发布类动作不开新的，免得重启时掐断
+  const updating = updatingRefusal();
+  if (updating) return { ok: false, code: "updating", error: updating };
 
   // --- ego_lite_prepare：从不点发布。资料库启用本体之后（发布技能改口补丁在同一时刻套上）按平台出包、每个平台必须带当前有效的
   // check_id（发布前把关 spec §11）；启用之前旧调用方不变：单包出，带了 check_ids 也照新契约出 ---
@@ -211,9 +223,15 @@ export async function executePublish(
     // 否则「稿成→发布」的用时会被越算越短——这条纪律现在由 transitionStatus 统一守。
     // 本体 §6：按本体走的视频稿，模型说「发了」= 待核回执，创始人点 = 「我发了」决定；状态由推导投影
     if (isVideoPlatform(content.platform) && await isOntologyActive(dataDir, contentId)) {
+      // 一条视频四平台共用一条稿：发在哪个平台必须明说，不拿稿件平台顶（spec 2026-10-12 吸收 3）
+      const platform = typeof params.platform === "string" ? params.platform.trim() : "";
+      if (!platform) return { ok: false, code: "platform_required", error: "confirm_published 要带 platform：这条视频发在哪个平台（douyin / wechat_video / xiaohongshu / bilibili），每个平台各确认一次" };
+      // 轮次在写锁内核（recordPublishClaim / founderDecision 各自锁内比对）：重开后旧轮的确认被拒
+      const round = params.round === undefined || params.round === null || params.round === "" ? undefined : Number(params.round);
+      if (round !== undefined && !Number.isInteger(round)) return { ok: false, code: "bad_param", error: "round 要是整数轮次" };
       const r = isModelCall(params)
-        ? await recordPublishClaim(content, getDataDir(dataDir), { platform: content.platform, url: rawUrl || undefined, host: String(params._host ?? "model"), request_id: `confirm-${Date.now()}` })
-        : await founderDecision(contentId, "i_published", { platform: content.platform, url: rawUrl }, getDataDir(dataDir));
+        ? await recordPublishClaim(content, getDataDir(dataDir), { platform, url: rawUrl || undefined, host: String(params._host ?? "model"), request_id: `confirm-${Date.now()}`, ...(round !== undefined ? { round } : {}) })
+        : await founderDecision(contentId, "i_published", { platform, url: rawUrl, ...(round !== undefined ? { round } : {}) }, getDataDir(dataDir));
       if (!r.ok) return r;
       if (rawUrl && !isModelCall(params)) await updateContent(contentId, { publishUrl: rawUrl }, dataDir);
       return { ...r, action: "confirm_published", content_id: contentId };

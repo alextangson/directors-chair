@@ -17,6 +17,9 @@ import {
   serializeOutcomeWrite,
   collectPeerViews,
   spikeReviewReason,
+  sameWork,
+  attributedCopies,
+  guessRetractions,
 } from "./outcome-store.js";
 import type { PendingBinding } from "./platform-items.js";
 import {
@@ -28,6 +31,7 @@ import {
   type PerformanceOutcome,
 } from "./outcome-schema.js";
 import { localDateStamp } from "../analytics/quality-baseline.js";
+import { assertDataDirWritable } from "../../storage/storage-roots.js";
 import type { TypedRow } from "../../adapters/browser/pull-types.js";
 
 export interface ImportReport {
@@ -58,7 +62,8 @@ interface RowContext {
   peerViews: number[];
 }
 
-type PreparedRow = { outcome: PerformanceOutcome; pending: PendingBinding | null } | { error: string };
+type Guess = { platform: string; itemId: string; contentId: string };
+type PreparedRow = { outcome: PerformanceOutcome; pending: PendingBinding | null; retractGuess: Guess | null } | { error: string };
 
 /** undefined/非数值一律剔除：JSON 落盘不留空键，校验也只看真实数值 */
 function compactMetrics(metrics: Partial<OutcomeMetrics>): OutcomeMetrics {
@@ -107,11 +112,35 @@ async function prepareRow(row: TypedRow, ctx: RowContext): Promise<PreparedRow> 
       reviewReasons,
     },
     pending: binding.pending,
+    retractGuess: binding.retractGuess ?? null,
   };
+}
+
+/**
+ * 这一批新认出归属的作品，把它此前未归属的快照一并补挂过去（spec ③ 同一规则用在自动认领上）：
+ * 否则 listOutcomes 的对账会因为出现了已归属版本而丢掉早期快照，D+3/D+7 就没了。
+ */
+function carryOverSnapshots(existing: PerformanceOutcome[], staged: PerformanceOutcome[]): PerformanceOutcome[] {
+  const taken = new Set([...existing, ...staged].map((o) => outcomeKey(o)));
+  const out: PerformanceOutcome[] = [];
+  for (const row of staged) {
+    if (!row.contentId) continue;
+    const earlier = existing.filter((e) => e.contentId === null && sameWork(e, row));
+    out.push(...attributedCopies(earlier, row.contentId, taken));
+  }
+  return out;
 }
 
 function emptyReport(total: number): ImportReport {
   return { total, imported: 0, replaced: 0, matched: 0, historical: 0, needsReview: [], rejected: [] };
+}
+
+/** outcomes 已落盘、之后（提交绑定时）才失败——多半是失去资料库写入权。report 是已入账的那部分 */
+export class PartialImportError extends Error {
+  constructor(readonly report: ImportReport, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "PartialImportError";
+  }
 }
 
 export async function importPerformanceRows(
@@ -121,6 +150,7 @@ export async function importPerformanceRows(
 ): Promise<ImportReport> {
   const rowBase = opts.rowNumberBase ?? 1;
   return serializeOutcomeWrite(opts.dataDir, async () => {
+    assertDataDirWritable(opts.dataDir);
     const existing = await listOutcomes(opts.dataDir);
     const existingKeys = new Set(existing.map((o) => outcomeKey(o)));
     const ctx: RowContext = {
@@ -134,6 +164,7 @@ export async function importPerformanceRows(
     const report = emptyReport(rows.length);
     const staged = new Map<string, PerformanceOutcome>(); // 同键后行覆盖前行
     const pending: PendingBinding[] = [];
+    const guesses: Guess[] = [];
     for (let i = 0; i < rows.length; i += 1) {
       const prepared = await prepareRow(rows[i], ctx);
       if ("error" in prepared) {
@@ -141,6 +172,7 @@ export async function importPerformanceRows(
         continue;
       }
       if (prepared.pending) pending.push(prepared.pending);
+      if (prepared.retractGuess) guesses.push(prepared.retractGuess);
       const key = outcomeKey(prepared.outcome);
       report.imported += 1;
       if (existingKeys.has(key) || staged.has(key)) report.replaced += 1;
@@ -149,11 +181,16 @@ export async function importPerformanceRows(
       staged.set(key, prepared.outcome);
     }
 
-    const finals = [...staged.values()];
-    report.needsReview = finals.filter((o) => o.needsReview); // 只报真正落盘的那条
+    const finals = [...staged.values(), ...carryOverSnapshots(existing, [...staged.values()]), ...guessRetractions(existing, guesses)];
+    report.needsReview = finals.filter((o) => o.needsReview && !o.retracted); // 只报真正落盘的那条
     await appendOutcomes(finals, opts.dataDir);
     // 先 outcomes 后绑定：绑定是索引，写序反了会出现「指着不存在的行」的绑定
-    await commitResolvedBindings(pending, opts.dataDir);
+    try {
+      await commitResolvedBindings(pending, opts.dataDir);
+    } catch (err) {
+      // 行已落盘：把已入账的报告带出去，调用方才不会把「写了 N 行」报成「零写入」
+      throw new PartialImportError(report, err);
+    }
     return report;
   });
 }

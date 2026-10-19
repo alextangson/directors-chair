@@ -3,10 +3,11 @@
  * 列归属一律用 explain()（与我的内容、晨报、desk 同一个），不另立口径；本体未启用时 explain 按旧状态给列（影子模式）。
  * 发布记录已投出的待发布稿由 explain 直接归到已发布——从前在这里读时改状态（syncPublished），现已删除。
  */
+import { cachedSha } from "../modules/production/hash-cache.js";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { listContents, listTopics, type Content, type Topic } from "../storage/local-store.js";
+import { isImportedHistory } from "../storage/imported-history.js";
 import { scriptText } from "../storage/my-content-plan.js";
 import { explainContent, explainContext, type ExplainContext } from "../modules/production/read.js";
 import { readReconcileReport, type ReconcileReport } from "../modules/production/reconcile.js";
@@ -17,6 +18,15 @@ import { readPublishRecord, recordTime, type PublishRecord } from "../storage/pu
 import { isVideoPlatform } from "../storage/stage-guard.js";
 import { readProductionDoc } from "../storage/production-store.js";
 import { storyboards, versionLabel } from "../modules/production/storyboard.js";
+import { inCurrentSlate, latestMeetingDate } from "../modules/meetings/meeting-store.js";
+import { editorLabel } from "../modules/production/workbench.js";
+import { draftRef } from "../modules/production/inbox.js";
+import { isBeingWritten } from "../modules/production/trash-guard.js";
+import { handoffView, type HandoffView } from "../modules/production/handoff-view.js";
+export { handoffView };
+import { publishTargets, type PublishTarget } from "../modules/production/targets.js";
+
+export { isBeingWritten };
 
 export type BoardColumn = "选题" | Column;
 
@@ -28,6 +38,8 @@ export interface BoardItem {
   platform: string | null;
   status: string;
   topicId: string | null;
+  /** 试跑示例稿（O20）：卡上标「示例」并给一键删 */
+  example?: boolean;
   column: Exclude<BoardColumn, "选题">;
   createdAt: string;
   updatedAt: string;
@@ -48,6 +60,10 @@ export interface BoardItem {
   missing: string[];
   /** 最新一版分镜的版本号（「v001」）；没有分镜 / 不按本体走 = null */
   storyboard?: string | null;
+  /** 谁在剪：Claude / Codex / WorkBuddy / 你 / agent */
+  editorLabel?: string;
+  /** 「稿子写好了」这件事的身份与代次（稿子在 draft_ready 时有） */
+  draftRef?: { item_id: string; gen: string };
   badges: string[];
   /** 真有问题的提示（卡上标红）：未登记就发布、文件不见了、被驳回… */
   alerts: string[];
@@ -56,6 +72,16 @@ export interface BoardItem {
   candidates: CandidateView[];
   /** 这张卡按本体走（资料库已启用、没被排除、视频稿）：点开面板、拖动按 §10 规则；否则走旧流程 */
   active: boolean;
+  /** 正在写（后台生成占位稿或还活着的写手认领）：看板不许移入回收站 */
+  writing: boolean;
+  /** 视频稿的各发布平台（一条视频一张卡）：状态 + 这个平台还剩什么动作；文字稿 = [] */
+  targets: PublishTarget[];
+  /** 只有回执、没走认稿就发了：只提醒 */
+  noScriptApproval: boolean;
+  /** 本轮轮次（按平台动作要带它）；不按本体走 = null */
+  round: number | null;
+  /** 「开始写」交给了谁、有没有 agent 接手、谁正认领着（spec 2026-10-15 §B5）；没交过 = 不带 */
+  handoff?: HandoffView;
 }
 
 export interface BoardTopic {
@@ -66,6 +92,10 @@ export interface BoardTopic {
   score: number | null;
   createdAt: string;
   renewedAt: string | null;
+  /** 在本周片单里（选题会 spec §0.3）：会议位指向最近一次会议 → 选题列置顶 + 标签；选中≠开工 */
+  inSlate: boolean;
+  /** 试跑示例（O20）：卡上标「示例」并给一键删 */
+  example?: boolean;
 }
 
 export interface BoardData {
@@ -84,16 +114,6 @@ export function countChars(text: string): number {
 
 const PUBLISH_STATUSES = new Set(["publish_ready", "publishing", "published"]);
 
-const shaCache = new Map<string, { mtimeMs: number; size: number; sha: string }>();
-async function cachedSha(file: string): Promise<string> {
-  const st = await fs.stat(file);
-  const hit = shaCache.get(file);
-  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.sha;
-  const sha = createHash("sha256").update(await fs.readFile(file)).digest("hex");
-  shaCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, sha });
-  return sha;
-}
-
 /** 已选那版的 3:4（选用 / 登记时拷成 05-cover/封面-3x4.*）；没选就不放图（§30） */
 export async function coverOf(contentId: string, dataDir: string): Promise<BoardCover | null> {
   const binding = resolveContentProject(contentId, dataDir);
@@ -103,7 +123,7 @@ export async function coverOf(contentId: string, dataDir: string): Promise<Board
   const name = names.find((n) => /^封面-3x4\.(png|jpe?g)$/i.test(n));
   if (!name) return null;
   const rel = `05-cover/${name}`;
-  return { path: rel, sha256: await cachedSha(path.join(binding.project_root, rel)) };
+  return { path: rel, sha256: (await cachedSha(path.join(binding.project_root, rel))).sha256 };
 }
 
 /** 最近一条已登记成片的语速：定稿字数 ÷ 成片分钟数 */
@@ -119,51 +139,61 @@ export async function wordsPerMinute(contents: Content[], dataDir: string): Prom
 }
 
 /** 看板卡片信息行的「分镜 vNNN」：最新一版分镜（spec 2026-09-30-storyboard-review-check §4） */
-async function storyboardVersion(id: string, dataDir: string): Promise<string | null> {
+async function productionInfo(id: string, dataDir: string): Promise<{ storyboard: string | null; editorLabel: string }> {
   const doc = await readProductionDoc(id, dataDir).catch(() => null);
   const latest = doc ? storyboards(doc)[0] : undefined;
-  return latest ? versionLabel(latest.version) : null;
+  // 谁在剪（review-inbox §10）：按事实的 by.host 显示真实 agent，不写死「Codex」
+  return { storyboard: latest ? versionLabel(latest.version) : null, editorLabel: doc ? editorLabel(doc) : "agent" };
 }
 
 async function itemOf(c: Content, dataDir: string, ctx: ExplainContext): Promise<BoardItem | null> {
   const current = c;
-  const publish: PublishRecord | null = PUBLISH_STATUSES.has(c.status) || c.manualPublications?.length
+  // 视频稿总读发布计划：平台标签要计划里的平台清单（吸收 13）
+  const publish: PublishRecord | null = PUBLISH_STATUSES.has(c.status) || c.manualPublications?.length || isVideoPlatform(c.platform)
     ? await readPublishRecord(c.id, c.manualPublications, dataDir) : null;
   const exp = await explainContent(c, dataDir, ctx, publish);
   const col = exp.column;
   const active = ctx.enabled && !ctx.excluded.has(current.id) && isVideoPlatform(current.platform);
   // 归档 / 未知状态 / 选题占位不进任何列（§6）
   if (!col) return null;
+  const doc = isVideoPlatform(current.platform) ? await readProductionDoc(current.id, dataDir).catch(() => null) : null;
   return {
+    targets: publishTargets(current, doc, publish, active), noScriptApproval: exp.no_script_approval === true, round: active ? doc?.round ?? 1 : null,
     id: current.id, title: current.title, platform: current.platform ?? null, status: current.status,
-    topicId: current.topicId ?? null, column: col, createdAt: current.createdAt, updatedAt: current.updatedAt,
+    topicId: current.topicId ?? null, ...(current.example ? { example: true } : {}), column: col, createdAt: current.createdAt, updatedAt: current.updatedAt,
     draftReadyAt: current.draftReadyAt ?? null, chars: countChars(current.body ?? ""),
     finalDurationMs: current.video?.final?.duration_ms ?? null,
     handoffHash: current.video?.handoff?.hash ?? null,
     cover: col === "待发布" || col === "已发布" ? await coverOf(current.id, dataDir).catch(() => null) : null,
     publish, publishTime: publish ? recordTime(publish) ?? current.publishedAt : current.publishedAt,
     lastError: current.lastError ?? null, blockedReason: current.blockedReason ?? null,
-    active,
+    active, writing: isBeingWritten(current), ...(handoffView(current) ? { handoff: handoffView(current)! } : {}),
     missing: exp.missing, badges: exp.badges, alerts: exp.alerts, reason: exp.reason, candidates: exp.candidates,
-    storyboard: active ? await storyboardVersion(current.id, dataDir) : null,
+    ...(active ? await productionInfo(current.id, dataDir) : { storyboard: null }),
+    // 看板拖「写稿中 → 待录制」认稿要带它（整分支审 4 P1）
+    ...(draftRef(current) ? { draftRef: draftRef(current)! } : {}),
   };
 }
 
-function topicOf(t: Topic): BoardTopic {
-  return { id: t.id, title: t.title, source: t.source ?? null, link: t.link ?? null, score: typeof t.score === "number" ? t.score : null, createdAt: t.createdAt, renewedAt: t.renewedAt ?? null };
+function topicOf(t: Topic, latestMeeting: string | null): BoardTopic {
+  return { id: t.id, title: t.title, source: t.source ?? null, link: t.link ?? null, score: typeof t.score === "number" ? t.score : null, createdAt: t.createdAt, renewedAt: t.renewedAt ?? null,
+    inSlate: inCurrentSlate(t, latestMeeting), ...(t.example ? { example: true } : {}) };
 }
 
 export async function boardData(dataDir: string): Promise<BoardData> {
-  const [contents, topics, ctx] = await Promise.all([listContents(dataDir), listTopics(dataDir), explainContext(dataDir)]);
+  const [all, topics, ctx] = await Promise.all([listContents(dataDir), listTopics(dataDir), explainContext(dataDir)]);
+  // 历史作品记录只挂回流数据，不是生产稿，不上看板
+  const contents = all.filter((c) => !isImportedHistory(c));
   const items: BoardItem[] = [];
   for (const c of contents) {
     const item = await itemOf(c, dataDir, ctx);
     if (item) items.push(item);
   }
   const started = new Set(contents.filter((c) => c.topicId).map((c) => c.topicId!));
+  const latestMeeting = await latestMeetingDate(dataDir);
   return {
     items,
-    topics: topics.filter((t) => !started.has(t.id)).map(topicOf),
+    topics: topics.filter((t) => !started.has(t.id)).map((t) => topicOf(t, latestMeeting)),
     wordsPerMinute: await wordsPerMinute(contents, dataDir),
     ontology: { enabled: ctx.enabled, report: await readReconcileReport(dataDir) },
   };

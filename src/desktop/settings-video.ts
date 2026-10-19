@@ -1,3 +1,4 @@
+import { isWithin, readLibraryLocation } from "../storage/storage-roots.js";
 /**
  * 视频线配置（设计 spec §8.1）——`<dataDir>/video.json`（600 权限）。
  *
@@ -33,7 +34,11 @@ export interface VideoSettings {
 
 const VIDEO_FILE = "video.json";
 const VIDEO_FIELDS = ["render_concurrency", "snapshot_copy", "jianying_export_dir"];
-const KNOWN_KEYS = ["renderConcurrency", "snapshotCopy", "jianyingExportDir"];
+/**
+ * 这里管的键。arollAutoFindPaused / arollWatchFolders 是自动找原片停用前的旧键（手动收件 spec 2026-10-06）：
+ * 读时忽略，下次写盘时随之丢掉，不再原样带着。
+ */
+const KNOWN_KEYS = ["renderConcurrency", "snapshotCopy", "jianyingExportDir", "arollAutoFindPaused", "arollWatchFolders"];
 /** 单机渲染，超过这个数只会互相抢 CPU；上限是防呆不是性能建议 */
 const MAX_RENDER_CONCURRENCY = 16;
 
@@ -96,7 +101,14 @@ export async function getVideoSettings(payload: Record<string, unknown>): Promis
 async function exportDirError(v: unknown): Promise<string | null> {
   if (typeof v !== "string" || !path.isAbsolute(v.trim())) return "jianying_export_dir 必须是完整的绝对路径（清空传 null）";
   const st = await fs.stat(v.trim()).catch(() => null);
-  return st?.isDirectory() ? null : `剪映导出目录不存在或不是文件夹：${v.trim()}`;
+  if (!st?.isDirectory()) return `剪映导出目录不存在或不是文件夹：${v.trim()}`;
+  // 与资料库重叠（verifier 2a P3）（在库内或是库的祖先）就拒——它是可搬入根
+  const lib = readLibraryLocation()?.root;
+  if (lib) {
+    const [real, libReal] = await Promise.all([fs.realpath(v.trim()).catch(() => v.trim()), fs.realpath(lib).catch(() => lib)]);
+    if (isWithin(libReal, real) || isWithin(real, libReal)) return `剪映导出目录和资料库重叠（${libReal}），换一个文件夹`;
+  }
+  return null;
 }
 
 /** 增量应用到 next（就地改），返回错误串或 null。清空 = 传 null / 0 / 空串 */
@@ -126,6 +138,61 @@ async function applyVideoUpdates(next: VideoSettings, payload: Record<string, un
   return null;
 }
 
+/**
+ * video.json 的读改写按文件串行（Codex 审 segB9 P2）：两个请求各读同一份旧文件、各写回整份，后写的会把先写的改动抹掉
+ * 。所有写口——浏览器专属路由、invoke 的 setVideoSettings——都排这一队。
+ */
+const fileLocks = new Map<string, Promise<unknown>>();
+
+function withVideoFileLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const prev = fileLocks.get(file) ?? Promise.resolve();
+  const run = prev.catch(() => undefined).then(fn);
+  const tail = run.catch(() => undefined);
+  fileLocks.set(file, tail);
+  void tail.then(() => { if (fileLocks.get(file) === tail) fileLocks.delete(file); });
+  return run;
+}
+
+/** 原子写（临时文件 + rename），600 权限 */
+async function writeVideoJson(filePath: string, data: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
+  await fs.rename(tmp, filePath);
+  await fs.chmod(filePath, 0o600); // 已存在的松权限文件也要收紧
+}
+
+/** 只能由浏览器会话改的键（1b §5，§14-7）：它们决定「可搬入根」，是服务端凭据，模型 / bearer / invoke 都改不了 */
+export const BROWSER_ONLY_VIDEO_FIELDS = ["jianying_export_dir", "jianyingExportDir"];
+
+/** `video:settings_set` 的 IPC 入口（/api/invoke、MCP 都走这里）：浏览器专属的键一律拒，别的照旧 */
+export async function setVideoSettingsViaInvoke(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const hit = payload && typeof payload === "object" ? BROWSER_ONLY_VIDEO_FIELDS.filter((k) => (payload as Record<string, unknown>)[k] !== undefined) : [];
+  if (hit.length) return { ok: false, code: "browser_session_only", error: `${hit.join("、")} 只能在设置页「剪映导出目录」里改（浏览器会话），这里不收` };
+  return setVideoSettings(payload);
+}
+
+/** 浏览器会话路由用：读改写整份 video.json（保留别的模块的键），600 权限 */
+export async function mutateVideoSettings(dataDir: string | undefined, fn: (next: VideoSettings) => Promise<string | null> | string | null): Promise<{ ok: true; settings: VideoSettings } | { ok: false; error: string }> {
+  const filePath = videoFilePath(dataDir);
+  const r = await withVideoFileLock(filePath, async (): Promise<{ ok: true; settings: VideoSettings } | { ok: false; error: string }> => {
+    const raw = await readVideoJson(dataDir);
+    const next = normalizeVideo(raw);
+    const error = await fn(next);
+    if (error) return { ok: false, error };
+    const others = Object.fromEntries(Object.entries(raw).filter(([k]) => !KNOWN_KEYS.includes(k)));
+    await writeVideoJson(filePath, { ...others, ...next });
+    return { ok: true, settings: next };
+  });
+  if (r.ok) notifyVideoSettingsChanged(r.settings);
+  return r;
+}
+
+/** 剪映导出目录的校验（浏览器会话路由复用） */
+export async function jianyingDirError(v: unknown): Promise<string | null> {
+  return exportDirError(v);
+}
+
 /** 设置页写：落工作区 video.json（600 权限），成功且有实变更才广播 */
 export async function setVideoSettings(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
@@ -136,19 +203,20 @@ export async function setVideoSettings(payload: Record<string, unknown>): Promis
   }
   const dataDir = (payload._dataDir as string) || undefined;
   try {
-    const raw = await readVideoJson(dataDir);
-    const next = normalizeVideo(raw);
-    const before = JSON.stringify(next);
-    const error = await applyVideoUpdates(next, payload);
-    if (error) return { ok: false, error };
-
     const filePath = videoFilePath(dataDir);
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    // 同一个文件里还有别的模块的键（交接白名单 project_roots）：原样保留，只改自己的字段
-    const others = Object.fromEntries(Object.entries(raw).filter(([k]) => !KNOWN_KEYS.includes(k)));
-    await fs.writeFile(filePath, JSON.stringify({ ...others, ...next }, null, 2) + "\n", { mode: 0o600 });
-    await fs.chmod(filePath, 0o600); // 已存在的松权限文件也要收紧
-    if (JSON.stringify(next) !== before) notifyVideoSettingsChanged(next);
+    const error = await withVideoFileLock(filePath, async () => {
+      const raw = await readVideoJson(dataDir);
+      const next = normalizeVideo(raw);
+      const before = JSON.stringify(next);
+      const bad = await applyVideoUpdates(next, payload);
+      if (bad) return bad;
+      // 同一个文件里还有别的模块的键（交接白名单 project_roots）：原样保留，只改自己的字段
+      const others = Object.fromEntries(Object.entries(raw).filter(([k]) => !KNOWN_KEYS.includes(k)));
+      await writeVideoJson(filePath, { ...others, ...next });
+      if (JSON.stringify(next) !== before) notifyVideoSettingsChanged(next);
+      return null;
+    });
+    if (error) return { ok: false, error };
     return getVideoSettings({ _dataDir: dataDir });
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

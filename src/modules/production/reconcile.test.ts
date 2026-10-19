@@ -16,6 +16,7 @@ import { resetProductionReady } from "./service.js";
 import { sha256File } from "../video/handoff/manifest.js";
 import { draftHash } from "../../storage/draft-hash.js";
 import { exists, founderApprove, makeEnv, setContent, png, projectRoot, put, record, SRT, videoContent, type Env } from "./testkit.js";
+import { HUMAN_WRITE } from "../../storage/first-body-guard.js";
 
 let env: Env;
 beforeEach(async () => { env = await makeEnv(); });
@@ -66,7 +67,7 @@ describe("影子模式（§4.1）：只算不写，给差异清单", () => {
     expect(doc.facts.map((f) => f.kind).sort()).toEqual(["aroll", "cover", "cover", "cut", "srt"]);
     expect(doc.facts.find((f) => f.kind === "srt")!.for_cut).toBe(doc.facts.find((f) => f.kind === "cut")!.sha256);
     const board = await boardData(env.dir);
-    expect(board.items.find((i) => i.id === c.id)).toMatchObject({ column: "剪辑中", missing: ["成片待你审", "抽帧检查还没有结果", "封面待你选"] });
+    expect(board.items.find((i) => i.id === c.id)).toMatchObject({ column: "剪辑中", missing: ["封面(4:3)"] }); // 对账收的导出不算待审；exports/ 里的图只做候选（review-inbox §6.2、§7-1）
     expect((await reconcileAll(env.dir)).moves).toEqual([]);
   });
 
@@ -137,7 +138,7 @@ describe("对账（§4）：启用之后", () => {
     await put(path.join(root, "04-edit/rough.mp4"), "rough");
     await fs.writeFile(path.join(root, "00-project/autocrew/execution.json"), JSON.stringify({ schema: 2, generation: 1, session_id: "s", machine: "m", host: "codex", transport_session: null, heartbeat: { request_id: "", session_id: "", result: "", next_action: "", reported_at: "" }, artifacts: [{ path: "04-edit/rough.mp4", sha256: "0".repeat(64), role: "final-cut", generation: 1, reported_at: "x" }] }));
     const cover = await put(path.join(env.outside, "attached.png"), png(900, 1200, "att"));
-    await updateContent(c.id, { assets: [{ filename: "attached.png", libraryPath: path.relative(env.dir, cover), type: "cover", addedAt: "x" }] }, env.dir);
+    await updateContent(c.id, { _provenance: HUMAN_WRITE, assets: [{ filename: "attached.png", libraryPath: path.relative(env.dir, cover), type: "cover", addedAt: "x" }] }, env.dir);
     await reconcileAll(env.dir);
     const doc = (await readProductionDoc(c.id, env.dir))!;
     expect(doc.facts.find((f) => f.kind === "cut")).toMatchObject({ source: "legacy", state: "accepted", path: "04-edit/rough.mp4" });
@@ -168,18 +169,25 @@ describe("对账（§4）：启用之后", () => {
     expect(cuts[1].replaced_at).toBeUndefined();
   });
 
-  it("外部候选：收件箱原片对上认过稿的标题 → aroll 候选；ChatCut 导出对上已发布稿 → post_publish 候选；不动阶段", async () => {
+  it("手动收件（spec 2026-10-06）：巡检不看收件箱 / 导出目录——名字对得上也不挂、不建候选、不挪、不转写，报告没有收件箱字段", async () => {
     const waiting = await videoContent(env, TITLE, "draft_ready");
     const done = await videoContent(env, "已经发布的那条视频", "published");
-    await enableOntology(env.dir);
-    await put(path.join(env.inbox, "AI又忘了怎么办-原片.mov"), "raw");
-    await put(path.join(env.chatcut, "已经发布的那条视频-v2.mp4"), "new-export");
-    await put(path.join(env.chatcut, "毫不相干.mp4"), "other");
-    await reconcileAll(env.dir);
-    expect((await readProductionDoc(waiting.id, env.dir))!.facts).toMatchObject([{ kind: "aroll", state: "candidate", source: "reconcile" }]);
-    expect((await readProductionDoc(done.id, env.dir))!.facts).toMatchObject([{ kind: "cut", state: "candidate", post_publish: true }]);
+    const raw = await put(path.join(env.inbox, "AI又忘了怎么办-原片.mov"), "raw");
+    const exported = await put(path.join(env.chatcut, "已经发布的那条视频-v2.mp4"), "new-export");
+    // 影子模式（未启用）与启用后各跑一轮：都不碰外部目录
+    for (const enable of [false, true]) {
+      if (enable) await enableOntology(env.dir);
+      const report = await reconcileAll(env.dir);
+      expect(report).not.toHaveProperty("inbox");
+      expect(report).not.toHaveProperty("watch");
+      expect((await readProductionDoc(waiting.id, env.dir))?.facts ?? []).toEqual([]);
+      expect((await readProductionDoc(done.id, env.dir))?.facts ?? []).toEqual([]);
+      expect(await exists(raw)).toBe(true);
+      expect(await exists(exported)).toBe(true);
+    }
     expect((await getContent(done.id, env.dir))!.status).toBe("published");
-    expect(await exists(path.join(env.inbox, "AI又忘了怎么办-原片.mov"))).toBe(true);
+    const { transcriptCacheDir } = await import("./match/cache.js");
+    expect(await fs.readdir(transcriptCacheDir(env.dir)).catch(() => [])).toEqual([]);
   });
 
   it("逐条隔离：一条的制作记录坏了，别条照常对账，失败进报告与看板", async () => {

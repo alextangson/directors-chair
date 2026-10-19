@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import { historyGuard } from "./history-guard.js";
 import { contentSummary } from "./content-summary.js";
 import { gateClaimWrite, redactClaim, type WriteGate } from "../storage/claims.js";
 import {
@@ -21,8 +22,7 @@ import {
   softDeleteContent,
   restoreContent,
   getCoverReview,
-  type ContentUpdates,
-} from "../storage/local-store.js";
+  type ContentUpdates, TOPIC_PLACEHOLDER_BODY_PREFIX } from "../storage/local-store.js";
 import type { AdoptionVerdict, Content } from "../storage/local-store.js";
 import { EDITING_VIA_HANDOFF, EDITING_VIA_ONTOLOGY, isModelCall, isVideoPlatform } from "../storage/stage-guard.js";
 import { recordDiff } from "../modules/learnings/diff-tracker.js";
@@ -30,9 +30,14 @@ import { shouldDistillStyle, distillStyleRules } from "../modules/learnings/styl
 import type { StyleDistillResult } from "../modules/learnings/style-distiller.js";
 import { deriveAndRecordAdoption } from "../modules/learnings/adoption-derive.js";
 import { isFrozen, isOntologyEnabled, readProductionDoc, ScriptFrozenError } from "../storage/production-store.js";
-import { executeRecord } from "../modules/production/record.js";
+import { executeMarkReady, executeRecord } from "../modules/production/record.js";
+import { executeAnswerAsk, executeAsk, executeWithdrawAsk } from "../modules/production/asks.js";
 import { checkSlivers } from "../modules/production/sliver/self-check.js";
-import { reconcileContent } from "../modules/production/reconcile.js";
+import { reconcileContentForRead } from "../modules/production/reconcile.js";
+import { newDraftAngleRefusal } from "../modules/research/angle-gate.js";
+import { sameVideoRefusal } from "./variant-guard.js";
+import { boardTrashRefusal } from "../modules/production/trash-guard.js";
+import { FirstBodyRefusedError, provenanceOf } from "../storage/first-body-guard.js";
 
 const ALL_STATUSES = [
   "topic_saved", "drafting", "needs_evidence", "draft_ready", "reviewing", "revision",
@@ -41,17 +46,21 @@ const ALL_STATUSES = [
   "draft", "review",
 ] as const;
 
+
+/** autocrew_content 里会写稿件的动作（对 imported_history 一律不受理） */
+const HISTORY_WRITE_ACTIONS: ReadonlySet<string> = new Set(["update", "record", "mark_ready", "ask", "answer_ask", "withdraw_ask", "delete", "restore", "adoption", "transition", "create_variant"]);
 export const contentSaveSchema = Type.Object({
-  action: Type.Unsafe<"save" | "list" | "get" | "summary" | "update" | "transition" | "create_variant" | "siblings" | "allowed_transitions" | "adoption" | "delete" | "restore" | "record" | "check_slivers">({
+  action: Type.Unsafe<"save" | "list" | "get" | "summary" | "update" | "transition" | "create_variant" | "siblings" | "allowed_transitions" | "adoption" | "delete" | "restore" | "record" | "check_slivers" | "mark_ready" | "ask" | "answer_ask" | "withdraw_ask">({
     type: "string",
-    enum: ["save", "list", "get", "summary", "update", "transition", "create_variant", "siblings", "allowed_transitions", "adoption", "delete", "restore", "record", "check_slivers"],
+    enum: ["save", "list", "get", "summary", "update", "transition", "create_variant", "siblings", "allowed_transitions", "adoption", "delete", "restore", "record", "check_slivers", "mark_ready", "ask", "answer_ask", "withdraw_ask"],
     description:
       "Action: 'save' new content, 'list' all, 'get' by id, 'update' existing, " +
       "'transition' change status via state machine, 'create_variant' create platform variant from topic, " +
       "'siblings' list sibling content, 'allowed_transitions' show valid next statuses, " +
       "'adoption' record adoption verdict (采纳率北极星读数)——仅工作台可用，宿主调用会被服务端拒绝（采纳不能由模型代填）, " +
       "'record' 报制作事实（原片 aroll / 成片 cut / 字幕 srt / 封面 cover / ChatCut 工程 chatcut_project）：只报盘上有什么，不带任何批准；认稿、成片通过、选封面只能创始人点; " +
-      "'check_slivers' 导出前自查抽帧缝（两段 B-roll / 动效之间露出 <1 秒的真人），只读、不写任何记录，可带 chatcut_project_id / timeline_id.",
+      "'check_slivers' 导出前自查抽帧缝（两段 B-roll / 动效之间露出 <1 秒的真人），只读、不写任何记录，可带 chatcut_project_id / timeline_id; " +
+      "'mark_ready' 成片可以审了（配乐、混音都好了才标）; 'ask' 剪辑途中请示创始人（进「等你拍板」，并马上在聊天里把问题和附件给他看）; 'answer_ask' 记创始人在聊天里的回答（founder_quote 逐字，任何请示都收）; 'withdraw_ask' 撤回请示.",
   }),
   id: Type.Optional(Type.String({ description: "Content id (for get/update/transition/siblings/allowed_transitions)" })),
   content_id: Type.Optional(Type.String({ description: "Alias of `id` — other AutoCrew tools call it content_id" })),
@@ -61,6 +70,7 @@ export const contentSaveSchema = Type.Object({
   body: Type.Optional(Type.String({ description: "Content body (markdown)" })),
   platform: Type.Optional(Type.String({ description: "Target platform: xhs, douyin, wechat_video, wechat_mp, bilibili" })),
   topicId: Type.Optional(Type.String({ description: "Related topic id (for save/create_variant)" })),
+  distinct_video: Type.Optional(Type.Boolean({ description: "create_variant：同选题另做一条内容不同的新视频时才填 true。同一条视频发多平台不建变体，在发布计划里加平台。" })),
   status: Type.Optional(Type.Unsafe<string>({
     type: "string",
     enum: ALL_STATUSES as unknown as string[],
@@ -98,10 +108,12 @@ export const contentSaveSchema = Type.Object({
   })),
   kind: Type.Optional(Type.Unsafe<string>({
     type: "string",
-    enum: ["aroll", "cut", "srt", "cover", "chatcut_project", "publish", "storyboard"],
-    description: "record：事实种类。aroll 原片、cut 成片、srt 字幕、cover 封面、chatcut_project ChatCut 工程、publish 发布回执（记为待核，等创始人确认或数据回流核实）、storyboard 分镜（只收 build_material_review.py 生成的 03-broll/review-vNNN/*.html）.",
+    enum: ["aroll", "cut", "srt", "cover", "chatcut_project", "publish", "storyboard", "粗剪", "分镜", "样片", "花费", "配乐", "其他"],
+    description: "record：事实种类；ask：请示种类（粗剪 / 分镜 / 样片 / 花费 / 配乐 / 其他）。aroll 原片、cut 成片、srt 字幕、cover 封面、chatcut_project ChatCut 工程、publish 发布回执（带本平台 url 或报定时的直接算已投出，其余待核）、storyboard 分镜（只收 build_material_review.py 生成的 03-broll/review-vNNN/*.html）.",
   })),
   request_id: Type.Optional(Type.String({ description: "record：这次报告的请求号；重试用同一个，服务端直接重放上次结果." })),
+  since_seq: Type.Optional(Type.Integer({ minimum: 0, description: "summary：只要这个时间线序号之后的变化；翻页用上次回的 next_since_seq（has_more=true 就接着翻）." })),
+  aroll_offset: Type.Optional(Type.Integer({ minimum: 0, description: "summary：原片列表（本轮全部原片，按时间排）的游标，和 since_seq 各管各的；aroll_has_more=true 时用上次回的 aroll_next_offset 接着读." })),
   path: Type.Optional(Type.String({ description: "record：文件的本机路径（可 ~ 开头）。项目内原地收；原片收件箱、ChatCut / 剪映导出目录会挪 / 克隆进项目；其他位置只记候选." })),
   ratio: Type.Optional(Type.String({ description: "record kind=cover：3:4 或 4:3（按像素核对）." })),
   version: Type.Optional(Type.Integer({ minimum: 1, description: "record kind=cover：封面版本号；不填就放新一版." })),
@@ -111,9 +123,22 @@ export const contentSaveSchema = Type.Object({
   chatcut_project_id: Type.Optional(Type.String({ description: "record kind=chatcut_project / check_slivers：ChatCut 工程 id." })),
   timeline_id: Type.Optional(Type.String({ description: "record kind=chatcut_project / check_slivers：时间线 id（可选）." })),
   note: Type.Optional(Type.String({ description: "record：一句备注（可选）." })),
+  review: Type.Optional(Type.Boolean({ description: "record kind=cut：这版可以审了." })),
+  paths: Type.Optional(Type.Array(Type.String(), { description: "record kind=cover：一组 [3:4, 4:3]." })),
+  pair_with: Type.Optional(Type.String({ description: "record kind=cover：和这张封面 fact_id 成对." })),
+  fact_id: Type.Optional(Type.String({ description: "mark_ready：成片 fact_id；ask kind=分镜：分镜 fact_id." })),
+  question: Type.Optional(Type.String({ description: "ask：问什么." })),
+  options: Type.Optional(Type.Array(Type.Unknown(), { description: "ask：2–4 个 {id,label}；分镜要有 id=approve." })),
+  attachments: Type.Optional(Type.Array(Type.Unknown(), { description: "ask：项目内附件 [{path}]." })),
+  ask_id: Type.Optional(Type.String({ description: "answer_ask / withdraw_ask：请示 id." })),
+  option_id: Type.Optional(Type.String({ description: "answer_ask：选项 id." })),
+  founder_quote: Type.Optional(Type.String({ description: "answer_ask：创始人原话，逐字." })),
+  asks_offset: Type.Optional(Type.Integer({ minimum: 0, description: "summary：请示翻页游标（asks_next_offset）." })),
   account: Type.Optional(Type.String({ description: "record kind=publish：发布账号（可选）." })),
   url: Type.Optional(Type.String({ description: "record kind=publish：作品链接（或填 item_id）." })),
   item_id: Type.Optional(Type.String({ description: "record kind=publish：平台作品 id（或填 url）." })),
+  pub_state: Type.Optional(Type.String({ description: "kind=publish：public/reviewing/scheduled." })),
+  scheduled_at: Type.Optional(Type.String({ description: "scheduled 的定时公开时间（ISO）." })),
   claim_token: Type.Optional(Type.String({
     description:
       "认领令牌（写操作回执或 autocrew_desk claim 给的）。这篇有活认领时 update / transition 必须带它，同宿主的另一个会话也一样；没人认领就不用带，写下去会自动认领并回令牌。",
@@ -209,7 +234,12 @@ export async function executeContentSave(
   if (params.id === undefined && typeof params.content_id === "string") params.id = params.content_id;
   const dataDir = (params._dataDir as string) || undefined;
   const isMcpCall = typeof params._host === "string";
+  // 模型发起的调用（MCP 注入 _host；OpenClaw 注入 _modelCall）——占位填正文、无选题新建稿这几道护栏都按它判，
+  // 不带标记的人手编辑照旧
+  const modelCall = isModelCall(params);
   const manualImport = params.source === "manual_import" && typeof params.import_reason === "string" && Boolean(params.import_reason.trim());
+  // 写正文的来源交给存储层的选题会卡口（唯一判定点）；这里的提前拒绝只是更好懂的提示
+  const provenance = provenanceOf(params, { manualImport });
   const importReceipt = {
     saved: true, quality_status: "unreviewed", needs_attention: true,
     writing_source: { kind: "manual_import" },
@@ -227,18 +257,29 @@ export async function executeContentSave(
   }
 
   // 只读进度摘要（v1.3）：查「这篇到哪了」不用拉 16KB 的整篇
-  if (action === "summary") return contentSummary(String(params.id ?? "").trim(), dataDir);
+  if (action === "summary") return contentSummary(String(params.id ?? "").trim(), dataDir, Date.now(), params.since_seq, params.aroll_offset, params.asks_offset);
+
+  // 历史作品记录：所有写动作不受理（改正文、报制作事实、推进、删除……）；删除只走 autocrew_insights history_delete
+  if (HISTORY_WRITE_ACTIONS.has(String(action))) {
+    const history = await historyGuard(params.id ?? params.content_id, dataDir);
+    if (history) return history;
+  }
 
   // 本体 §3：agent 只报事实（原片 / 成片 / 字幕 / 封面 / ChatCut 工程），不要认领、不要交接
   if (action === "record") return executeRecord(params);
+  if (action === "mark_ready") return executeMarkReady(params);
+  // 等你拍板 §5：剪辑途中的请示（agent 发起 / 撤回 / 转述创始人在聊天里的回答）
+  if (action === "ask") return executeAsk(params);
+  if (action === "answer_ask") return executeAnswerAsk(params);
+  if (action === "withdraw_ask") return executeWithdrawAsk(params);
   // 抽帧缝自查（spec 2026-09-30 §7）：只返回结果，不写事实、不影响批准
   if (action === "check_slivers") return checkSlivers(params);
 
   if (action === "get") {
     const id = params.id as string;
     if (!id) return { ok: false, error: "id is required for get" };
-    // 本体 §4：get 前对这条做一次项目内快扫（只在启用后写）；扫失败照样给稿，但把原因带出来
-    const scanned = await reconcileContent(id, dataDir ?? getDataDir()).then(() => null, (e: unknown) => (e instanceof Error ? e.message : String(e)));
+    // 本体 §4：get 前对这条做一次项目内快扫（只在启用后写）；扫失败或锁被后台长任务占着就照样给稿，但把原因带出来
+    const scanned = await reconcileContentForRead(id, dataDir ?? getDataDir()).catch((e: unknown) => (e instanceof Error ? e.message : String(e)));
     const content = await getContent(id, dataDir);
     if (!content) return { ok: false, error: `Content ${id} not found` };
     const { resolveContentProject } = await import("../storage/content-project.js");
@@ -256,9 +297,9 @@ export async function executeContentSave(
     // and filling it here would skip the writer's preparation, gates and review receipt.
     const fillingBody = typeof params.body === "string" && Boolean(params.body.trim()) && params.body !== oldContent.body;
     const unsubmittedPlaceholder = !oldContent.body.trim()
-      || oldContent.body.startsWith("<!-- Generated from topic:")
+      || oldContent.body.startsWith(TOPIC_PLACEHOLDER_BODY_PREFIX)
       || Boolean(oldContent.pack && !oldContent.pack.submittedAt && !oldContent.writtenBy);
-    if (isMcpCall && fillingBody && unsubmittedPlaceholder) return {
+    if (modelCall && fillingBody && unsubmittedPlaceholder) return {
       ok: false, code: "writer_submission_required",
       error: "这篇仍是空白稿或尚未交稿的写作占位，不能通过 content update 填正文绕过交稿。请走 writer pack/submit；已有成稿需要导入时请另用 save 并注明 manual_import。",
       next_action: { tool: "autocrew_writer", params: { action: "pack", content_id: id, topic_id: oldContent.topicId, platform: oldContent.platform } },
@@ -284,12 +325,13 @@ export async function executeContentSave(
     let updated: Content | null;
     try {
       if (platformLock) {
-        const checked = await updateContentChecked(id, buildContentUpdates(params), platformLock, dataDir);
+        const checked = await updateContentChecked(id, { ...buildContentUpdates(params), _provenance: provenance }, platformLock, dataDir);
         if (checked && !checked.ok) return { ok: false, code: "platform_locked", error: checked.reason, ...grant };
         updated = checked?.content ?? null;
-      } else updated = await updateContent(id, buildContentUpdates(params), dataDir);
+      } else updated = await updateContent(id, { ...buildContentUpdates(params), _provenance: provenance }, dataDir);
     } catch (err) {
       if (err instanceof ScriptFrozenError) return { ok: false, code: err.code, error: err.message, ...grant };
+      if (err instanceof FirstBodyRefusedError) return { ...err.refusal, ...grant };
       throw err;
     }
     if (!updated) return { ok: false, error: `Content ${id} not found` };
@@ -310,7 +352,7 @@ export async function executeContentSave(
     let styleLearned: StyleDistillResult | undefined;
     if (newBody && newBody !== oldBody) {
       try {
-        await recordDiffImpl(id, "body", oldBody, newBody, dataDir, params.diff_note as string | undefined, oldContent.platform);
+        await recordDiffImpl(id, provenance?.kind === "human" ? "founder" : "ai", "body", oldBody, newBody, dataDir, params.diff_note as string | undefined, oldContent.platform);
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         return {
@@ -341,6 +383,13 @@ export async function executeContentSave(
   if (action === "delete") {
     const id = params.id as string;
     if (!id) return { ok: false, error: "id is required for delete" };
+    // 看板来的删除（spec 2026-10-04 §1）：在删除口子上再判一次正在写 / 已过待录制；别的调用方不带标记、照旧
+    if (params.board_guard === true) {
+      const current = await getContent(id, dataDir);
+      if (!current) return { ok: false, error: `Content ${id} not found` };
+      const refused = await boardTrashRefusal(current, getDataDir(dataDir));
+      if (refused) return { ok: false, error: refused };
+    }
     const deleted = await softDeleteContent(id, dataDir);
     if (!deleted) return { ok: false, error: `Content ${id} not found` };
     return { ok: true, content: redactClaim(deleted) };
@@ -402,6 +451,7 @@ export async function executeContentSave(
         host,
         decidedBy: decidedBy(params),
         ...(from ? { expectedStatus: from } : {}),
+        ...(typeof params.expected_body_hash === "string" && params.expected_body_hash ? { expectedBodyHash: params.expected_body_hash } : {}),
       },
       dataDir,
     );
@@ -426,17 +476,31 @@ export async function executeContentSave(
     if (!topicId) return { ok: false, error: "topicId is required for create_variant" };
     if (!platform) return { ok: false, error: "platform is required for create_variant" };
     const hasBody = typeof params.body === "string" && Boolean(params.body.trim());
-    if (isMcpCall && hasBody && !manualImport) return {
+    if (modelCall && hasBody && !manualImport) return {
       ok: false, code: "writer_submission_required",
       error: "平台变体的新正文也必须走 writer pack/submit；只有用户提供的已有成稿，才能以 source=manual_import 并说明 import_reason 导入。",
       next_action: { tool: "autocrew_workflow", params: { action: "prepare", topic_id: topicId, platform } },
     };
-    const result = await createPlatformVariant(
-      topicId,
-      platform,
-      { title: params.title as string, body: params.body as string, ...(hasBody && manualImport ? { writingSource: importSource(params) } : {}) },
-      dataDir,
-    );
+    // AI 想为同一条视频再建平台稿（边界 10）：拒，指去发布计划加平台；工作台手动建不拦
+    const sameVideo = modelCall ? await sameVideoRefusal(topicId, platform, params.distinct_video, dataDir) : null;
+    if (sameVideo) return sameVideo;
+    // 选题会闸口：模型给还没有真稿的选题开第一篇（占位）要过闸口；人手录入、手动导入的成稿不拦
+    if (modelCall && !(hasBody && manualImport)) {
+      const refused = await newDraftAngleRefusal(topicId, dataDir);
+      if (refused) return refused;
+    }
+    let result: Awaited<ReturnType<typeof createPlatformVariant>>;
+    try {
+      result = await createPlatformVariant(
+        topicId,
+        platform,
+        { title: params.title as string, body: params.body as string, provenance, ...(hasBody && manualImport ? { writingSource: importSource(params) } : {}) },
+        dataDir,
+      );
+    } catch (err) {
+      if (err instanceof FirstBodyRefusedError) return err.refusal;
+      throw err;
+    }
     return result.ok && hasBody && manualImport ? { ...result, ...importReceipt } : result;
   }
 
@@ -460,7 +524,7 @@ export async function executeContentSave(
   }
 
   // MCP must not silently use generic storage as an alternative AI writing pipeline.
-  if (isMcpCall && !manualImport) return {
+  if (modelCall && !manualImport) return {
     ok: false, code: "writer_submission_required",
     error: "新生成稿必须走 workflow prepare → writer pack/submit。只有用户提供的已有成稿，才能以 source=manual_import 并说明 import_reason 导入。",
     next_action: { tool: "autocrew_workflow", params: { action: "prepare", topic_id: params.topicId, platform: params.platform } },
@@ -472,10 +536,13 @@ export async function executeContentSave(
     return { ok: false, error: "title and body are required for save" };
   }
 
+  // 模型发起的非导入新建稿上面已经拒了（writer_submission_required）；走到这里的是人手录入，不过选题会闸口
   const rawStatus = manualImport ? "draft_ready" : (params.status as string) || "draft_ready";
   // 「剪辑中」只能由交接进入（§13.4-C）：直接建在剪辑中和 update/transition 一样拒绝，说清怎么交接
   if (normalizeLegacyStatus(rawStatus) === "editing") return { ok: false, code: "editing_requires_handoff", error: (await isOntologyEnabled(params._dataDir as string | undefined)) ? EDITING_VIA_ONTOLOGY : EDITING_VIA_HANDOFF };
-  const content = await saveContent({
+  let content: Content;
+  try { content = await saveContent({
+    _provenance: provenance,
     title,
     body,
     platform: (params.platform as string) || undefined,
@@ -484,7 +551,10 @@ export async function executeContentSave(
     tags: (params.tags as string[]) || [],
     hashtags: (params.hashtags as string[]) || [],
     ...(manualImport ? { writingSource: importSource(params) } : {}),
-  }, dataDir);
+  }, dataDir); } catch (err) {
+    if (err instanceof FirstBodyRefusedError) return err.refusal;
+    throw err;
+  }
 
   return { ok: true, content, ...(manualImport ? importReceipt : {}) };
 }

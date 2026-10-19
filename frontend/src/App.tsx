@@ -2,6 +2,7 @@
  * 双区壳(frontend-v2 A/B/C 期):主区 + 总编辑常驻右栏。
  * 原生视图:工作台/看板/编辑器/校准中心/数据回流/设置;素材库回 vanilla(D 期前迁)。
  */
+import { CHIEF_PREFILL_EVENT } from "./views/hand-off";
 import { useEffect, useRef, useState } from "react";
 import { Board } from "./views/Board";
 import { TopicPage } from "./views/TopicMatrix";
@@ -12,9 +13,11 @@ import { Settings } from "./views/Settings";
 import { ReportView } from "./views/Report";
 import { Library } from "./views/Library";
 import { Logs } from "./views/Logs";
+import { Playbooks } from "./views/Playbooks";
 import { Campaigns } from "./views/Campaigns";
 import { Inbox } from "./views/Inbox";
-import { Onboarding } from "./views/Onboarding";
+import { OnboardingGate } from "./views/onboarding/OnboardingGate";
+import { loadConnect, shouldOnboard } from "./views/onboarding/connect-api";
 import { EngineDot } from "./views/EngineBanner";
 import { PreferenceBanner } from "./views/PreferenceBanner";
 import { ChatDock } from "./chat/ChatDock";
@@ -22,6 +25,7 @@ import {
   DOCK_PAGE_EVENT, DOCK_WIDTH_DEFAULT, clampDockWidth, readDockOpen, readDockWidth, requestDockCollapsed, writeDockOpen, writeDockWidth,
 } from "./chat/dock-prefs";
 import { ToastHost, DialogHost } from "./ui";
+import { UpdateResultDialog } from "./views/update/UpdateResultDialog";
 import { newIdea } from "./new-idea";
 import { invoke } from "./transport";
 import { useRevisionFocus } from "./revision";
@@ -48,13 +52,20 @@ export function App() {
   const [campaignId, setCampaignId] = useState<string | null>(null);
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const focus = useRevisionFocus();
-  const IN_SETTINGS = new Set(["inbox", "calibration", "logs", "library", "campaigns"]);
+  const IN_SETTINGS = new Set(["inbox", "calibration", "playbooks", "logs", "library", "campaigns"]);
   const active = route.view === "editor" || route.view === "topic" ? "board" : IN_SETTINGS.has(route.view) ? "settings" : route.view;
   const boardRoute = route.view === "board" || route.view === "topic";
 
   useEffect(() => {
     if (focus) setDockOpen(true);
   }, [focus]);
+
+  // 「交给总编辑写」：打开右侧总编辑（输入框由 ChatDock 自己填）
+  useEffect(() => {
+    const on = () => setDockOpen(true);
+    window.addEventListener(CHIEF_PREFILL_EVENT, on);
+    return () => window.removeEventListener(CHIEF_PREFILL_EVENT, on);
+  }, []);
 
   // 剪辑看板默认收起总编辑（不改存下的偏好）；离开看板回到偏好
   useEffect(() => {
@@ -78,10 +89,11 @@ export function App() {
   useEffect(() => {
     let alive = true;
     void (async () => {
-      const r = await invoke("settings:get");
+      // 引导出现的条件（onboarding-connect §2.1）：没配引擎、没接任何宿主、没点过「先不配」
+      const [r, connect] = await Promise.all([invoke("settings:get"), loadConnect()]);
       if (!alive) return;
       const data = r.ok ? (r.data as { configured?: boolean } | undefined) : undefined;
-      setGate(data?.configured === false ? "onboarding" : "ready");
+      setGate(data?.configured === false && shouldOnboard(false, connect) ? "onboarding" : "ready");
     })();
     return () => {
       alive = false;
@@ -91,12 +103,12 @@ export function App() {
   if (gate === "checking") {
     return (
       <div className="onboard">
-        <span className="mono muted">正在检查引擎配置…</span>
+        <span className="mono muted">正在准备…</span>
       </div>
     );
   }
   if (gate === "onboarding") {
-    return <Onboarding onDone={() => setGate("ready")} />;
+    return <OnboardingGate onDone={() => setGate("ready")} onOpenSettings={() => { setGate("ready"); setRoute({ view: "settings", tab: "models" }); }} />;
   }
 
   return (
@@ -130,6 +142,8 @@ export function App() {
         <main className={boardRoute ? "main main-board" : "main"}>
           {route.view === "board" && (
             <Board
+              {...(route.inbox ? { inbox: route.inbox } : {})}
+              {...(route.inboxTypes ? { inboxTypes: route.inboxTypes } : {})}
               openTopic={(key) => setRoute({ view: "topic", key })}
               openEditor={(id) => setRoute({ view: "editor", id })}
               openData={() => setRoute({ view: "report" })}
@@ -157,6 +171,7 @@ export function App() {
           )}
           {route.view === "library" && <Library />}
           {route.view === "logs" && <Logs />}
+          {route.view === "playbooks" && <Playbooks />}
           {route.view === "campaigns" && <Campaigns onSelect={setCampaignId} />}
           {route.view === "inbox" && <Inbox nav={setRoute} />}
           {route.view === "settings" && (
@@ -197,8 +212,6 @@ export function App() {
             contentContext={route.view === "editor" ? { contentId: route.id } : undefined}
             view={{ route: route.view === "topic" ? "board" : route.view, ...(route.view === "campaigns" && campaignId ? { campaignId } : {}) }}
             nav={setRoute}
-            // 聊天回 needsSetup = 引擎压根没配（不是这条线坏了）：直接把首次开机卡请回来
-            onNeedsSetup={() => setGate("onboarding")}
           />
         </aside>
         <button
@@ -216,6 +229,7 @@ export function App() {
       </div>
       <ToastHost />
       <DialogHost />
+      <UpdateResultDialog />
     </div>
   );
 }

@@ -8,8 +8,11 @@
  * 2. 轮次在写入时盖一次：有发布时间 → 按历次「重开文稿」切；没有时间 → 同平台历史上见过同一链接 / 作品 id 就沿用那一轮
  *    （数据回流晚到的绑定不把旧作品算进新一轮），否则算当前轮；创始人可以「纠正」。
  * 3. 槽的状态：本轮该平台出现过的最可信的一类里，**最后一条**说了算——
- *    可信（发布计划、数据回流按作品 id）> 创始人（「我发了」、确认 AI 的说法）> 待核（AI 说发了、数据回流按标题猜）。
- *    删了重发 → 最新的算，早的留作历史。AI 的说法从不靠身份匹配自动核实：同平台同轮来了可信观察就被顶掉，或创始人确认。
+ *    可信（发布计划、数据回流按作品 id）> 创始人（「我发了」、确认 AI 的说法）> 直接认（AI 说法带本平台作品链接、或报了定时）
+ *    > 待核（AI 说发了但没链接 / 链接不是这个平台的、数据回流按标题猜）。删了重发 → 最新的算，早的留作历史。
+ *    2026-10-11 创始人改口（推翻 09-29「AI 的说法从不自动核实」）：「AI 发了还要我再确认一次」——查得到的事实不要他确认。
+ *    带本平台链接（公开 / 审核中）或报了定时的 AI 说法直接算已投出；定时时间过了一天还没可信观察核到公开，再问一次。
+ *    可信观察照样顶掉它，创始人照样能「没发」纠正。
  * 4. 纠正指向槽（`slot:<轮次>:<平台>`）：纠正时刻之前槽里的一切作废，之后新来的照算。
  * 已知代价（创始人认可）：同一轮在同一平台发了两件不同作品，只算最新的那件。
  */
@@ -21,12 +24,20 @@ import { entryPayloadHash } from "../publish/review-gate/check.js";
 import { readPublishRecord, type PlatformPublication } from "../../storage/publish-record.js";
 import { bindingsForContent } from "../flywheel/platform-items.js";
 import { normalizePlatform } from "../publish/review-gate/platforms.js";
+import { isWorkUrl } from "./chat-approval/post-publish-view.js";
 
 /** 平台名按发布闸门同一张别名表归一（「视频号」= wechat_video）：认不出的原样 */
 export const canonPlatform = (p: string): string => normalizePlatform(p) ?? p;
 
 export type ObsSource = "plan" | "metrics_id" | "metrics_title" | "claim";
 const TRUSTED: ReadonlySet<ObsSource> = new Set(["plan", "metrics_id"]);
+
+/** AI 的说法能不能直接认（2026-10-11，只在写入时判一次，记进 claim_accepted）：报了定时；或带本平台能指认作品的链接且公开 / 审核中 */
+export function claimAccepted(o: Pick<Observation, "source" | "platform" | "url" | "pub_state">): boolean {
+  if (o.source !== "claim") return false;
+  if (o.pub_state === "scheduled") return true;
+  return Boolean(o.url) && (o.pub_state === "public" || o.pub_state === "reviewing") && isWorkUrl(o.platform, o.url!);
+}
 
 export interface Observation {
   source: ObsSource;
@@ -44,8 +55,12 @@ export interface Observation {
   check_id?: string;
   /** 写入时盖的把关结论（publish-check-link） */
   gate?: GateStamp;
-  /** 实际提交时间（只用于把关判定，不参与轮次与收敛） */
+  /** 实际提交时间（把关判定、轮次；同一条流里它变了 = 新提交） */
   submitted_at?: string;
+  /** AI 回执写入时判定直接认（claim_accepted） */
+  accepted?: boolean;
+  /** 不落盘：把关证据时间（审核中按提交 → 核实 → 定时），也是旧版误写成发布时间的那个值 */
+  evidence_at?: string;
 }
 
 const STATE: Partial<Record<PlatformPublication["state"], PublicationState>> = {
@@ -61,16 +76,21 @@ export async function trustedObservations(content: Content, dataDir: string): Pr
       const state = STATE[p.state];
       if (!state || (!p.submitted && p.state !== "rejected")) continue;
       const checkId = p.checkId ?? undefined;
+      // 可信观察只记真实的公开 / 定时时间（创始人 09-30）：审核中、被驳回的没有定时就不带发布时间，提交时间不冒充公开时间
+      const publicAt = p.state === "reviewing" || p.state === "rejected" ? p.scheduledAt : p.time;
+      const evidenceAt = p.evidenceAt ?? p.time;
       out.push({ source: "plan", platform: canonPlatform(p.platform), pub_state: state, evidence: "发布计划里的记录",
         ...(p.url ? { url: p.url } : {}), ...(p.postId ? { item_id: p.postId } : {}), ...(p.reason ? { reason: p.reason } : {}),
-        ...(p.time ? { published_at: p.time } : {}), ...(checkId ? { check_id: checkId } : {}), ...(p.submittedAt ? { submitted_at: p.submittedAt } : {}) });
+        ...(publicAt ? { published_at: publicAt } : {}), ...(checkId ? { check_id: checkId } : {}), ...(p.submittedAt ? { submitted_at: p.submittedAt } : {}),
+        ...(evidenceAt ? { evidence_at: evidenceAt } : {}) });
     }
   }
   for (const b of await bindingsForContent(content.id, dataDir).catch(() => [])) {
     const [platform, ...rest] = b.key.split(":");
-    // 只有按作品 id（链接解析）绑上的才算可信；按标题相似绑上的留给创始人确认（创始人拍板 2026-09-29）。
+    // 只有按作品 id 绑上的才算可信：链接解析（url）或创始人确认的人工绑定（manual）；
+    // 按标题相似绑上的留给创始人确认（创始人拍板 2026-09-29）。
     // 绑定时间是发现时间不是发布时间，不当作轮次证据
-    const byId = b.via === "url";
+    const byId = b.via === "url" || b.via === "manual";
     out.push({ source: byId ? "metrics_id" : "metrics_title", platform: canonPlatform(platform), item_id: rest.join(":"), pub_state: "public",
       evidence: byId ? "数据回流按作品 id 对上了这条" : "数据回流按标题猜是这条" });
   }
@@ -79,7 +99,7 @@ export async function trustedObservations(content: Content, dataDir: string): Pr
   for (const o of out) {
     if (!TRUSTED.has(o.source)) continue;
     const payload = o.source === "plan" ? await entryPayloadHash(content.id, o.platform, dataDir).catch(() => null) : null;
-    o.gate = await gateStamp(content.id, o.platform, o.submitted_at, o.check_id, dataDir, o.published_at, payload);
+    o.gate = await gateStamp(content.id, o.platform, o.submitted_at, o.check_id, dataDir, o.evidence_at ?? o.published_at, payload);
   }
   return out;
 }
@@ -103,6 +123,7 @@ export function observationsOf(doc: ProductionDoc): ObsFact[] {
     ...(f.url ? { url: f.url } : {}), ...(f.item_id ? { item_id: f.item_id } : {}), pub_state: f.pub_state ?? "reviewing",
     ...(f.published_at ? { published_at: f.published_at } : {}), ...(f.reason ? { reason: f.reason } : {}),
     ...(f.by ? { by: f.by } : {}), ...(f.check_id ? { check_id: f.check_id } : {}), ...(f.gate ? { gate: f.gate } : {}), evidence: f.evidence ?? "",
+    ...(f.submitted_at ? { submitted_at: f.submitted_at } : {}), ...(f.claim_accepted ? { accepted: true } : {}),
   }]));
 }
 
@@ -135,7 +156,15 @@ function stampRound(doc: ProductionDoc, o: Observation, known: ObsFact[]): numbe
 
 const same = (a: Observation, b: Observation) =>
   a.pub_state === b.pub_state && (a.published_at ?? "") === (b.published_at ?? "") && (a.url ?? "") === (b.url ?? "")
-  && (a.item_id ?? "") === (b.item_id ?? "") && (a.reason ?? "") === (b.reason ?? "") && (a.check_id ?? "") === (b.check_id ?? "");
+  && (a.item_id ?? "") === (b.item_id ?? "") && (a.reason ?? "") === (b.reason ?? "") && (a.check_id ?? "") === (b.check_id ?? "")
+  && sameSubmission(a, b);
+
+/** 两边都没有公开时间时，提交时间是唯一身份，严格比；有公开时间时只在两边都有提交时间才比（旧事实没存它，不能因此把整条流重写） */
+function sameSubmission(a: Observation, b: Observation): boolean {
+  const at = (x: Observation) => (x.submitted_at ? Date.parse(x.submitted_at) : null);
+  if ((a.published_at || b.published_at) && (!a.submitted_at || !b.submitted_at)) return true;
+  return at(a) === at(b);
+}
 
 export function observationFact(doc: ProductionDoc, o: Observation, round: number): Fact {
   const now = new Date().toISOString();
@@ -144,7 +173,7 @@ export function observationFact(doc: ProductionDoc, o: Observation, round: numbe
     at: o.published_at ?? now, seen_at: now, obs_source: o.source, platform: o.platform, pub_state: o.pub_state, verified: TRUSTED.has(o.source), evidence: o.evidence,
     ...(o.published_at ? { published_at: o.published_at } : {}), ...(o.url ? { url: o.url } : {}), ...(o.item_id ? { item_id: o.item_id } : {}),
     ...(o.reason ? { reason: o.reason } : {}), ...(o.account ? { account: o.account } : {}), ...(o.by ? { by: o.by } : {}), ...(o.check_id ? { check_id: o.check_id } : {}),
-    ...(o.gate ? { gate: o.gate } : {}),
+    ...(o.gate ? { gate: o.gate } : {}), ...(o.submitted_at ? { submitted_at: o.submitted_at } : {}), ...(o.source === "claim" && o.accepted ? { claim_accepted: true } : {}),
   };
 }
 
@@ -163,16 +192,31 @@ function collapseBatch(doc: ProductionDoc, obs: Observation[]): Array<{ o: Obser
   return [...last.values()];
 }
 
-/** 追加观察；同（来源, 平台, 轮次）流里和最后一条完全一样的跳过。返回新增条数 */
+/**
+ * 旧版把审核中 / 被驳回条目的证据时间（提交 → 核实 → 定时）写成了发布时间（2026-10-03 修）。修复后再读同一份计划只是这个时间变了：
+ * 不是新的发布证据，就地改正那条旧事实——顺序、纠正（按槽或按事实 id）都原样保留。
+ */
+function repairLegacyTime(doc: ProductionDoc, last: ObsFact, raw: Observation): boolean {
+  if ((raw.pub_state !== "reviewing" && raw.pub_state !== "rejected") || last.submitted_at || !last.published_at || !raw.evidence_at) return false;
+  if (Date.parse(last.published_at) !== Date.parse(raw.evidence_at) || !same({ ...last, published_at: raw.published_at, submitted_at: raw.submitted_at }, raw)) return false;
+  const f = doc.facts.find((x) => x.id === last.id)!;
+  if (raw.published_at) { f.published_at = raw.published_at; f.at = raw.published_at; } else { delete f.published_at; f.at = f.seen_at ?? f.at; }
+  if (raw.submitted_at) f.submitted_at = raw.submitted_at;
+  return true;
+}
+
+/** 追加观察；同（来源, 平台, 轮次）流里和最后一条完全一样的跳过。返回新增 / 改正的条数 */
 export function importObservations(doc: ProductionDoc, obs: Observation[]): number {
   let added = 0;
   for (const { o: raw, round } of collapseBatch(doc, obs)) {
     const known = observationsOf(doc);
     const lastInStream = known.filter((k) => k.source === raw.source && k.platform === raw.platform && k.round === round).at(-1);
     if (lastInStream && same(lastInStream, raw)) continue;
-    // 没有发布时间、又和上一轮流里最后一条一模一样：是重开前那份旧记录被再读到，不算进新一轮
+    if (lastInStream && repairLegacyTime(doc, lastInStream, raw)) { added++; continue; }
+    // 没有发布时间、也没有实际提交时间，又和上一轮流里最后一条一模一样：是重开前那份旧记录被再读到，不算进新一轮。
+    // 带 submitted_at 的已按提交时间定了轮次（审核中没定时的条目没有公开时间，靠它区分新一轮提交）
     const lastEarlier = known.filter((k) => k.source === raw.source && k.platform === raw.platform && k.round < round).at(-1);
-    if (!raw.published_at && lastEarlier && same(lastEarlier, raw)) continue;
+    if (!raw.published_at && !raw.submitted_at && lastEarlier && same(lastEarlier, raw)) continue;
     const inherited = raw.gate ? slotGate(doc, round, raw.platform) : undefined;
     doc.facts.push(observationFact(doc, inherited ? { ...raw, gate: inherited } : raw, round));
     added++;
@@ -182,7 +226,7 @@ export function importObservations(doc: ProductionDoc, obs: Observation[]): numb
 
 // ---- 求值：每个平台一个槽 ----
 
-export type SlotClass = "trusted" | "founder" | "pending";
+export type SlotClass = "trusted" | "founder" | "accepted" | "pending";
 
 export interface Slot {
   /** 纠正的目标：`slot:<轮次>:<平台>` */
@@ -205,6 +249,10 @@ export interface Slot {
   gate?: GateStamp;
   /** 证据时间（排序与显示） */
   at: string;
+  /** 决定槽状态那条观察里明写的平台发布时间；你标的 / 回流按 id 的没有 */
+  published_at?: string;
+  /** 那条观察（或你的决定）写进来的时刻 */
+  seen_at?: string;
   /** 被顶掉的早先观察（删了重发、AI 说法被可信观察顶掉…） */
   history: string[];
 }
@@ -232,7 +280,7 @@ function entriesOf(doc: ProductionDoc, round: number, platform: string): Entry[]
   // 旧版纠正指向具体事实 / 决定 id：那一条作废
   const killed = new Set(doc.decisions.filter((d) => d.type === "publish_correction" && d.target_id && !d.target_id.startsWith("slot:")).map((d) => d.target_id!));
   return [
-    ...obs.map((o): Entry => ({ cls: TRUSTED.has(o.source) ? "trusted" : "pending", at: Date.parse(o.seen_at) + o.order / 1e6, pub_state: o.pub_state, fact_id: o.id, source: o.source, evidence: o.evidence, o })),
+    ...obs.map((o): Entry => ({ cls: TRUSTED.has(o.source) ? "trusted" : o.source === "claim" && o.accepted ? "accepted" : "pending", at: Date.parse(o.seen_at) + o.order / 1e6, pub_state: o.pub_state, fact_id: o.id, source: o.source, evidence: o.evidence, o })),
     ...decisions.filter((d) => d.type === "i_published" && canonPlatform(d.platform ?? "") === platform)
       .map((d): Entry => ({ cls: "founder", at: Date.parse(d.at), pub_state: "public", fact_id: null, source: "founder", evidence: "你标了已发布", d })),
     // 创始人确认 AI 的说法：保留那条说法里的提交状态（确认真实性 ≠ 确认已公开）
@@ -248,7 +296,7 @@ function entriesOf(doc: ProductionDoc, round: number, platform: string): Entry[]
 export function slotGate(doc: ProductionDoc, round: number, platform: string): GateStamp | undefined {
   const cut = correctedAt(doc, slotId(round, platform));
   const gated = entriesOf(doc, round, platform).filter((e) => e.at > cut && e.cls !== "pending")
-    .map((e) => ({ at: e.at, gate: e.d?.gate ?? (e.cls === "trusted" ? e.o?.gate : undefined) })).filter((e) => e.gate).sort((a, b) => a.at - b.at);
+    .map((e) => ({ at: e.at, gate: e.d?.gate ?? (e.cls === "trusted" || e.cls === "accepted" ? e.o?.gate : undefined) })).filter((e) => e.gate).sort((a, b) => a.at - b.at);
   return gated[0]?.gate;
 }
 
@@ -256,7 +304,7 @@ export function slotOf(doc: ProductionDoc, round: number, platform: string): Slo
   const cut = correctedAt(doc, slotId(round, platform));
   const entries = entriesOf(doc, round, platform).filter((e) => e.at > cut).sort((a, b) => a.at - b.at);
   if (!entries.length) return null;
-  const pick = (["trusted", "founder", "pending"] as const).map((c) => entries.filter((e) => e.cls === c).at(-1)).find(Boolean)!;
+  const pick = (["trusted", "founder", "accepted", "pending"] as const).map((c) => entries.filter((e) => e.cls === c).at(-1)).find(Boolean)!;
   const o = pick.o;
   return {
     id: slotId(round, platform), round, platform, pub_state: pick.pub_state, verified: pick.cls !== "pending", by: pick.cls, fact_id: pick.fact_id,
@@ -266,8 +314,16 @@ export function slotOf(doc: ProductionDoc, round: number, platform: string): Slo
     ...(o?.item_id ? { item_id: o.item_id } : {}), ...(o?.reason ? { reason: o.reason } : {}), ...(o?.check_id ? { check_id: o.check_id } : {}),
     ...(pick.d?.gate ?? o?.gate ? { gate: pick.d?.gate ?? o!.gate } : {}),
     at: o?.published_at ?? o?.seen_at ?? pick.d?.at ?? new Date(pick.at).toISOString(),
+    ...(o?.published_at ? { published_at: o.published_at } : {}), seen_at: pick.d?.at ?? o?.seen_at ?? new Date(pick.at).toISOString(),
     history: entries.filter((e) => e !== pick && e.fact_id).map((e) => e.fact_id!),
+    ...foundLink(doc, round, platform, cut),
   };
+}
+
+/** 发布台「补作品链接」（吸收 5）：纠正之后最近一次补的链接盖住显示用的链接，状态 / 时间 / 把关不动 */
+function foundLink(doc: ProductionDoc, round: number, platform: string, cut: number): { url?: string } {
+  const d = doc.decisions.filter((x) => x.type === "publish_link" && x.round === round && canonPlatform(x.platform ?? "") === platform && Date.parse(x.at) > cut && x.note).at(-1);
+  return d ? { url: d.note } : {};
 }
 
 /** 本轮每个平台的槽：已投出 / 被驳回 / 待你确认 */
@@ -282,4 +338,21 @@ export function receiptsOfRound(doc: ProductionDoc): { live: Slot[]; rejected: S
     rejected: slots.filter((s) => s.verified && s.pub_state === "rejected"),
     pending: slots.filter((s) => !s.verified),
   };
+}
+
+const DAY_MS = 24 * 3600 * 1000;
+
+/**
+ * AI 报的定时还悬着（2026-10-11）：这个槽（纠正之后）有直接认的定时回执，最晚的定时时间过了一天，
+ * 还没有公开的确认——可信观察报公开（发布计划 public / 数据回流按作品 id）或创始人的决定。
+ * 不看槽现在由谁说了算：发布计划后来也写了定时、再变成应已公开（overdue），都不算确认。
+ */
+export function overdueSchedule(doc: ProductionDoc, round: number, platform: string): ObsFact | null {
+  const cut = correctedAt(doc, slotId(round, platform));
+  const entries = entriesOf(doc, round, platform).filter((e) => e.at > cut);
+  // 按观察顺序取最近报的那次定时（改期提前也以新的为准），不取最晚的时间
+  const sched = entries.filter((e) => e.cls === "accepted" && e.o?.pub_state === "scheduled" && e.o.published_at).sort((a, b) => a.at - b.at).at(-1)?.o;
+  if (!sched || Date.now() - Date.parse(sched.published_at!) <= DAY_MS) return null;
+  const confirmed = entries.some((e) => e.cls === "founder" || (e.cls === "trusted" && e.pub_state === "public"));
+  return confirmed ? null : sched;
 }

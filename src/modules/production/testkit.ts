@@ -10,9 +10,11 @@ import { getContent, saveContent, type Content, type ContentStatus } from "../..
 import { commitProjectContent } from "../../storage/project-commit.js";
 import { executeContentSave } from "../../tools/content-save.js";
 import { setProductionDeps } from "./roots.js";
+import { setChatcutDeps } from "./sliver/chatcut-read.js";
 import { writeEnabledVersion } from "../../storage/production-store.js";
-import { resetProductionReady } from "./service.js";
+import { mutateProduction, resetProductionReady } from "./service.js";
 import { forgetShaIndex } from "./sha-index.js";
+import { HUMAN_WRITE } from "../../storage/first-body-guard.js";
 
 export interface Env { dir: string; inbox: string; chatcut: string; jianying: string; outside: string; cleanup: () => Promise<void> }
 
@@ -25,6 +27,8 @@ export async function makeEnv(opts: { enabled?: boolean } = {}): Promise<Env> {
   await initializeProjectLayout(dir, "lib-deadbeef", "default");
   resetProductionReady();
   forgetShaIndex();
+  // 隐式 ChatCut 引用守卫：测试一律读临时目录（默认不存在 = 没装 ChatCut），绝不读本机真实工程
+  setChatcutDeps({ projectsRoot: () => path.join(temp, "chatcut-projects") });
   setProductionDeps({
     roots: async () => ({ inbox, chatcut, jianying }),
     // 假探针：文件名带 broken 的读不出时长，其余 12 秒
@@ -32,7 +36,7 @@ export async function makeEnv(opts: { enabled?: boolean } = {}): Promise<Env> {
     now: () => Date.now(),
   });
   if (opts.enabled) await writeEnabledVersion(dir);
-  return { dir, inbox, chatcut, jianying, outside, cleanup: async () => { setProductionDeps(null); resetProductionReady(); forgetShaIndex(); await fs.rm(temp, { recursive: true, force: true }); } };
+  return { dir, inbox, chatcut, jianying, outside, cleanup: async () => { setProductionDeps(null); setChatcutDeps(null); resetProductionReady(); forgetShaIndex(); await fs.rm(temp, { recursive: true, force: true }); } };
 }
 
 /** 写文件并把修改时间拨到 60 秒前（过「10 秒内不变」门）；fresh=true 保留刚写的时间 */
@@ -63,7 +67,7 @@ const CREATABLE = new Set<ContentStatus>(["drafting", "draft_ready", "reviewing"
 
 /** 造一条视频稿；阶段门不许直接建的旧状态（剪辑中 / 封面 / 待发布）直接写 meta，模拟旧库里的现状 */
 export async function videoContent(env: Env, title: string, status: ContentStatus = "draft_ready", body = `${title} 的定稿正文。`, extra: Partial<Content> = {}): Promise<Content> {
-  const c = await saveContent({ title, body, platform: "douyin", status: CREATABLE.has(status) ? status : "approved", tags: [] }, env.dir);
+  const c = await saveContent({ _provenance: HUMAN_WRITE, title, body, platform: "douyin", status: CREATABLE.has(status) ? status : "approved", tags: [] }, env.dir);
   if (CREATABLE.has(status) && !Object.keys(extra).length) return c;
   const next = { ...(await getContent(c.id, env.dir))!, status, ...extra };
   await commitProjectContent(next, env.dir);
@@ -79,7 +83,7 @@ export async function setContent(env: Env, id: string, patch: Partial<Content>):
 
 /** 创始人认稿：工作台（非模型）把 draft_ready 推到 approved，写认稿决定 */
 export async function founderApprove(env: Env, id: string): Promise<void> {
-  const r = await executeContentSave({ _dataDir: env.dir, action: "transition", id, target_status: "approved", force: true });
+  const r = await executeContentSave({ _provenance: HUMAN_WRITE, _dataDir: env.dir, action: "transition", id, target_status: "approved", force: true });
   if (!(r as { ok: boolean }).ok) throw new Error(`认稿失败：${JSON.stringify(r)}`);
 }
 
@@ -88,7 +92,7 @@ export function projectRoot(env: Env, id: string): string {
 }
 
 export function record(env: Env, params: Record<string, unknown>, host = "codex"): Promise<Record<string, unknown>> {
-  return executeContentSave({ _dataDir: env.dir, _host: host, action: "record", ...params }) as Promise<Record<string, unknown>>;
+  return executeContentSave({ _provenance: HUMAN_WRITE, _dataDir: env.dir, _host: host, action: "record", ...params }) as Promise<Record<string, unknown>>;
 }
 
 export async function exists(p: string): Promise<boolean> {
@@ -103,4 +107,15 @@ export async function waiveSliverCheck(env: Env, contentId: string, cutSha: stri
   const { founderDecision } = await import("./decisions.js");
   const r = await founderDecision(contentId, "waive_sliver_check", { cut_sha: cutSha }, env.dir);
   if (!(r as { ok: boolean }).ok) throw new Error(`整条放行失败：${JSON.stringify(r)}`);
+}
+
+/**
+ * 造一条旧的「agent 转述」回答（answer_ask 改成对话原话直接定之前留下的记录）：验证旧记录照样能读、能撤。
+ */
+export async function seedReportedAnswer(env: Env, contentId: string, askId: string, optionId: string, quote: string, host = "codex"): Promise<void> {
+  await mutateProduction(contentId, env.dir, (d) => {
+    const at = new Date().toISOString();
+    Object.assign(d.asks!.find((x) => x.id === askId)!, { state: "answered", answer: { option_id: optionId, via: "agent_reported", quote, host, at }, ended_at: at });
+    return { value: null, events: [] };
+  });
 }

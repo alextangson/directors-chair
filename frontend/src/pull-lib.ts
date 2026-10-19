@@ -20,12 +20,15 @@ export interface PullPlatformStatus {
   lastBatchId?: string;
   /** 封面下载失败（数据页规格 §I.57），如 cover_download_failed:2/12:http_403 */
   lastCoverError?: string;
+  /** 本进程没有资料库写入权、回流被拒（只在服务内存里，资料库里的 lastStatus 还是旧的） */
+  writeRefusal?: { code: string; at: string };
 }
 
 export type PullTone = "ok" | "warn" | "bad" | "idle";
 
 /** 状态徽标：一格一个词，别的解释放行内那句话里（spec §4.4 的七种态 + 未启用/从未运行） */
 export function pullBadge(row: PullPlatformStatus): { text: string; tone: PullTone } {
+  if (row.writeRefusal) return { text: "回流暂停", tone: "bad" };
   if (!row.enabled) return { text: "未启用", tone: "idle" };
   switch (row.lastStatus) {
     case "never":
@@ -33,7 +36,7 @@ export function pullBadge(row: PullPlatformStatus): { text: string; tone: PullTo
     case "ok":
       return { text: "已连接", tone: "ok" };
     case "needs_login":
-      return { text: "需扫码", tone: "warn" };
+      return { text: "需登录", tone: "warn" };
     case "risk_control":
       return { text: "风控暂停", tone: "warn" };
     case "schema_changed":
@@ -56,12 +59,16 @@ export function formatPullTime(iso: string | null | undefined): string {
 
 /** 行内那句话：这一行现在到底在等什么。null = 没什么要说的 */
 export function pullHint(row: PullPlatformStatus): string | null {
+  if (row.writeRefusal?.code === "library_writer_lost") {
+    return `资料库写入权已丢失，自动回流暂停（${formatPullTime(row.writeRefusal.at)}）——可能另一个 AutoCrew 服务占用了资料库。确认只有一个服务在跑后，重启 AutoCrew 拿回写入权。`;
+  }
+  if (row.writeRefusal) return `资料库暂时连不上，自动回流暂停（${formatPullTime(row.writeRefusal.at)}）——检查资料库所在磁盘/NAS 是否在线，恢复后会自动继续。`;
   if (!row.enabled) return "打开开关后，AutoCrew 会定期从创作者后台把数据接回来。";
   // 刚开开关最容易以为「没反应」：说清最多等多久，想立刻看就有按钮
-  if (row.lastStatus === "never") return "已开启——最多 30 分钟内自动抓一次；想立刻看结果就点「立即抓取」。";
+  if (row.lastStatus === "never") return "已开启——每天 9:00 自动抓一次（那会儿电脑没开就在开机后补抓）；想立刻看结果就点「立即抓取」。";
   switch (row.lastStatus) {
     case "needs_login":
-      return "登录态过期——去后台扫码，之后数据继续自己回来。";
+      return `登录态过期——在 ego lite 里登录${row.label}后台，之后数据继续自己回来。`;
     case "risk_control":
       return "平台触发了风控，今天不再自动抓取，明早再试。";
     case "schema_changed":
@@ -74,9 +81,9 @@ export function pullHint(row: PullPlatformStatus): string | null {
   }
 }
 
-/** chrome-cdp 连不上是环境问题：三行合并成一条提示，不逐平台重复报错（spec §4.4） */
+/** ego lite 连不上是环境问题：三行合并成一条提示，不逐平台重复报错（spec §4.4） */
 export function browserUnreachable(rows: PullPlatformStatus[]): boolean {
-  return rows.some((r) => r.enabled && r.lastStatus === "browser_unreachable");
+  return rows.some((r) => r.enabled && !r.writeRefusal && r.lastStatus === "browser_unreachable");
 }
 
 export interface PullAttemptView {
@@ -101,16 +108,19 @@ export function attemptMessage(label: string, attempt: PullAttemptView): string 
         attempt.hasMore ? "（作品数到上限，还有更多没抓完）" : ""
       }${persistTail}`;
     case "needs_login":
-      return `${label}登录态过期——去创作者后台扫码后再抓一次`;
+      return `${label}登录态过期——在 ego lite 里登录${label}后台后再抓一次`;
     case "risk_control":
       return `${label}触发风控，今天先停，明早自动再试`;
     case "browser_unreachable":
-      return "浏览器未连接：先启动常驻 Chrome（chrome-cdp）再试";
+      return "浏览器未连接（ego lite）：先打开 ego lite 再试";
     case "schema_changed":
       return `${label}后台接口变了（${attempt.errorCode ?? "schema"}），这次一行都没写入`;
     case "timeout":
       return `${label}抓取超时，稍后再试`;
     default:
+      if (attempt.errorCode === "library_writer_lost" && (attempt.imported ?? 0) > 0) return `${label}：已入账 ${attempt.imported} 条后失去资料库写入权（另一个 AutoCrew 服务在占用），之后不再写；确认只有一个服务在跑后重启 AutoCrew`;
+      if (attempt.errorCode === "library_writer_lost") return `${label}没抓：当前进程没有资料库写入权（另一个 AutoCrew 服务在占用），一行都没写`;
+      if (attempt.errorCode === "library_unavailable") return `${label}没抓：资料库暂时连不上，一行都没写`;
       return `${label}抓取失败：${attempt.errorCode ?? "unknown"}`;
   }
 }
@@ -149,6 +159,9 @@ export const METRIC_FOCUS_LABELS: Record<string, string> = {
   impressions: "曝光",
   completionRate: "完播率",
   completion5s: "5s 完播",
+  bounce2s: "2秒跳出",
+  avgWatchSeconds: "平均播放时长",
+  fanViewShare: "粉丝播放占比",
   likes: "点赞",
   comments: "评论",
   shares: "分享",

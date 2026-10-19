@@ -9,6 +9,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { getDataDir } from "../../storage/local-store.js";
+import { assertManagedPathAvailable } from "../../storage/storage-roots.js";
 import type { OutcomeMetrics } from "../flywheel/outcome-schema.js";
 
 const HYPOTHESES_FILE = "hypotheses.jsonl";
@@ -23,6 +24,9 @@ export const METRIC_FOCUS_KEYS = [
   "impressions",
   "completionRate",
   "completion5s",
+  "bounce2s",
+  "avgWatchSeconds",
+  "fanViewShare",
   "likes",
   "comments",
   "shares",
@@ -32,7 +36,15 @@ export const METRIC_FOCUS_KEYS = [
 ] as const;
 export type MetricFocus = keyof OutcomeMetrics | "engagementRate";
 
-export type HypothesisStatus = "open" | "supported" | "refuted" | "inconclusive";
+/** 越低越好的指标：选题会下注默认「比基线好」，对这些指标「好」是更低（2秒跳出 50% → 30% 是中，不是没中） */
+const LOWER_IS_BETTER = new Set<string>(["bounce2s"]);
+
+export function betDirection(metric: string): HypothesisDirection {
+  return LOWER_IS_BETTER.has(metric) ? "down" : "up";
+}
+
+/** withdrawn = 选题会同日重存时从片单拿掉的下注：不再对账 */
+export type HypothesisStatus = "open" | "supported" | "refuted" | "inconclusive" | "withdrawn";
 export type HypothesisDirection = "up" | "down";
 
 /** 裁决证据：全是代码算出来的数，模型不得改写 */
@@ -70,6 +82,41 @@ export interface Hypothesis {
   evidence?: HypothesisEvidence;
   /** 下一步动作（模型提假设时必给：一条不能落到动作上的假设等于没提） */
   nextAction?: string;
+  /* ── 选题会下注（选题会 spec §4）：下注就是一条假设，不另建台账 ── */
+  topicId?: string;
+  /** 会议日期 YYYY-MM-DD（Asia/Shanghai） */
+  meetingDate?: string;
+  slotId?: string;
+  /** 创始人给的「高于同平台同龄基线中位数」的概率，0-100 */
+  probability?: number;
+  /** 事前验尸：到期没中最可能的一个原因 */
+  premortem?: string;
+  /** 对账后问创始人「按当时手里的信息重来，还会这么选吗」 */
+  wouldRepeat?: string;
+  /** 下注看第几天的读数（3 或 7，±1 天容差）；不填按 D+7 */
+  watchDay?: 3 | 7;
+}
+
+/** 下注字段：有就逐个校验，缺省不落（存量假设零迁移） */
+function betFields(raw: Record<string, unknown>, errors: string[]): Partial<Hypothesis> {
+  const out: Partial<Hypothesis> = {};
+  for (const key of ["topicId", "slotId", "premortem", "wouldRepeat"] as const) {
+    if (str(raw[key])) out[key] = str(raw[key]);
+  }
+  if (raw.meetingDate !== undefined) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(str(raw.meetingDate))) out.meetingDate = str(raw.meetingDate);
+    else errors.push("meetingDate 必须是 YYYY-MM-DD");
+  }
+  if (raw.probability !== undefined) {
+    const p = raw.probability;
+    if (typeof p === "number" && Number.isFinite(p) && p >= 0 && p <= 100) out.probability = p;
+    else errors.push("probability 必须是 0-100 的数");
+  }
+  if (raw.watchDay !== undefined) {
+    if (raw.watchDay === 3 || raw.watchDay === 7) out.watchDay = raw.watchDay;
+    else errors.push("watchDay 只能是 3 或 7");
+  }
+  return out;
 }
 
 export type Validated<T> = { ok: true; value: T } | { ok: false; errors: string[] };
@@ -116,12 +163,13 @@ export function validateHypothesis(input: unknown): Validated<Hypothesis> {
   if (!retroRunId) errors.push("retroRunId 必填");
   if (!/^\d{4}-\d{2}-\d{2}T/.test(proposedAt)) errors.push("proposedAt 必须是 ISO 时间");
   const status = str(raw.status) || "open";
-  if (!["open", "supported", "refuted", "inconclusive"].includes(status)) errors.push(`status ${status} 非法`);
+  if (!["open", "supported", "refuted", "inconclusive", "withdrawn"].includes(status)) errors.push(`status ${status} 非法`);
   const contentIds = Array.isArray(raw.contentIds)
     ? raw.contentIds.filter((c): c is string => typeof c === "string" && c.trim().length > 0)
     : [];
   if (raw.contentIds !== undefined && !Array.isArray(raw.contentIds)) errors.push("contentIds 必须是数组");
   const scope = scopeOf(raw.scope, errors);
+  const bet = betFields(raw, errors);
   if (errors.length > 0) return { ok: false, errors };
 
   const value: Hypothesis = {
@@ -139,6 +187,7 @@ export function validateHypothesis(input: unknown): Validated<Hypothesis> {
       ? { evidence: raw.evidence as HypothesisEvidence }
       : {}),
     ...(str(raw.nextAction) ? { nextAction: str(raw.nextAction) } : {}),
+    ...bet,
   };
   return { ok: true, value };
 }
@@ -246,6 +295,7 @@ export async function appendHypotheses(items: Hypothesis[], dataDir?: string): P
     if (!checked.ok) throw new Error(`假设不合 schema:${checked.errors.join("；")}`);
   }
   await serializeHypothesisWrite(dataDir, async () => {
+    assertManagedPathAvailable(hypothesesPath(dataDir));
     await fs.mkdir(getDataDir(dataDir), { recursive: true });
     const payload = items.map((h) => JSON.stringify(h) + "\n").join("");
     await fs.appendFile(hypothesesPath(dataDir), payload, "utf-8");
@@ -261,6 +311,7 @@ export async function bindContentToHypothesis(hypothesisId: string, contentId: s
     const current = (await listHypotheses(dataDir)).find((h) => h.id === hypothesisId);
     if (!current || current.status !== "open" || current.contentIds.includes(contentId)) return false;
     const next = { ...current, contentIds: [...current.contentIds, contentId] };
+    assertManagedPathAvailable(hypothesesPath(dataDir));
     await fs.appendFile(hypothesesPath(dataDir), JSON.stringify(next) + "\n", "utf-8");
     return true;
   });

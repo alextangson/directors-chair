@@ -15,6 +15,9 @@ import fs from "node:fs/promises";
 import { reconcileContent } from "./reconcile.js";
 import { registeredVideo } from "../publish/review-gate/testkit.js";
 import { makeEnv, png, put, videoContent, type Env } from "./testkit.js";
+import { HUMAN_WRITE } from "../../storage/first-body-guard.js";
+import { saveContent } from "../../storage/local-store.js";
+import { executePrePublish } from "../../tools/pre-publish.js";
 
 const enable = () => writeEnabledVersion(env.dir);
 
@@ -49,7 +52,7 @@ describe("P2-3 / P3 回执与决定", () => {
   it("[P3 #16] 模型反复 confirm_published 同一链接：只记一条待核", async () => {
     await enable();
     const r = await registeredVideo(env);
-    for (let i = 0; i < 3; i++) await executePublish({ _dataDir: env.dir, action: "confirm_published", content_id: r.id, publish_url: "https://v.douyin.com/abc", _host: "codex" });
+    for (let i = 0; i < 3; i++) await executePublish({ _dataDir: env.dir, action: "confirm_published", content_id: r.id, platform: "douyin", publish_url: "https://v.douyin.com/abc", _host: "codex" });
     const doc = (await readProductionDoc(r.id, env.dir))!;
     expect(doc.facts.filter((f) => f.kind === "publish" && f.obs_source === "claim")).toHaveLength(1);
   });
@@ -76,13 +79,15 @@ describe("P2-7 启用后不再指向旧交接流程", () => {
     const { executeContentSave } = await import("../../tools/content-save.js");
     const { hostPolicy } = await import("../../../mcp/host-policy.js");
     const c = await videoContent(env, "AI 又忘了怎么办");
-    const t = await executeContentSave({ _dataDir: env.dir, action: "transition", id: c.id, target_status: "editing" }) as { error?: string };
+    const t = await executeContentSave({ _provenance: HUMAN_WRITE, _dataDir: env.dir, action: "transition", id: c.id, target_status: "editing" }) as { error?: string };
     expect(t.error).toContain("record kind=aroll");
     expect(t.error).not.toContain("剪这条");
     const { executeVideo } = await import("../../tools/video.js");
-    expect(await executeVideo({ _dataDir: env.dir, action: "handoff", content_id: c.id, aroll_path: "/x.mov", _host: "claude-code" })).toMatchObject({ ok: false, code: "entry_closed" });
-    expect(hostPolicy("codex", "autocrew_video", { action: "handoff" }, true)).toMatchObject({ ok: false, result: { code: "entry_closed" } });
-    expect((hostPolicy("codex", "autocrew_writer", { action: "pack" }, true) as { error: string }).error).toContain("只报事实");
+    // 旧交接入口由工具自己关，对每个宿主都一样（2026-10-02 起 codex 不再单独限权）
+    for (const host of ["claude-code", "codex"]) {
+      expect(await executeVideo({ _dataDir: env.dir, action: "handoff", content_id: c.id, aroll_path: "/x.mov", _host: host })).toMatchObject({ ok: false, code: "entry_closed" });
+      expect(hostPolicy(host, "autocrew_writer", { action: "pack" }).ok).toBe(true);
+    }
     const { createElement } = await import("../../../frontend/node_modules/react/index.js") as typeof import("react");
     const { renderToStaticMarkup } = await import("../../../frontend/node_modules/react-dom/server.node.js") as typeof import("react-dom/server");
     const { SharedProjectPanel } = await import("../../../frontend/src/views/SharedProjectPanel");
@@ -93,7 +98,7 @@ describe("P2-7 启用后不再指向旧交接流程", () => {
     await enable();
     const { executeContentSave } = await import("../../tools/content-save.js");
     const r = await registeredVideo(env);
-    const s = await executeContentSave({ _dataDir: env.dir, action: "summary", id: r.id }) as Record<string, unknown>;
+    const s = await executeContentSave({ _provenance: HUMAN_WRITE, _dataDir: env.dir, action: "summary", id: r.id }) as Record<string, unknown>;
     expect(s.stage).toBe("待发布");
     expect(String(s.next)).toContain("check_ids");
   });
@@ -110,7 +115,7 @@ describe("P3 #14 / #15 与创始人决定 1、3", () => {
     await founderApprove(env, c.id);
     await record(env, { content_id: c.id, kind: "aroll", path: await put(path.join(env.inbox, "AI又忘了怎么办-原片.mov"), "raw"), request_id: "a" });
     const before = (await getContent(c.id, env.dir))!.claim;
-    const res = await executeContentSave({ _dataDir: env.dir, action: "update", id: c.id, body: "改一个字", _host: "claude-code" });
+    const res = await executeContentSave({ _provenance: HUMAN_WRITE, _dataDir: env.dir, action: "update", id: c.id, body: "改一个字", _host: "claude-code" });
     expect(res).toMatchObject({ ok: false, code: "script_frozen" });
     expect((await getContent(c.id, env.dir))!.claim).toEqual(before);
   });
@@ -174,17 +179,24 @@ describe("P3 #14 / #15 与创始人决定 1、3", () => {
 });
 
 describe("seg9", () => {
-  it("[P2 tool-runner] 启用后出包：旧预检里闸门没覆盖的项照拦（无标签、字数），只有旧封面审核跳过", async () => {
+  it("[P2 tool-runner] 启用后出包：标题 / 标签 / 字数 / 封面交给发布计划检查，旧预检不再按稿件拦；出包仍要有效检查", async () => {
     await enable();
     const r = await registeredVideo(env);
     const runner = new ToolRunner({ ctx: createContext({ data_dir: env.dir }), eventBus: new EventBus() });
     runner.register({ name: "autocrew_publish", label: "publish", description: "", parameters: publishSchema, execute: executePublish });
-    const res = await runner.execute("autocrew_publish", { action: "ego_lite_prepare", content_id: r.id, check_ids: ["chk-x"], _host: "claude-code" }) as { ok: boolean; checks?: Array<{ name: string; status: string }> };
+    const res = await runner.execute("autocrew_publish", { action: "ego_lite_prepare", content_id: r.id, check_ids: ["chk-x"], _host: "claude-code" }) as { ok: boolean; error?: string; code?: string };
     expect(res.ok).toBe(false);
-    const by = Object.fromEntries((res.checks ?? []).map((c) => [c.name, c.status]));
-    expect(by["Hashtags"]).toBe("fail");
-    expect(by["封面审核"]).toBe("skip");
+    expect(res.error).not.toBe("pre_publish_check_failed");
     expect(JSON.stringify(res)).not.toContain("force");
+    const direct = await executePrePublish({ action: "check", content_id: r.id, _dataDir: env.dir, _ontologyGated: true, _readOnly: true }) as { checks: Array<{ name: string; status: string }> };
+    const by = Object.fromEntries(direct.checks.map((c) => [c.name, c.status]));
+    expect(by).toMatchObject({ Hashtags: "skip", 标题规范: "skip", 正文字数: "skip", 封面审核: "skip" });
+    expect(by["内容审核"]).toBeDefined();
+    expect(by["登记（发布出口）"]).toBe("pass");
+    // 模型自带 _ontologyGated、但这条不按本体走（非视频稿）：照旧按稿件拦
+    const mp = await saveContent({ _provenance: HUMAN_WRITE, title: "公众号", body: "正文", platform: "wechat_mp", status: "approved" }, env.dir);
+    const legacy = await executePrePublish({ action: "check", content_id: mp.id, _dataDir: env.dir, _ontologyGated: true, _readOnly: true }) as { checks: Array<{ name: string; status: string; detail: string }> };
+    expect(legacy.checks.some((c) => c.detail.includes("按发布计划"))).toBe(false);
   });
 
   it("[P2 receipts] 历史纠正存的是中文平台名槽（slot:1:视频号）：归一后照样作废那条回执", async () => {
@@ -241,7 +253,7 @@ describe("seg10", () => {
     await enable();
     const { saveContent } = await import("../../storage/local-store.js");
     const { executePrePublish } = await import("../../tools/pre-publish.js");
-    const c = await saveContent({ title: "小红书图文", body: "正文".repeat(80), platform: "xhs", status: "approved", tags: [] } as never, env.dir);
+    const c = await saveContent({ _provenance: HUMAN_WRITE, title: "小红书图文", body: "正文".repeat(80), platform: "xhs", status: "approved", tags: [] } as never, env.dir);
     const res = await executePrePublish({ _dataDir: env.dir, content_id: c.id, _ontologyGated: true, _readOnly: true }) as { checks?: Array<{ name: string; status: string }> };
     expect(res.checks?.find((x) => x.name === "封面审核")?.status).toBe("fail");
   });
@@ -321,7 +333,7 @@ describe("seg11", () => {
     const future = new Date(Date.now() + 7 * 86_400_000).toISOString();
     await put(path.join(r.root, "06-publish/publish-plan.json"), JSON.stringify({ platforms: [{ platform: "douyin", publication: { status: "scheduled", scheduled_at: future, submitted_at: new Date(Date.now() + 1000).toISOString() } }] }));
     await reconcileAll(env.dir);
-    await updateContent(r.id, { status: "published", publishedAt: "2026-09-01T00:00:00Z" } as never, env.dir);
+    await updateContent(r.id, { _provenance: HUMAN_WRITE, status: "published", publishedAt: "2026-09-01T00:00:00Z" } as never, env.dir);
     const c = await withRoundPublishTime((await getContent(r.id, env.dir))!, env.dir);
     expect(c.publishedAt).toBe(future);
     expect(backupCandidates([c], new Date())).toEqual([]);
@@ -388,6 +400,129 @@ describe("seg12 归档口径", () => {
     expect(real?.submittedAt).toBe("2026-09-30T09:30:00Z");
   });
 
+  it("[10-03] 抖音审核中但已定时：本轮发布时间取定时时间，不取提交时间；NAS 目录按定时的月份", async () => {
+    const SUBMITTED = "2026-09-30T18:47:22+08:00", SCHEDULED = "2026-10-08T18:00:00+08:00";
+    await enable();
+    const r = await registeredVideo(env);
+    // 修复前写下的错事实：审核中的抖音带着提交时间当发布时间
+    const { mutateProduction } = await import("./service.js");
+    await mutateProduction(r.id, env.dir, (d) => { d.facts.push({ id: "old-douyin", kind: "publish", round: d.round, state: "accepted", availability: "present", source: "reconcile", at: SUBMITTED, seen_at: "2026-10-01T00:00:00Z", obs_source: "plan", platform: "douyin", pub_state: "reviewing", verified: true, evidence: "发布计划里的记录", published_at: SUBMITTED }); return { value: null, events: [] }; });
+    await put(path.join(r.root, "06-publish/publish-plan.json"), JSON.stringify({ platforms: [
+      { platform: "douyin", publication: { status: "reviewing", submitted_at: SUBMITTED, scheduled_at: SCHEDULED } },
+      ...["bilibili", "xiaohongshu", "wechat_video"].map((platform) => ({ platform, publication: { status: "scheduled", submitted_at: SUBMITTED, scheduled_at: SCHEDULED } })),
+    ] }));
+    const { reconcileAll } = await import("./reconcile.js");
+    await reconcileAll(env.dir);
+    const { roundPublishTime } = await import("../../storage/round-publish-time.js");
+    const { archiveTarget } = await import("../../storage/nas-archive.js");
+    const { getContent } = await import("../../storage/local-store.js");
+    const c = (await getContent(r.id, env.dir))!;
+    const at = await roundPublishTime(c, env.dir);
+    expect(at && Date.parse(at)).toBe(Date.parse(SCHEDULED));
+    const doc = (await readProductionDoc(r.id, env.dir))!;
+    expect(doc.facts.filter((f) => f.kind === "publish" && f.platform === "douyin").at(-1)).toMatchObject({ pub_state: "reviewing", published_at: SCHEDULED });
+    expect(archiveTarget("/nas", { ...c, publishedAt: at }, r.root)).toBe(path.join("/nas", "2026", "October", path.basename(r.root)));
+  });
+
+  it("[10-03] 审核中、没有定时：提交时间不算公开时间，只有它时本轮发布时间定不出（列「待确认发布时间」），有别的平台公开就取那个", async () => {
+    const SUBMITTED = "2026-09-30T18:47:22+08:00";
+    const { roundPublishTime } = await import("../../storage/round-publish-time.js");
+    const { getContent } = await import("../../storage/local-store.js");
+    const alone = await publishedWithPlan("只审核中", { status: "reviewing", submitted_at: SUBMITTED });
+    expect(await roundPublishTime((await getContent(alone.id, env.dir))!, env.dir)).toBeNull();
+    const r = await registeredVideo(env, "审核中加已公开");
+    await put(path.join(r.root, "06-publish/publish-plan.json"), JSON.stringify({ platforms: [
+      { platform: "douyin", publication: { status: "reviewing", submitted_at: SUBMITTED } },
+      { platform: "bilibili", publication: { status: "public", submitted_at: SUBMITTED, published_at: "2026-10-02T09:00:00+08:00" } },
+    ] }));
+    const { reconcileAll } = await import("./reconcile.js");
+    await reconcileAll(env.dir);
+    const at = await roundPublishTime((await getContent(r.id, env.dir))!, env.dir);
+    expect(at && Date.parse(at)).toBe(Date.parse("2026-10-02T09:00:00+08:00"));
+  });
+
+  it("[10-03 Codex P2] 重开后审核中、没定时的新提交：没有公开时间也要进新一轮，不被当成旧记录去重", async () => {
+    const { emptyProductionDoc } = await import("../../storage/production-types.js");
+    const { importObservations, slotOf } = await import("./receipts.js");
+    const doc = emptyProductionDoc();
+    importObservations(doc, [{ source: "plan", platform: "douyin", pub_state: "reviewing", submitted_at: "2026-09-10T00:00:00Z", evidence: "发布计划里的记录" }]);
+    doc.decisions.push({ id: "r1", type: "reopen", round: 1, at: "2026-09-20T00:00:00Z", source: "founder" });
+    doc.round = 2;
+    importObservations(doc, [{ source: "plan", platform: "douyin", pub_state: "reviewing", submitted_at: "2026-09-25T00:00:00Z", evidence: "发布计划里的记录" }]);
+    expect(slotOf(doc, 2, "douyin")).toMatchObject({ pub_state: "reviewing" });
+  });
+
+  it("[10-03 Codex P2] 纠正过的旧形状审核中回执：修复后只是时间变了，纠正照旧有效（提交 / 核实时间、按槽 / 按事实 id 的纠正都算）", async () => {
+    const { emptyProductionDoc } = await import("../../storage/production-types.js");
+    const { importObservations, slotOf } = await import("./receipts.js");
+    const SUBMITTED = "2026-09-30T18:47:22+08:00", SCHEDULED = "2026-10-08T18:00:00+08:00";
+    const cases = [
+      { evidence: { submitted_at: SUBMITTED }, target: (_id: string) => "slot:1:douyin" },
+      { evidence: {}, target: (id: string) => id },
+    ];
+    for (const { evidence, target } of cases) for (const scheduled of [SCHEDULED, undefined]) {
+      const doc = emptyProductionDoc();
+      // 旧版写下的事实：发布时间 = 当时的证据时间，没存提交时间
+      doc.facts.push({ id: "old", kind: "publish", round: 1, state: "accepted", availability: "present", source: "reconcile", at: SUBMITTED, seen_at: "2026-10-01T00:00:00Z", obs_source: "plan", platform: "douyin", pub_state: "reviewing", verified: true, evidence: "发布计划里的记录", published_at: SUBMITTED });
+      doc.decisions.push({ id: "c1", type: "publish_correction", round: 1, target_id: target("old"), at: "2026-10-02T00:00:00Z", source: "founder" });
+      expect(slotOf(doc, 1, "douyin")).toBeNull();
+      const plan = { source: "plan" as const, platform: "douyin", pub_state: "reviewing" as const, evidence: "发布计划里的记录", evidence_at: SUBMITTED, ...evidence, ...(scheduled ? { published_at: scheduled } : {}) };
+      importObservations(doc, [plan]);
+      importObservations(doc, [plan]);
+      expect(slotOf(doc, 1, "douyin")).toBeNull();
+      // 真正的新状态照旧算新证据
+      expect(importObservations(doc, [{ ...plan, pub_state: "public", published_at: SCHEDULED }])).toBe(1);
+    }
+  });
+
+  it("[10-03 Codex P2] 旧形状回执的纯时间迁移不越过后来的其它来源：数据回流的已公开仍是当前状态", async () => {
+    const { emptyProductionDoc } = await import("../../storage/production-types.js");
+    const { importObservations, slotOf } = await import("./receipts.js");
+    const SUBMITTED = "2026-09-30T18:47:22+08:00";
+    // 第二组：旧形状没有观察时间（都按 1970 排，只剩写入顺序）
+    for (const [planSeen, metricsSeen] of [["2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z"], [undefined, undefined]]) {
+      const doc = emptyProductionDoc();
+      doc.facts.push({ id: "old", kind: "publish", round: 1, state: "accepted", availability: "present", source: "reconcile", at: SUBMITTED, ...(planSeen ? { seen_at: planSeen } : {}), obs_source: "plan", platform: "douyin", pub_state: "rejected", verified: true, evidence: "发布计划里的记录", published_at: SUBMITTED });
+      doc.facts.push({ id: "metrics", kind: "publish", round: 1, state: "accepted", availability: "present", source: "reconcile", at: "2026-10-02T00:00:00Z", ...(metricsSeen ? { seen_at: metricsSeen } : {}), obs_source: "metrics_id", platform: "douyin", item_id: "7123", pub_state: "public", verified: true, evidence: "数据回流按作品 id 对上了这条" });
+      importObservations(doc, [{ source: "plan", platform: "douyin", pub_state: "rejected", evidence: "发布计划里的记录", submitted_at: SUBMITTED, evidence_at: SUBMITTED }]);
+      expect(slotOf(doc, 1, "douyin")).toMatchObject({ pub_state: "public", fact_id: "metrics" });
+      expect(doc.facts).toHaveLength(2);
+      expect(doc.facts[0]).toMatchObject({ id: "old", submitted_at: SUBMITTED });
+      expect(doc.facts[0].published_at).toBeUndefined();
+    }
+  });
+
+  it("[10-03 Codex P2] 同一轮、没定时的审核中重新提交：只有提交时间变了也算新回执，纠正后能重新出现", async () => {
+    const { emptyProductionDoc } = await import("../../storage/production-types.js");
+    const { importObservations, slotOf } = await import("./receipts.js");
+    const doc = emptyProductionDoc();
+    const base = { source: "plan" as const, platform: "douyin", pub_state: "reviewing" as const, evidence: "发布计划里的记录" };
+    importObservations(doc, [{ ...base, submitted_at: "2026-09-30T10:00:00Z", evidence_at: "2026-09-30T10:00:00Z" }]);
+    doc.decisions.push({ id: "c1", type: "publish_correction", round: 1, target_id: "slot:1:douyin", at: new Date(Date.now() + 1000).toISOString(), source: "founder" });
+    expect(importObservations(doc, [{ ...base, submitted_at: "2026-09-30T10:00:00Z", evidence_at: "2026-09-30T10:00:00Z" }])).toBe(0);
+    await new Promise((r) => setTimeout(r, 1100));
+    expect(importObservations(doc, [{ ...base, submitted_at: "2026-10-02T10:00:00Z", evidence_at: "2026-10-02T10:00:00Z" }])).toBe(1);
+    expect(slotOf(doc, 1, "douyin")).toMatchObject({ pub_state: "reviewing" });
+  });
+
+  it("[10-03 Codex P2] 上一条既没有公开时间也没有提交时间，新计划带上提交时间：算新提交，纠正后能重新出现", async () => {
+    const { emptyProductionDoc } = await import("../../storage/production-types.js");
+    const { importObservations, slotOf } = await import("./receipts.js");
+    const doc = emptyProductionDoc();
+    const base = { source: "plan" as const, platform: "douyin", pub_state: "reviewing" as const, evidence: "发布计划里的记录" };
+    importObservations(doc, [base]);
+    doc.decisions.push({ id: "c1", type: "publish_correction", round: 1, target_id: "slot:1:douyin", at: new Date(Date.now() + 1000).toISOString(), source: "founder" });
+    await new Promise((r) => setTimeout(r, 1100));
+    expect(importObservations(doc, [{ ...base, submitted_at: "2026-10-02T10:00:00Z", evidence_at: "2026-10-02T10:00:00Z" }])).toBe(1);
+    expect(slotOf(doc, 1, "douyin")).toMatchObject({ pub_state: "reviewing" });
+  });
+
+  it("[10-03 Codex P2] 审核中只有核实时间、有定时：发布时间取定时，把关证据仍取核实时间", async () => {
+    const { parsePlatformEntry } = await import("../../storage/publish-record.js");
+    const p = parsePlatformEntry({ platform: "douyin", publication: { status: "reviewing", verified_at: "2026-09-01T00:00:00Z", scheduled_at: "2026-10-08T10:00:00Z" } }, Date.parse("2026-10-03T00:00:00Z"));
+    expect(p).toMatchObject({ time: "2026-10-08T10:00:00Z", evidenceAt: "2026-09-01T00:00:00Z", submittedAt: null });
+  });
+
   it("[3] 视图与归档同一份保留名单：视图显示的就是 keep，归档候选与它不相交", async () => {
     const a = await publishedWithPlan();
     const { publishedSet } = await import("../../storage/round-publish-time.js");
@@ -410,7 +545,7 @@ describe("seg12 归档口径", () => {
     await fs.writeFile(file, "{ not json");
     const { publishedSet } = await import("../../storage/round-publish-time.js");
     const { listContents, getContent, updateContent } = await import("../../storage/local-store.js");
-    await updateContent(bad.id, { status: "published" } as never, env.dir);
+    await updateContent(bad.id, { _provenance: HUMAN_WRITE, status: "published" } as never, env.dir);
     const set = await publishedSet(await listContents(env.dir), env.dir);
     expect(set.published.map((c) => c.id)).toContain(good.id);
     expect((await getContent(bad.id, env.dir))).toBeTruthy();

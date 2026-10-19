@@ -7,6 +7,7 @@ import { saveContent, getContent, type Content, type ContentStatus } from "./loc
 import { commitProjectContent } from "./project-commit.js";
 import { acquireLibraryLock } from "./library-lock.js";
 import { syncMyContentView, VIEW_DIR, VIEW_MANIFEST, ERROR_FILE } from "./my-content-view.js";
+import { HUMAN_WRITE } from "./first-body-guard.js";
 
 let release: () => void;
 let temp: string, lib: string, data: string, view: string;
@@ -36,7 +37,7 @@ const sync = (opts = {}) => syncMyContentView(data, { now: NOW, ...opts });
 const exists = (p: string) => fs.lstat(p).then(() => true, () => false);
 
 async function make(title: string, status: ContentStatus, extra: Partial<Content> = {}): Promise<Content> {
-  const c = await saveContent({ title, body: `${title} 的正文`, platform: "douyin", status: "drafting", tags: [] }, data);
+  const c = await saveContent({ _provenance: HUMAN_WRITE, title, body: `${title} 的正文`, platform: "douyin", status: "drafting", tags: [] }, data);
   return setState(c, { status, createdAt: new Date(2026, 8, 20, 12).toISOString(), ...extra });
 }
 async function setState(c: Content, patch: Partial<Content>): Promise<Content> {
@@ -143,6 +144,15 @@ describe("我的内容视图", () => {
     expect(Object.keys(manifest.entries).some((k) => k.includes("我改过的"))).toBe(false);
   });
 
+  it("leaves imported history records out of every column (they have no production state)", async () => {
+    const real = await make("真稿", "drafting");
+    const history = await make("历史作品", "published", { source: "imported_history", body: "" });
+    const result = await sync();
+    expect(result.errors).toEqual([]);
+    expect(await exists(path.join(folder("写稿中", real.title), "口播稿.md"))).toBe(true);
+    for (const col of COLS) expect(await exists(folder(col, history.title))).toBe(false);
+  });
+
   it("shows only the newest 5 published items", async () => {
     for (let i = 1; i <= 6; i++) await make(`发布${i}`, "published", { publishedAt: `2026-09-0${i}T00:00:00.000Z` });
     await sync();
@@ -158,6 +168,15 @@ describe("我的内容视图", () => {
     const missing = await fs.readFile(path.join(dir, "还缺什么.txt"), "utf8");
     expect(missing).toContain("发布文案");
     expect(missing).toContain("成片");
+  });
+
+  it("排期会纪要从 meetings/ 渲染进「排期会」只读副本（同复盘栏做法）", async () => {
+    const { saveMeetingCas } = await import("../modules/meetings/meeting-store.js");
+    await saveMeetingCas({ date: "2026-10-02", slots: [], rejected: [{ title: "凑数题", reason: "没新东西" }], reviews: [] }, 0, data);
+    await sync();
+    const md = await fs.readFile(path.join(view, "排期会", "2026-10-02 排期会.md"), "utf8");
+    expect(md).toContain("# 2026-10-02 排期会纪要");
+    expect(md).toContain("凑数题：没新东西");
   });
 
   it("publish copy prefers the publish plan's per-platform text over the video kit", async () => {

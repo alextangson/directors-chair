@@ -11,6 +11,8 @@ import { loadProfile } from "../profile/creator-profile.js";
 import { recordDiff } from "../learnings/diff-tracker.js";
 import { buildWritingContract, renderBrandContext } from "./script-prompt.js";
 import { appendWritingFeedback, renderWritingFeedback } from "./writing-feedback.js";
+import { modelWrite } from "../../storage/first-body-guard.js";
+import { admitWritingJob } from "../research/angle-gate.js";
 
 export interface ReviseDraftResult {
   content: Content;
@@ -30,6 +32,7 @@ export async function reviseDraft(
   dataDir?: string,
   deps?: { runLoopImpl?: RunLoopImpl },
 ): Promise<ReviseDraftResult> {
+  await admitWritingJob({ contentId }, dataDir);
   const feedback = instruction.trim();
   if (!feedback) throw new Error("缺少修改要求");
 
@@ -109,6 +112,7 @@ export async function reviseDraft(
     {
       title: revision.title,
       body: revision.body,
+      _provenance: modelWrite("engine"),
       writingFeedback: appendWritingFeedback(current.writingFeedback, feedback, "whole"),
       _versionNote: note,
       // 改稿不接审稿（审稿 spec §2.7），但改过的稿不得继续顶着「已 AI 审稿」的徽章：
@@ -123,7 +127,7 @@ export async function reviseDraft(
   // best-effort：记录失败不阻断改稿（稿已落盘）。这里不触发蒸馏——对话轮要快，
   // 攒下的 diff 由下一次保存/收稿时的蒸馏一并消化。
   try {
-    await recordDiff(contentId, "body", current.body, revision.body, dataDir, feedback, current.platform);
+    await recordDiff(contentId, "ai", "body", current.body, revision.body, dataDir, feedback, current.platform);
   } catch {
     /* 学习信号丢一条，不影响这次修改 */
   }

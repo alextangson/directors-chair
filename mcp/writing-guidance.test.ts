@@ -12,12 +12,13 @@ import { editorialSchema } from "../src/tools/editorial.js";
 import { scoutSchema } from "../src/tools/scout.js";
 import { reviewDeskSchema } from "../src/tools/host-review.js";
 import { writerSchema } from "../src/tools/writer.js";
+import { draftSchema } from "../src/tools/draft.js";
 import { listGuiSkills } from "../src/desktop/skills-reader.js";
 import { WRITING_INSTRUCTIONS } from "./writing-instructions.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SKILLS = [
-  "calibrate", "style-calibration", "topic-ideas", "spawn-planner", "research",
+  "calibrate", "style-calibration", "topic-ideas", "topic-meeting", "research",
   "spawn-writer", "write-script", "spawn-batch-writer", "platform-rewrite",
   "humanizer-zh", "content-review", "memory-distill", "pre-publish", "manage-pipeline", "onboarding",
   "video-session",
@@ -31,6 +32,10 @@ const writerExampleSchema = Type.Object({
   action: Type.Union((writerSchema.properties.action.enum as string[]).map(value => Type.Literal(value))),
   research_mode: Type.Optional(Type.Union((writerSchema.properties.research_mode.enum as string[]).map(value => Type.Literal(value)))),
   review: Type.Optional(Type.Union((writerSchema.properties.review.enum as string[]).map(value => Type.Literal(value)))),
+}, { additionalProperties: false });
+const draftExampleSchema = Type.Object({
+  ...draftSchema.properties,
+  action: Type.Union((draftSchema.properties.action.enum as string[]).map(value => Type.Literal(value))),
 }, { additionalProperties: false });
 
 describe("writing guidance matches callable product capabilities", () => {
@@ -88,7 +93,7 @@ describe("writing guidance matches callable product capabilities", () => {
 
   it("published host research, writing and review examples satisfy their real tool schemas", () => {
     for (const [name, schema] of [
-      ["research", scoutSchema], ["write-script", writerExampleSchema], ["content-review", reviewDeskSchema],
+      ["research", scoutSchema], ["write-script", draftExampleSchema], ["content-review", reviewDeskSchema],
     ] as const) {
       const examples = [...harness(name).matchAll(/```json\s*\n([\s\S]*?)\n```/g)];
       expect(examples.length, name).toBeGreaterThan(0);
@@ -115,7 +120,10 @@ describe("writing guidance matches callable product capabilities", () => {
     expect(WRITING_INSTRUCTIONS).toContain("第三方搜索、图像与视频仍使用独立服务额度");
     expect(harness("research")).toContain('action:"read_page"');
     expect(harness("research")).toContain("不要求第三方搜索 key");
-    expect(harness("style-calibration")).toContain("host_style_task");
+    // 风格分析归当前宿主：autocrew_style 对宿主不列（host-policy），技能不能指望它，也不能把分析转给后台模型
+    expect(harness("style-calibration")).toContain("样本由你自己读、自己分析");
+    expect(harness("style-calibration")).toContain("无需后台模型");
+    expect(harness("style-calibration")).not.toMatch(/autocrew_style|execution=engine/);
   });
 
   it("MCP hosts receive the feedback and audience contract without loading local skills", () => {

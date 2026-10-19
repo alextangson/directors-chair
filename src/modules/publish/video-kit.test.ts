@@ -1,6 +1,7 @@
 /**
  * video-kit.test.ts — 视频发布件（IA v5 V5.4b）
  */
+import { primaryVideoKit } from "../../storage/video-kits.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -10,6 +11,7 @@ import { generateImageViaRelay } from "./image-gen.js";
 import { saveContent, getContent } from "../../storage/local-store.js";
 import { editorialDraftHash } from "../../tools/editorial.js";
 import type { runLoop } from "../../engine/loop.js";
+import { HUMAN_WRITE } from "../../storage/first-body-guard.js";
 
 let dir: string;
 
@@ -43,7 +45,7 @@ function mockLoop(args: Record<string, unknown>): typeof runLoop {
 }
 
 async function mkVideoContent(platform = "douyin"): Promise<string> {
-  const c = await saveContent({
+  const c = await saveContent({ _provenance: HUMAN_WRITE,
     title: "删AI代码的生意", body: "口播稿正文……", platform,
     status: "approved", tags: [], hashtags: ["AI"],
   }, dir);
@@ -59,12 +61,12 @@ describe("prepareVideoKit", () => {
     expect(r.kit.storyboard[0].overlay).toContain("1万美元");
     expect(r.kit.storyboard[2].overlay).toBeUndefined(); // 空串滤掉
     const saved = await getContent(id, dir);
-    expect(saved!.videoKit!.caption).toContain("#AI");
-    expect(saved!.videoKit!.postTitle).toBe("删AI代码,周入1万美元");
-    expect(saved!.videoKit!.generatedAt).toBeTruthy();
+    expect(primaryVideoKit(saved!)!.caption).toContain("#AI");
+    expect(primaryVideoKit(saved!)!.postTitle).toBe("删AI代码,周入1万美元");
+    expect(primaryVideoKit(saved!)!.generatedAt).toBeTruthy();
     // 引擎做的包同样钉稿件指纹，改稿后预检照样判过期（P6 §3.6）
-    expect(saved!.videoKit!.source).toBe("engine");
-    expect(saved!.videoKit!.draftHash).toBe(editorialDraftHash(saved!));
+    expect(primaryVideoKit(saved!)!.source).toBe("engine");
+    expect(primaryVideoKit(saved!)!.draftHash).toBe(editorialDraftHash(saved!));
   });
 
   it("平台标题硬门:小红书 >20 字被工具打回(不静默截断),模型未重交 → 失败", async () => {
@@ -78,7 +80,7 @@ describe("prepareVideoKit", () => {
   });
 
   it("非视频平台 → 拒绝;分镜 <3 行 → 工具打回致失败", async () => {
-    const wechatId = (await saveContent({
+    const wechatId = (await saveContent({ _provenance: HUMAN_WRITE,
       title: "t", body: "b", platform: "wechat_mp", status: "approved", tags: [], hashtags: [],
     }, dir)).id;
     await expect(prepareVideoKit(wechatId, {}, dir, { runLoopImpl: mockLoop(KIT_ARGS) }))

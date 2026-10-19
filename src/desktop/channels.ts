@@ -42,12 +42,7 @@ export const IPC_CHANNELS = [
   "chat:turn_status",
   // 右栏模型切换器的只读数据源：模型名 + 档位字，绝不含 apiKey/baseUrl
   "chat:model_options",
-  // 总编辑接本机 agent（2026-09-28 spec）：切换器就绪状态 / 刷新后重挂进行中轮次与待处理卡 / 审批与权限卡应答
-  "agent:backends",
-  "agent:pending",
-  "agent:answer",
-  // v1.1：对话级模型 / 思考强度 / 权限模式；对话改名
-  "agent:settings",
+  // v1.1：对话改名
   "conversations:rename",
   "settings:get",
   "settings:set",
@@ -62,9 +57,6 @@ export const IPC_CHANNELS = [
   // 只出宿主名与时间戳，token 值一个字节都不进这条通道
   "hosts:list",
   "hosts:revoke",
-  // WorkBuddy 反向接入（spec W1–W8）：是否装了 / 一键连接（发令牌 + 合并 ~/.workbuddy/mcp.json）
-  "hosts:workbuddy_status",
-  "hosts:workbuddy_connect",
   "settings:search_get",
   "settings:search_set",
   "settings:publish_get",
@@ -100,6 +92,8 @@ export const IPC_CHANNELS = [
   "flywheel:pull_toggle",
   // 假设台账只读（spec §5.3）：open + 已裁决两组，裁决是代码算的观察性结论
   "flywheel:hypotheses_list",
+  // 预测账本只读（预测账本规格 §一）：页面上不能新建、修改或删除预测
+  "calibration:ledger",
   "dialog:pick_file",
   "knowledge:status",
   "radar:status",
@@ -153,10 +147,15 @@ export const IPC_CHANNELS = [
   "topic:create",
   "topic:update",
   "topic:delete",
+  // 一键删示例（onboarding-connect O20）：示例选题连同其下的稿一起进回收站
+  "topic:delete_example",
   "topic:restore",
   // 角度点选（角度卡 spec §1.4）：点选 = 只带 angle_id；改写 = 额外带改写后的 card
   "topic:select_angle",
   "topic:clear_angle",
+  // 灵感 → A-roll 薄路径定稿（2026-10-04）：清单 + 「定了」（只认浏览器会话）
+  "draft:final_get",
+  "draft:finalize",
   "content:delete",
   "content:restore",
   "content:open_folder",

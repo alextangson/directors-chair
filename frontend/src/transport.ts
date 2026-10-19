@@ -27,8 +27,15 @@ export function getConfig(): AutocrewConfig {
 
 let sessionPromise: Promise<void> | null = null;
 
-/** 把地址栏的一次性 boot token 换成 HttpOnly session cookie，并立即清掉 URL 中的 token。 */
-async function ensureSession(): Promise<void> {
+export const SESSION_EXPIRED =
+  "登录过期：在终端运行 autocrew logs，打开最新打印的 http://127.0.0.1:…/?token=… 链接；那条也打开过了，就等手上的稿停下后运行 autocrew restart，用它新打印的链接进来";
+
+/**
+ * 把地址栏的一次性 boot token 换成 HttpOnly session cookie，并立即清掉 URL 中的 token（1b §9）。
+ * token 已失效但会话 cookie 有效 → 服务端回 existing，照样静默去掉 token；两者都无效才报「登录过期」。
+ * 看板和其余首屏请求都先等它（`authedFetch`），不和会话交换赛跑。
+ */
+export async function ensureSession(): Promise<void> {
   if (sessionPromise) return sessionPromise;
   sessionPromise = (async () => {
     const current = new URL(window.location.href);
@@ -40,12 +47,21 @@ async function ensureSession(): Promise<void> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token }),
     });
-    if (!res.ok) throw new Error("本地会话认证失败，请从 server 新打印的链接重新进入");
+    if (!res.ok) {
+      sessionPromise = null;
+      throw new Error(SESSION_EXPIRED);
+    }
     current.searchParams.delete("token");
     const clean = current.pathname + (current.search ? current.search : "") + current.hash;
     window.history.replaceState(null, "", clean);
   })();
   return sessionPromise;
+}
+
+/** 首屏与视图里直接打服务端的请求：先等会话交换完成 */
+export async function authedFetch(url: string, init?: RequestInit): Promise<Response> {
+  await ensureSession();
+  return fetch(url, { credentials: "same-origin", ...init });
 }
 
 export interface InvokeResult {
@@ -116,12 +132,10 @@ export interface SseEvent {
    *   只是「正在生成的样子」，事实源仍是 chat:turn 的 invoke 返回（到达后全量覆盖）
    * - chat_followup：总编辑往某段会话里落了一轮**调研回报**（{conversationId, topicId}）——
    *   后台任务回来了,不是用户发起的一轮;右栏据此重载当前会话或提示去会话列表看
-   * - agent：总编辑本机 agent 的审批/权限卡（ask / ask_resolved）、本轮卡片（card）、轮次状态（turn）、
-   *   轮次结束后才返回的后台结果（background）——卡片字段都经服务端白名单，令牌不进这条流
    * - reconnect：**客户端合成**事件，不来自服务端。SSE 断线期间的事件已经永久丢失，
    *   重连后订阅方必须无条件重拉一次（同 spec §8.3 之四）
    */
-  kind: "engine" | "chat" | "chat_delta" | "chat_followup" | "agent" | "inbox" | "research" | "video:updated" | "reconnect";
+  kind: "engine" | "chat" | "chat_delta" | "chat_followup" | "inbox" | "research" | "video:updated" | "reconnect";
   data: Record<string, unknown>;
 }
 
@@ -131,7 +145,7 @@ let source: EventSource | null = null;
 const listeners = new Set<SseListener>();
 
 /** 订阅引擎/对话事件流。全应用单连接;返回退订函数。 */
-const SSE_KINDS = ["engine", "chat", "chat_delta", "chat_followup", "agent", "inbox", "research", "video:updated"] as const;
+const SSE_KINDS = ["engine", "chat", "chat_delta", "chat_followup", "inbox", "research", "video:updated"] as const;
 /** 标签页藏起来多久后断开事件流（给正在流式回复的对话留余地） */
 const HIDDEN_CLOSE_MS = 60_000;
 let hiddenTimer: ReturnType<typeof setTimeout> | null = null;

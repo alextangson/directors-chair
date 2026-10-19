@@ -3,7 +3,7 @@
  * 规则是"越用越像你"的可视面——每条都能溯源(来源+置信度)、能关掉。
  */
 import { useEffect, useState } from "react";
-import { invoke } from "../transport";
+import { authedFetch, invoke } from "../transport";
 import { toast, openDialog } from "../ui";
 import { useChatSend } from "../chat/ChatDock";
 import { PLATFORM_CATALOG } from "../lib";
@@ -152,11 +152,12 @@ export function Calibration() {
     }
     setBusyRule(rule.id);
     try {
-      const response = await fetch("/api/rules/decision", {
+      const response = await authedFetch("/api/rules/decision", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ruleId: rule.id, revision: rule.revision, decision, eventId: crypto.randomUUID() }),
       });
-      const result = (await response.json().catch(() => ({ ok: false, error: `审批失败（HTTP ${response.status}）` }))) as { ok: boolean; error?: string };
+      const result = (await response.json().catch(() => ({ ok: false, error: `审批失败（HTTP ${response.status}）` }))) as { ok: boolean; error?: string; code?: string; rule_cap?: number };
+      if (result.code === "rule_cap_reached") return toast(`生效规则已经满 ${result.rule_cap ?? 12} 条了：先停用一条旧规则，再批准这条`);
       if (!result.ok) return toast(result.error ?? "审批失败");
       toast(decision === "active" ? "已批准生效；已领的写作包需要重新领取才会用上" : decision === "disabled" ? "已停用" : "已丢弃");
     } catch (e) {

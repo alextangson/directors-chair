@@ -33,6 +33,7 @@ import {
   writePng,
   type HandoffFixture,
 } from "./handoff-testkit.js";
+import { HUMAN_WRITE } from "../../../storage/first-body-guard.js";
 
 type Approvals = Record<"final_cut" | "covers", Record<string, string>>;
 
@@ -157,7 +158,7 @@ describe.skipIf(!HAS_FFMPEG)("登记成功（register-to-ego-lite）", () => {
     expect(spoken).toBe("今天聊聊我怎么用 AI 工具省下每天两小时。据麦肯锡报告，能省 30%。\n\n第一步，把重复的事交出去。\n");
     const diffs = (await listDiffs({ contentId }, fx.dir)).filter((d) => d.changeType === "实拍口播与定稿的差异");
     expect(diffs).toHaveLength(1);
-    expect(diffs[0]).toMatchObject({ field: "body", before: BODY, after: spoken, platform: "douyin" });
+    expect(diffs[0]).toMatchObject({ author: "founder", field: "body", before: BODY, after: spoken, platform: "douyin" });
     expect(await register()).toMatchObject({ ok: true, replayed: true });
     expect((await listDiffs({ contentId }, fx.dir)).filter((d) => d.changeType === "实拍口播与定稿的差异")).toHaveLength(1);
   });
@@ -329,7 +330,7 @@ describe.skipIf(!HAS_FFMPEG)("四样同事务（register-atomic）", () => {
     await fs.mkdir(path.dirname(journalFile), { recursive: true });
     await fs.writeFile(journalFile, JSON.stringify(journal));
     // 模拟崩溃前已盖的戳
-    await updateContent(contentId, { videoDone: { renderedRevision: 1, at: "2026-09-25T00:00:00Z" } }, fx.dir);
+    await updateContent(contentId, { _provenance: HUMAN_WRITE, videoDone: { renderedRevision: 1, at: "2026-09-25T00:00:00Z" } }, fx.dir);
 
     const res = await register({ final_path: path.join(project, "07-delivery", "x.mp4") });
     expect(res).toMatchObject({ ok: false, code: "path_missing" });

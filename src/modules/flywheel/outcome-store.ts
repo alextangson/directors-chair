@@ -4,6 +4,7 @@
  * 文件：<dataDir>/outcomes.jsonl，一行一条 PerformanceOutcome。
  * 幂等：同 outcomeKey 后写覆盖先写（读取时 latest-wins），journal 本身永不改写。
  */
+import { videoKitsOf } from "../../storage/video-kits.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
@@ -11,17 +12,23 @@ import {
   outcomeKey,
   normalizeTitle,
   normalizePlatform,
+  isTruncatedItemId,
+  ATTRIBUTION_REVIEW_PREFIX,
   type PerformanceOutcome,
 } from "./outcome-schema.js";
 import {
   lookupPlatformItem,
+  bindingsForContent,
   commitBindings,
   platformItemKey,
   type PendingBinding,
   type BindingVia,
 } from "./platform-items.js";
 import { parsePublishUrl } from "./publish-url.js";
+import { lookupClaim } from "./work-claims.js";
 import { listContents, getContent, getDataDir, type Content } from "../../storage/local-store.js";
+import { readPublishRecord } from "../../storage/publish-record.js";
+import { assertManagedPathAvailable, assertDataDirWritable } from "../../storage/storage-roots.js";
 
 const OUTCOMES_FILE = "outcomes.jsonl";
 
@@ -29,7 +36,8 @@ function outcomesPath(dataDir?: string): string {
   return path.join(getDataDir(dataDir), OUTCOMES_FILE);
 }
 
-async function readJournal(dataDir?: string): Promise<PerformanceOutcome[]> {
+/** 账本原始行（不去重、不对账）。核对/回填用：同标题同日的两条作品在 latest-wins 视图里会合并成一条 */
+export async function readJournal(dataDir?: string): Promise<PerformanceOutcome[]> {
   let raw: string;
   try {
     raw = await fs.readFile(outcomesPath(dataDir), "utf-8");
@@ -56,7 +64,8 @@ export async function listOutcomes(dataDir?: string): Promise<PerformanceOutcome
   for (const o of journal) {
     byKey.set(outcomeKey(o), { ...o, platform: normalizePlatform(o.platform) });
   }
-  const deduped = Array.from(byKey.values());
+  // 撤销行（删历史记录）latest-wins 后整键消失
+  const deduped = Array.from(byKey.values()).filter((o) => !o.retracted);
   // 对账：同一平台条目（标题@发布日期）存在任何打标（contentId 非空）版本时，
   // 丢弃该条目的全部历史（contentId 为空）版本——跨数据日期也不双计（评审修订：
   // 否则 confirm_published 前的周一快照与之后的周二快照会被 baseline 当成两个作品）。
@@ -105,8 +114,8 @@ export async function getOutcomesForContent(
  * 进程内 outcomes 写队列（仿 local-store.ts serializeContentWrite）。
  * 逐条 recordOutcome 与批量 importPerformanceRows 共用同一条链：读全量→判幂等→append
  * 的读-改-写不互相穿插，否则并发批次会各自基于旧快照算 replaced/暴涨。
- * 只护本进程；跨进程（扩展 native-host）仍靠 O_APPEND 行级追加 + 读侧坏行跳过，
- * **不承诺崩溃原子性**：崩溃可能留半行，读侧容错吸收（spec §4.1，codex #6）。
+ * 只护本进程；跨进程写由资料库单写锁拦（appendOutcomes 前 assertManagedPathAvailable），
+ * 读侧仍跳过坏行。**不承诺崩溃原子性**：崩溃可能留半行，读侧容错吸收（spec §4.1，codex #6）。
  */
 const outcomeWriteChains = new Map<string, Promise<unknown>>();
 
@@ -125,6 +134,7 @@ export function serializeOutcomeWrite<T>(dataDir: string | undefined, fn: () => 
 /** 单次 append 落盘（批量入库只写一次；调用方负责已在写队列里） */
 export async function appendOutcomes(outcomes: PerformanceOutcome[], dataDir?: string): Promise<void> {
   if (outcomes.length === 0) return;
+  assertManagedPathAvailable(outcomesPath(dataDir));
   await fs.mkdir(getDataDir(dataDir), { recursive: true });
   const payload = outcomes.map((o) => JSON.stringify(o) + "\n").join("");
   await fs.appendFile(outcomesPath(dataDir), payload, "utf-8");
@@ -169,6 +179,7 @@ export async function recordOutcome(
   }
 
   return serializeOutcomeWrite(dataDir, async () => {
+    assertDataDirWritable(dataDir);
     const existing = await listOutcomes(dataDir);
     // 绑定先于建键：绑定表可能把归属改到另一稿，幂等键跟着归属走（键本身的构成不变）
     const binding = await resolveItemBinding({
@@ -179,6 +190,10 @@ export async function recordOutcome(
       contentId: input.contentId,
       dataDir,
     });
+    // O20：示例稿不收任何数据（显式 contentId、绑定表、认领都走到这里）
+    if (binding.contentId && (await getContent(binding.contentId, dataDir))?.example) {
+      return { ok: false, replaced: false, error: `稿件 ${binding.contentId} 是试跑示例，不收数据回流` };
+    }
     const key = outcomeKey({ ...input, contentId: binding.contentId });
     const replaced = existing.some((o) => outcomeKey(o) === key);
 
@@ -236,23 +251,55 @@ export async function matchDraft(
   publishedAt: string | null,
   dataDir?: string,
 ): Promise<Content | null> {
-  const contents = await listContents(dataDir);
-  const targetPlatform = normalizePlatform(platform);
-  const candidates = contents.filter(
-    (c) => c.status === "published" && c.platform && normalizePlatform(c.platform) === targetPlatform,
-  );
   const target = normalizeTitle(platformTitle);
   if (!target) return null; // 标题归一化后为空：没有匹配依据
+  const targetPlatform = normalizePlatform(platform);
+  const candidates: DraftCandidate[] = [];
+  for (const c of await listContents(dataDir)) {
+    if (c.status !== "published" || c.example) continue; // O20：示例稿不进数据回流
+    const platforms = await draftPlatforms(c, dataDir);
+    const titles = platforms.get(targetPlatform);
+    if (titles) candidates.push({ content: c, titles: [c.title, ...titles] });
+  }
+  return matchByTitle(candidates, target, publishedAt);
+}
 
+interface DraftCandidate { content: Content; titles: string[] }
+
+/**
+ * 一篇稿子登记过的全部平台 → 该平台的发布标题。来源：稿件平台、发布包（videoKit）、
+ * 发布计划（publish-plan.json 各平台条目）与「我发了」标记。发布计划读不到时只用前几样，
+ * 不因为一份坏计划让整批认领失败（认领本来就是尽力而为，坏计划在看板上另有可见状态）。
+ */
+export async function draftPlatforms(c: Content, dataDir?: string): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  const add = (platform: string | null | undefined, title?: string | null) => {
+    if (!platform) return;
+    const key = normalizePlatform(platform);
+    const list = out.get(key) ?? [];
+    if (title && !list.includes(title)) list.push(title);
+    out.set(key, list);
+  };
+  add(c.platform);
+  for (const kit of Object.values(videoKitsOf(c))) add(kit.platform, kit.postTitle);
+  for (const m of c.manualPublications ?? []) add(m.platform);
+  const record = await readPublishRecord(c.id, c.manualPublications, getDataDir(dataDir));
+  if (record.kind !== "none") for (const p of record.platforms) add(p.platform, p.title ?? null);
+  return out;
+}
+
+/** 每篇候选取它所有标题里最像的那个分数；精确命中直接返回。阈值与时间窗不变 */
+function matchByTitle(candidates: DraftCandidate[], target: string, publishedAt: string | null): Content | null {
   let best: { content: Content; score: number } | null = null;
-  for (const c of candidates) {
-    const normalized = normalizeTitle(c.title);
-    if (normalized === target) return c;
-    const score = diceSimilarity(normalized, target);
-    if (!best || score > best.score) best = { content: c, score };
+  for (const { content, titles } of candidates) {
+    for (const title of titles) {
+      const normalized = normalizeTitle(title);
+      if (normalized === target) return content;
+      const score = diceSimilarity(normalized, target);
+      if (!best || score > best.score) best = { content, score };
+    }
   }
   if (!best || best.score < FUZZY_THRESHOLD) return null;
-
   // 不可解析的时间视同缺失，落入 strict 分支而非永远 fail 时间窗
   const draftTimeRaw = best.content.publishedAt ? Date.parse(best.content.publishedAt) : NaN;
   const itemTimeRaw = publishedAt ? Date.parse(publishedAt) : NaN;
@@ -285,6 +332,8 @@ export interface BindingResolution {
   reviewReasons: string[];
   /** 够格登记的新绑定；调用方**落盘成功后**再提交 */
   pending: PendingBinding | null;
+  /** 守卫留未绑定时：这条作品此前按标题猜到这篇稿上的旧归属，调用方在同一次写入里撤回 */
+  retractGuess?: { platform: string; itemId: string; contentId: string };
 }
 
 /**
@@ -292,13 +341,15 @@ export interface BindingResolution {
  * dice 模糊命中一律不登记——置信不够的绑定一旦写进表就会被后续行当成精确事实，
  * 错误会自我固化（spec §5.1，codex #11）。
  */
-function bindingEvidence(draft: Content, platformTitle: string, platform: string, itemId: string): BindingVia | null {
+async function bindingEvidence(draft: Content, platformTitle: string, platform: string, itemId: string, dataDir?: string): Promise<BindingVia | null> {
   // 带 platform 解析：链接自称的平台与本行平台不符时 parsePublishUrl 直接 null，不会张冠李戴
   const parsed = draft.publishUrl ? parsePublishUrl(draft.publishUrl, platform) : null;
   if (parsed && parsed.itemId === itemId) return "url";
   const target = normalizeTitle(platformTitle);
-  if (target && normalizeTitle(draft.title) === target) return "title";
-  return null;
+  if (!target) return null;
+  // 精确命中稿件标题，或该平台发布包 / 发布计划里的发布标题
+  const titles = [draft.title, ...((await draftPlatforms(draft, dataDir)).get(normalizePlatform(platform)) ?? [])];
+  return titles.some((t) => normalizeTitle(t) === target) ? "title" : null;
 }
 
 /**
@@ -309,32 +360,54 @@ function bindingEvidence(draft: Content, platformTitle: string, platform: string
  * ③ 绑定表与 matchDraft 各指一稿 → **以绑定表为准**并标 needsReview，让人来裁，不自动改判。
  */
 export async function resolveItemBinding(req: BindingRequest): Promise<BindingResolution> {
-  const itemId = (req.platformItemId ?? "").trim();
+  const rawItemId = (req.platformItemId ?? "").trim();
+  // 截坏的抖音 id 不可信：不查表、不登记，只走标题归属（等带正确 id 的新行覆盖）
+  const itemId = isTruncatedItemId(req.platform, rawItemId) ? "" : rawItemId;
   const matched =
     req.contentId === undefined
       ? await matchDraft(req.platform, req.platformTitle, req.publishedAt, req.dataDir)
       : null;
   const contentId = req.contentId !== undefined ? req.contentId : matched?.id ?? null;
-  if (!itemId) return { contentId, reviewReasons: [], pending: null };
+  // 人工认领（标题@北京发布日）是人确认的事实：无编号行按它归属；带 id 的新快照也先看它，
+  // 否则认领过的作品一旦带着 id 进来、标题又对不上，就会落成未归属并被旧的认领快照藏掉
+  const looked = await lookupClaim(req.platform, req.platformTitle, req.publishedAt, req.dataDir);
+  const claimError = "error" in looked ? [`${ATTRIBUTION_REVIEW_PREFIX}人工认领表读不出，本行没按认领归属：${looked.error}`] : [];
+  const claim = "claim" in looked ? looked.claim : null;
+  if (!itemId) return { contentId: claim?.contentId ?? contentId, reviewReasons: claimError, pending: null };
 
   const bound = await lookupPlatformItem(req.platform, itemId, req.dataDir);
   if (bound) {
-    const conflict = contentId && contentId !== bound.contentId;
-    return {
-      contentId: bound.contentId,
-      reviewReasons: conflict
-        ? [
-            `平台作品 ${normalizePlatform(req.platform)}:${itemId} 已绑定稿件 ${bound.contentId}，` +
-              `本行按标题匹配到 ${contentId}——已按绑定归属，确认是不是标题被改过或绑错了`,
-          ]
-        : [],
-      pending: null,
-    };
+    const reasons = [...claimError];
+    if (claim && claim.contentId !== bound.contentId) {
+      reasons.push(`${ATTRIBUTION_REVIEW_PREFIX}平台作品 ${normalizePlatform(req.platform)}:${itemId} 已绑定稿件 ${bound.contentId}，但这组（标题@日期）人工认领给了 ${claim.contentId}——已按绑定归属，确认哪边对`);
+    } else if (!claim && contentId && contentId !== bound.contentId) {
+      reasons.push(`平台作品 ${normalizePlatform(req.platform)}:${itemId} 已绑定稿件 ${bound.contentId}，` +
+        `本行按标题匹配到 ${contentId}——已按绑定归属，确认是不是标题被改过或绑错了`);
+    }
+    return { contentId: bound.contentId, reviewReasons: reasons, pending: null };
+  }
+  // 认领过、id 还没绑：按认领归属，并把这个 id 作为人工事实登记到认领的稿上
+  if (claim) return { contentId: claim.contentId, reviewReasons: claimError, pending: { platform: req.platform, itemId, contentId: claim.contentId, via: "manual" } };
+  if (claimError.length) return { contentId, reviewReasons: claimError, pending: null };
+
+  // 按标题认到的稿，在这个平台已经有按 id 精确绑定（url/manual）的另一条作品：同标题的这条是别的作品
+  // （如同日私密原片 + 公开重发），不许靠标题挂上去——留未绑定，交人确认（指标照常进统计）
+  if (matched && contentId) {
+    const exact = (await bindingsForContent(contentId, req.dataDir)).find((b) =>
+      (b.via === "url" || b.via === "manual") && b.key.startsWith(`${normalizePlatform(req.platform)}:`) && b.key !== platformItemKey(req.platform, itemId));
+    if (exact) {
+      return {
+        contentId: null,
+        reviewReasons: [`${ATTRIBUTION_REVIEW_PREFIX}按标题认到稿件 ${contentId}，但它在这个平台已精确绑定作品 ${exact.key}；本行是另一条作品 ${itemId}，没有归属，确认是不是同题的另一条（私密 / 重发）`],
+        pending: null,
+        retractGuess: { platform: req.platform, itemId, contentId },
+      };
+    }
   }
 
   // 逐条路径没走 matchDraft，取稿只为看证据（链接/标题）——绑定表已命中时这一步根本不发生
   const draft = matched ?? (req.contentId ? await getContent(req.contentId, req.dataDir) : null);
-  const via = draft && contentId === draft.id ? bindingEvidence(draft, req.platformTitle, req.platform, itemId) : null;
+  const via = draft && contentId === draft.id ? await bindingEvidence(draft, req.platformTitle, req.platform, itemId, req.dataDir) : null;
   return {
     contentId,
     reviewReasons: [],
@@ -345,12 +418,140 @@ export async function resolveItemBinding(req: BindingRequest): Promise<BindingRe
 /**
  * 落盘后提交绑定。绑定表是缓存不是账本：写失败只 warn，不回滚已入库的 outcomes——
  * 下一次导入会重新走同样的证据再登记一次（自愈路径本身就是幂等的）。
+ * 例外：失去资料库写入权不是缓存问题，必须抛给调用方。
  */
 export async function commitResolvedBindings(pending: PendingBinding[], dataDir?: string): Promise<void> {
   if (pending.length === 0) return;
   try {
     await commitBindings(pending, dataDir);
   } catch (err) {
+    if ((err as Error).message?.includes("library_writer_lost")) throw err;
     console.warn(`[flywheel] 平台作品绑定写入失败(不影响本批入库)：${(err as Error).message}`);
   }
+}
+
+/** 同一作品的判据：同平台 + （同一可信作品 id，或同 标题@北京发布日） */
+export function sameWork(a: PerformanceOutcome, b: PerformanceOutcome): boolean {
+  if (normalizePlatform(a.platform) !== normalizePlatform(b.platform)) return false;
+  const ia = a.platformItemId && !isTruncatedItemId(a.platform, a.platformItemId) ? a.platformItemId : "";
+  const ib = b.platformItemId && !isTruncatedItemId(b.platform, b.platformItemId) ? b.platformItemId : "";
+  if (ia && ib) return ia === ib;
+  return outcomeKey({ ...a, contentId: null, metricDate: "" }) === outcomeKey({ ...b, contentId: null, metricDate: "" });
+}
+
+/**
+ * 归属到 contentId 的补行：把 `rows` 里每条（未归属/归属别处的）快照复制一份改挂 contentId，
+ * 已有同键（同稿同数据日期）的跳过——重复执行不重复追加。不改旧行（append-only）。
+ */
+export function attributedCopies(
+  rows: PerformanceOutcome[],
+  contentId: string,
+  taken: Set<string>,
+  recordedAt = new Date().toISOString(),
+): PerformanceOutcome[] {
+  const out: PerformanceOutcome[] = [];
+  for (const r of rows) {
+    if (r.contentId === contentId) continue;
+    const copy: PerformanceOutcome = { ...r, contentId, recordedAt };
+    delete copy.retracted;
+    const key = outcomeKey(copy);
+    if (taken.has(key)) continue;
+    taken.add(key);
+    out.push(copy);
+  }
+  return out;
+}
+
+/** 账本 latest-wins 视图（含被对账隐藏的未归属行，不含已撤销键） */
+export async function latestByKey(dataDir?: string): Promise<Map<string, PerformanceOutcome>> {
+  const byKey = new Map<string, PerformanceOutcome>();
+  for (const o of await readJournal(dataDir)) byKey.set(outcomeKey(o), { ...o, platform: normalizePlatform(o.platform) });
+  for (const [k, o] of byKey) if (o.retracted) byKey.delete(k);
+  return byKey;
+}
+
+const retractedCopy = (r: PerformanceOutcome, recordedAt: string): PerformanceOutcome => ({ ...r, recordedAt, retracted: true });
+
+/** 人工绑定认领了这一行：归属复核理由作废，其余理由原样留着 */
+function withoutAttributionReview(r: PerformanceOutcome): Pick<PerformanceOutcome, "needsReview" | "reviewReasons"> {
+  const reviewReasons = (r.reviewReasons ?? []).filter((x) => !x.startsWith(ATTRIBUTION_REVIEW_PREFIX));
+  return { reviewReasons, needsReview: reviewReasons.length > 0 };
+}
+
+/**
+ * 人工绑定后补归属（spec ③）：该作品每个数据日期，在所有归属（未归属 / 别的稿 / 本稿目标键上已有的快照，
+ * 含不带作品 id 的手填快照）里取最新的那条；不是本稿名下的就复制一份挂到本稿，是本稿的但带着归属复核理由就清掉；
+ * 别的稿名下的版本追加撤销行（改绑不双计）。目标键已是另一条作品的快照 → 抛错不覆盖。截坏 id 不参与。返回补了几条。
+ */
+export async function reattributeItem(platform: string, itemId: string, contentId: string, dataDir?: string): Promise<number> {
+  if (isTruncatedItemId(platform, itemId)) return 0;
+  return serializeOutcomeWrite(dataDir, async () => {
+    const latest = await latestByKey(dataDir);
+    const target = normalizePlatform(platform);
+    const id = itemId.trim();
+    const all = [...latest.values()].filter((o) => o.platform === target);
+    const idRows = all.filter((o) => o.platformItemId === id);
+    // 同一作品早期没带 id（或 id 截坏）的快照：同 标题@北京发布日 且这个标题@日期下只有这一条带 id 的作品才认，
+    // 否则绑定后它们会被对账藏起来（D+N 快照丢失）；有歧义就不认
+    const titleOf = (o: PerformanceOutcome) => outcomeKey({ ...o, contentId: null, metricDate: "" });
+    const titles = new Set(idRows.map(titleOf));
+    const trusted = (o: PerformanceOutcome) => !!o.platformItemId && !isTruncatedItemId(target, o.platformItemId);
+    const otherIds = new Set(all.filter((o) => trusted(o) && o.platformItemId !== id && titles.has(titleOf(o))).map(titleOf));
+    const idless = all.filter((o) => !trusted(o) && (o.contentId === null || o.contentId === contentId) && titles.has(titleOf(o)) && !otherIds.has(titleOf(o)));
+    const rows = [...idRows, ...idless];
+    const dates = [...new Set(rows.map((r) => r.metricDate))];
+    const recordedAt = new Date().toISOString();
+    const out: PerformanceOutcome[] = [];
+    let copied = 0;
+    for (const date of dates) {
+      const candidates = rows.filter((r) => r.metricDate === date);
+      const dest = latest.get(outcomeKey({ ...candidates[0], contentId }));
+      const destId = dest?.platformItemId?.trim();
+      if (dest && destId && destId !== id && !isTruncatedItemId(target, destId)) {
+        throw new Error(`稿件 ${contentId} 在 ${date} 已有另一条作品 ${target}:${destId} 的数据，不覆盖——先确认这两条作品哪条属于这篇稿`);
+      }
+      const pool = dest && !candidates.includes(dest) ? [...candidates, dest] : candidates;
+      const newest = pool.reduce((a, b) => (b.recordedAt > a.recordedAt ? b : a));
+      const cleaned = withoutAttributionReview(newest);
+      if (newest.contentId !== contentId) {
+        out.push({ ...newest, contentId, platformItemId: id, recordedAt, ...cleaned });
+        copied += 1;
+      } else if (cleaned.reviewReasons.length !== (newest.reviewReasons ?? []).length) {
+        out.push({ ...newest, recordedAt, ...cleaned });
+      }
+    }
+    const superseded = rows.filter((r) => r.contentId !== null && r.contentId !== contentId).map((r) => retractedCopy(r, recordedAt));
+    await appendOutcomes([...out, ...superseded], dataDir);
+    return copied;
+  });
+}
+
+/**
+ * 删历史记录时撤掉它名下的行：先给没有未归属原行的快照（绑定之后才入账的）补一条未归属副本，
+ * 再追加同键 retracted 行——回流数据一条不丢，只是回到未绑定。返回撤了几条
+ */
+export async function retractContentOutcomes(contentId: string, dataDir?: string): Promise<number> {
+  return serializeOutcomeWrite(dataDir, async () => {
+    const latest = await latestByKey(dataDir);
+    const rows = [...latest.values()].filter((o) => o.contentId === contentId);
+    const recordedAt = new Date().toISOString();
+    const unbound: PerformanceOutcome[] = [];
+    for (const r of rows) {
+      const copy: PerformanceOutcome = { ...r, contentId: null, recordedAt };
+      if (!latest.has(outcomeKey(copy))) unbound.push(copy);
+    }
+    await appendOutcomes([...unbound, ...rows.map((r) => retractedCopy(r, recordedAt))], dataDir);
+    return rows.length;
+  });
+}
+
+/**
+ * 撤回某作品此前按标题猜到某稿上的归属（追加撤销行，账本不改写）。只在守卫判定「这篇稿在该平台已精确绑定别的作品」
+ * 时用：该作品本身没有绑定（有绑定就不会走到守卫），所以它名下的归属都是猜的。
+ */
+export function guessRetractions(visible: PerformanceOutcome[], guesses: Array<{ platform: string; itemId: string; contentId: string }>): PerformanceOutcome[] {
+  const recordedAt = new Date().toISOString();
+  return visible
+    .filter((o) => guesses.some((g) => o.contentId === g.contentId && o.platform === normalizePlatform(g.platform) && o.platformItemId === g.itemId))
+    .map((o) => retractedCopy(o, recordedAt));
 }

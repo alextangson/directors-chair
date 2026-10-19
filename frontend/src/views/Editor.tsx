@@ -21,8 +21,9 @@ import remarkCjkFriendly from "remark-cjk-friendly";
 import { type EditorView } from "@codemirror/view";
 import { invoke, subscribeEvents, type InvokeResult } from "../transport";
 import { toast } from "../ui";
-import { chatClientId, useChatSend } from "../chat/ChatDock";
-import { copyForWorkbuddy } from "../chat/workbuddy";
+import { useChatSend } from "../chat/ChatDock";
+import { HandOffButton } from "./HandOffButton";
+import { WRITING_STATUSES } from "./hand-off";
 import { SelectionBar } from "./SelectionBar";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { EditorTools } from "./EditorTools";
@@ -32,13 +33,19 @@ import { ArticleImagesPanel } from "./ArticleImagesPanel";
 import { EditingWorkspace } from "./EditingWorkspace";
 import { CoverWorkspace } from "./CoverWorkspace";
 import { PublishWorkspace } from "./PublishWorkspace";
-import { StageAdvance } from "./StageAdvance";
+import { StageCard } from "./StageCard";
+import { DeskFrame, VideoPublishSlot } from "./DeskFrame";
+import { PublishDesk } from "./PublishDesk";
+import { CardPanel } from "./CardPanel";
+import { progressKey } from "./card-next";
+import { DraftFinalPanel } from "./DraftFinalPanel";
 import {
   platformLabel,
   videoStatus,
   VARIANT_STATUS,
   VIDEO_PLATFORMS,
   workspaceForStatus,
+  type StageWorkspace,
   WORKSPACE_LABEL,
   type AllowedTransition,
   type Content,
@@ -52,6 +59,7 @@ import {
   reconcileEditorState, restoreEditorState, type EditorBuffer, type EditorDraft, type EditorState,
 } from "./editor-sync";
 import "./editor-workspace.css";
+import { HistoryRecordView } from "./HistoryRecordView";
 import "./platform-mock.css";
 
 const IMAGES_KEY = "ed-images-open";
@@ -153,6 +161,9 @@ export function Editor(props: { id: string; back: () => void; panel?: EditorPane
       return;
     }
     setLoadError(null);
+    // 后端没核对完项目文件（锁被后台任务占着 / 扫失败）也照样给稿：把原因亮出来，不静默
+    const reconcileWarning = (r as { reconcile_warning?: unknown }).reconcile_warning;
+    if (!options.quiet && typeof reconcileWarning === "string") toast(reconcileWarning);
     const content = (r as unknown as { content: Content }).content;
     const previous = currentEditor.current;
     if (!previous.content) {
@@ -245,7 +256,7 @@ export function Editor(props: { id: string; back: () => void; panel?: EditorPane
     const here = workspaceForStatus(c.status);
     if (panel === "cover" || panel === "video") {
       const want = panel === "cover" ? "cover" : "editing";
-      if (here !== want) toast(`这篇现在在「${WORKSPACE_LABEL[here]}」，可在顶栏选择「去${panel === "cover" ? "封面" : "剪辑"}」进入对应阶段`);
+      if (here !== want) toast(`这篇现在在「${WORKSPACE_LABEL[here]}」，可在顶部卡片的「更多」里进入对应阶段`);
       return;
     }
     setArticleImagesOpen(true);
@@ -267,6 +278,9 @@ export function Editor(props: { id: string; back: () => void; panel?: EditorPane
 
   // Hook 必须在所有提前返回之前无条件调用（加载中 → 加载完 Hook 数不能变）
   const ontology = useOntologyEnabled(Boolean(c && VIDEO_PLATFORMS.has(c.platform)));
+  // 状态在别处变了（吸收 10）：有没保存的改动就让写作台留着，直到保存 / 丢弃；进度卡单独刷新
+  const shownWorkspace = useRef<StageWorkspace>("draft");
+  const [derivedStage, setDerivedStage] = useState<string | null>(null);
 
   if (!c) return loadError ? (
     <div className="pad">
@@ -274,6 +288,9 @@ export function Editor(props: { id: string; back: () => void; panel?: EditorPane
       <div className="row-actions"><button onClick={props.back}>← 返回看板</button><button onClick={() => void load()}>重试</button></div>
     </div>
   ) : <p className="muted pad">加载稿件…</p>;
+  if ((c as { deletedAt?: string | null }).deletedAt) return (
+    <div className="pad"><p role="status">这条稿已经移入回收站（可以在看板的回收站里恢复）。</p><div className="row-actions"><button onClick={props.back}>← 返回看板</button></div></div>
+  );
 
   const saveMutation = async (channel: string, payload: Record<string, unknown>, submitted: Partial<EditorDraft>): Promise<InvokeResult | null> => {
     if (savingRef.current) return null;
@@ -361,10 +378,9 @@ export function Editor(props: { id: string; back: () => void; panel?: EditorPane
    * 总编辑再调 generate_script 新建一篇——中断稿就此成僵尸卡,每点一次多一张重复卡。
    */
   const retryGenerate = async () => {
-    const r = await invoke("generate:retry", { content_id: props.id, client_id: chatClientId() });
+    const r = await invoke("generate:retry", { content_id: props.id });
     if (!r.ok) return toast(r.error ?? "重写没起来");
-    // 本机 agent 写的稿：服务端已把「继续写」发回原对话（v1.2），进度在右栏那段对话里
-    toast((r as { routed?: string }).routed === "local" ? "已交回原来那段对话，由本机 agent 接着写——进度看右栏" : "重写已开始,1-3 分钟");
+    toast("重写已开始,1-3 分钟");
     void load();
   };
 
@@ -430,17 +446,33 @@ export function Editor(props: { id: string; back: () => void; panel?: EditorPane
   const isVideo = VIDEO_PLATFORMS.has(c.platform);
   const imageSlots = [...body.matchAll(/\[IMAGE:\s*(.+?)\]/g)].length;
 
-  const workspace = workspaceForStatus(c.status);
+  const statusWorkspace = workspaceForStatus(c.status);
+  const held = (dirty || saving) && shownWorkspace.current === "draft" && statusWorkspace !== "draft";
+  const workspace: StageWorkspace = held ? "draft" : statusWorkspace;
+  shownWorkspace.current = workspace;
+  const cardEl = (deskMode = false) => <StageCard content={{ id: props.id, title: c.title, status: c.status, platform: c.platform, body: c.body ?? "", updatedAt: c.updatedAt }}
+    transitions={isVideo ? transitions.filter((t) => !VIDEO_SKIP_AHEAD.has(t.status)) : transitions}
+    isVideo={isVideo} dirty={workspace === "draft" && (dirty || saving)} reload={async () => { await load({ quiet: true }); }} onStage={setDerivedStage} showTitle={workspace !== "draft" && !deskMode} deskMode={deskMode} />;
+  const stageCard = cardEl();
+  // 视频稿：一个发布台读模型 + 本体启用时的左侧进度栏（发布台 spec 吸收 8 / 12）
+  const frame = (node: ReactNode) => <DeskFrame contentId={props.id} refreshKey={progressKey(c.status, c.updatedAt)} isVideo={isVideo} versions={versions}>{node}</DeskFrame>;
+  const heldNote = held ? <div className="pending-edit" role="status"><p>这条已经进了「{VARIANT_STATUS[c.status] ?? c.status}」。你还有没保存的改动，写作台先留着；保存或丢弃之后再切过去。</p></div> : null;
+  // 标题下那一行（1b 验收）：写稿 / 剪辑 / 封面 / 发布各工作台都挂一次，视频稿才有
+  // 原看板卡片面板的内容（下一步、原片、候选、分镜、发布纠正、重开文稿）搬到这里（spec 2026-10-04 §2）
+  const productionBanner = isVideo ? <>
+    <CardPanel key={progressKey(c.status, c.updatedAt)} contentId={props.id} reload={async () => { await load({ quiet: true }); }} open={workspace !== "draft"} hideNext
+      approveBlocked={workspace === "draft" && (dirty || saving) ? "先保存修改，再进入下一阶段" : null} />
+  </> : null;
   const stageBar = (
     <div className="ed-topbar ed-workspace-header">
       <div className="ed-header-context">
         <button className="ed-quiet-button ed-back-button" onClick={props.back}>← 管线看板</button>
         <div className="ed-current-draft">
           <strong>{platformLabel(c.platform)}</strong>
-          <span className="ed-status-label">{VARIANT_STATUS[c.status] ?? c.status}</span>
+          <span className="ed-status-label">{derivedStage ?? VARIANT_STATUS[c.status] ?? c.status}</span>
           {workspace !== "draft" && <span className="muted">{WORKSPACE_LABEL[workspace]}</span>}
         </div>
-        <button className="ed-quiet-button" title="复制一句话，粘到 WorkBuddy 里让它通过 AutoCrew 打开这篇" onClick={() => void copyForWorkbuddy(c.title, props.id)}>复制给 WorkBuddy</button>
+        <HandOffButton className="ed-quiet-button" contentId={props.id} mode={WRITING_STATUSES.has(c.status) ? "write" : "look"} />
         {workspace === "draft" && <button
           className={"ed-quiet-button ed-tools-trigger" + (drawerOpen ? " is-open" : "")}
           aria-expanded={drawerOpen}
@@ -459,13 +491,6 @@ export function Editor(props: { id: string; back: () => void; panel?: EditorPane
             aria-pressed={!!activeFocus}
             onClick={() => activeProposal ? proposalRef.current?.scrollIntoView({ block: "center" }) : startDraftFocus()}
           >{activeProposal ? "查看 AI 提案" : "AI 改稿"}</button>}
-          <StageAdvance
-            contentId={props.id}
-            currentStatus={c.status}
-            transitions={VIDEO_PLATFORMS.has(c.platform) ? transitions.filter((t) => !VIDEO_SKIP_AHEAD.has(t.status)) : transitions}
-            dirty={workspace === "draft" && (dirty || saving)}
-            reload={load}
-          />
           {workspace === "draft" && <button
             className={"ed-save-action" + (dirty ? " primary" : " is-saved")}
             disabled={saving || !dirty}
@@ -480,38 +505,56 @@ export function Editor(props: { id: string; back: () => void; panel?: EditorPane
   // 工作台随状态（spec §2）：文案之外的三张台子是整页，不带写作画布与抽屉
   // 视频剪辑看板（剪辑中 / 视频封面）：顶栏只剩一行「← 看板 · 标题 · 平台」；
   // 写作阶段的主题行、推进下拉都不放——剪辑阶段只能经 Codex 登记离开
+  // 历史作品记录：只读页（标题 / 日期 / 存档原稿），不给任何编辑、推进、发布入口
+  if (c.source === "imported_history") return <HistoryRecordView content={c} back={props.back} />;
+
   if (workspace === "editing" || (workspace === "cover" && isVideo)) {
-    return (
+    return frame(
       <div className="editor editor-workspace">
         <div className="ed-topbar ed-workspace-header pb-header">
           <button className="ed-quiet-button ed-back-button" onClick={props.back}>← 看板</button>
           <strong className="pb-header-title">{c.title || "无标题"}</strong>
           <span className="muted">{platformLabel(c.platform)}</span>
         </div>
+        {stageCard}
+        {productionBanner}
         <div className="ed-main-row"><EditingWorkspace content={c} reload={load} /></div>
       </div>
     );
   }
 
   if (workspace !== "draft") {
-    return (
+    const legacy = <>
+      {stageCard}
+      {productionBanner}
+      {props.context}
+      <div className="ed-main-row">
+        {/* 视频稿的封面在剪辑看板里挑 Codex 交的版本（见上），这里只剩公众号稿的封面台 */}
+        {workspace === "cover" && <CoverWorkspace content={c} reload={load} />}
+        {workspace === "publish" && (
+          <PublishWorkspace content={c} versions={versions} reload={load} send={send} />
+        )}
+      </div>
+    </>;
+    // 本体启用的视频稿到了发布：封面 + 卡 + 各平台表（发布台 spec）；其余照旧
+    const body = workspace === "publish" && isVideo
+      ? <VideoPublishSlot fallback={legacy} desk={<PublishDesk content={c} versions={versions} reload={async () => { await load({ quiet: true }); }} stage={derivedStage} stageCard={cardEl(true)} extra={productionBanner} />} />
+      : legacy;
+    return frame(
       <div className="editor editor-workspace">
         {stageBar}
-        {props.context}
-        <div className="ed-main-row">
-          {/* 视频稿的封面在剪辑看板里挑 Codex 交的版本（见上），这里只剩公众号稿的封面台 */}
-          {workspace === "cover" && <CoverWorkspace content={c} reload={load} />}
-          {workspace === "publish" && (
-            <PublishWorkspace content={c} versions={versions} reload={load} send={send} />
-          )}
-        </div>
+        {body}
       </div>
     );
   }
 
-  return (
+  return frame(
     <div className={"editor editor-workspace" + (drawerOpen ? " ed-with-drawer" : "")}>
       {stageBar}
+      {heldNote}
+      {stageCard}
+      {productionBanner}
+      <DraftFinalPanel contentId={props.id} refreshKey={`${c.status}:${c.updatedAt}:${(c as { draftPath?: { checklistAt?: string } }).draftPath?.checklistAt ?? ""}`} dirty={dirty || saving} reload={async () => { await load({ quiet: true }); }} />
       {props.context}
       <SharedProjectPanel status={c.status} isVideo={isVideo} ontology={ontology} />
 
@@ -534,7 +577,7 @@ export function Editor(props: { id: string; back: () => void; panel?: EditorPane
           {isVideo && (videoStarted || c.videoReadyAt) && (
             <div className="vid-warn">
               这篇已经有剪辑进度（决策与成片都留着，回文案改稿不会丢）——
-              用顶栏的下一阶段动作进入剪辑，接着制作。
+              用上面卡片的按钮（或「更多」）进入剪辑，接着制作。
             </div>
           )}
 

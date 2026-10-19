@@ -1,14 +1,14 @@
 /** Browser-session-only founder decisions and artifact review. Not an MCP capability. */
 import type http from "node:http";
-import fs from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import path from "node:path";
 import { resolveContentProject } from "../storage/content-project.js";
 import { resolveProjectFile } from "../modules/video/handoff/paths.js";
-import { sha256File } from "../modules/video/handoff/manifest.js";
+import { cachedSha, loadHashCache } from "../modules/production/hash-cache.js";
 import { founderProjectReview } from "../modules/video/handoff/founder-review.js";
 import { parseRangeHeader } from "./video-media.js";
 import { revealProjectPath, type RevealDeps } from "./project-reveal.js";
+import { revealMyContent, type MyContentRevealDeps } from "./my-content-reveal.js";
 import { openCodexForContent, type CodexOpenDeps } from "./codex-open.js";
 
 export interface ProjectReviewRouteDeps {
@@ -17,6 +17,7 @@ export interface ProjectReviewRouteDeps {
   resolveDataDir: () => Promise<string>;
   readBody: (req: http.IncomingMessage) => Promise<string>;
   reveal?: RevealDeps;
+  myContent?: MyContentRevealDeps;
   codex?: CodexOpenDeps;
 }
 export function createProjectReviewHandler(deps: ProjectReviewRouteDeps) {
@@ -28,20 +29,26 @@ export function createProjectReviewHandler(deps: ProjectReviewRouteDeps) {
   if (p === "/api/project-artifact" && req.method === "GET") {
     if (authorize(req) !== "session") { res.writeHead(403).end(); return true; }
     try {
-      const binding = resolveContentProject(url.searchParams.get("content_id") ?? "", await activeDataDir());
+      const dataDir = await activeDataDir();
+      await loadHashCache(dataDir);
+      const binding = resolveContentProject(url.searchParams.get("content_id") ?? "", dataDir);
       const relative = url.searchParams.get("path") ?? "";
       if (!binding || !relative || path.isAbsolute(relative)) { res.writeHead(400).end(); return true; }
       const checked = await resolveProjectFile(path.join(binding.project_root, relative), binding.project_root, "审阅产物");
       if (!checked.ok) { res.writeHead(403).end(); return true; }
       const ext = path.extname(checked.value).toLowerCase();
-      if (![".mp4", ".png", ".jpg", ".jpeg"].includes(ext)) { res.writeHead(415).end(); return true; }
-      if (await sha256File(checked.value) !== url.searchParams.get("sha256")) { res.writeHead(409).end("产物已变化"); return true; }
-      const size = (await fs.stat(checked.value)).size;
+      if (![".mp4", ".mov", ".m4v", ".png", ".jpg", ".jpeg"].includes(ext)) { res.writeHead(415).end(); return true; }
+      // 播放器每个 Range 请求都会来一次：按元数据缓存认字节，不每次全量重算（多 GB 成片）
+      const known = await cachedSha(checked.value);
+      if (known.sha256 !== url.searchParams.get("sha256")) { res.writeHead(409).end("产物已变化"); return true; }
+      const size = known.size;
       const range = parseRangeHeader(req.headers.range, size);
       if (range === "unsatisfiable") { res.writeHead(416, { "Content-Range": `bytes */${size}` }).end(); return true; }
-      res.writeHead(range ? 206 : 200, { "Content-Type": ext === ".mp4" ? "video/mp4" : MIME[ext], "Cache-Control": "no-store", "Accept-Ranges": "bytes",
+      res.writeHead(range ? 206 : 200, { "Content-Type": ext === ".mp4" || ext === ".m4v" ? "video/mp4" : ext === ".mov" ? "video/quicktime" : MIME[ext], "Cache-Control": "no-store", "Accept-Ranges": "bytes",
         "Content-Length": range ? range.end - range.start + 1 : size, ...(range ? { "Content-Range": `bytes ${range.start}-${range.end}/${size}` } : {}) });
-      createReadStream(checked.value, range ?? undefined).pipe(res);
+      const stream = createReadStream(checked.value, range ?? undefined);
+      stream.on("error", () => res.destroy()); // 核过之后文件没了：只断这个响应
+      stream.pipe(res);
     } catch { res.writeHead(404).end(); }
     return true;
   }
@@ -66,6 +73,17 @@ export function createProjectReviewHandler(deps: ProjectReviewRouteDeps) {
     try {
       const body = JSON.parse(await readBody(req)) as { content_id?: unknown; target?: unknown };
       const result = await revealProjectPath(String(body.content_id ?? ""), String(body.target ?? ""), await activeDataDir(), deps.reveal);
+      res.writeHead(200, { "Content-Type": MIME[".json"], "Cache-Control": "no-store" }).end(JSON.stringify(result));
+    } catch (e) { res.writeHead(400, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: false, code: "bad_request", error: String(e) })); }
+    return true;
+  }
+
+  // 进度栏「在访达打开这一条」：打开「我的内容」里的文件夹；同样只给浏览器会话，只收稿件 id
+  if (p === "/api/my-content-reveal" && req.method === "POST") {
+    if (authorize(req) !== "session" || !browserWriteAllowed(req, "session")) { res.writeHead(403).end(); return true; }
+    try {
+      const body = JSON.parse(await readBody(req)) as { content_id?: unknown };
+      const result = await revealMyContent(String(body.content_id ?? ""), await activeDataDir(), { ...deps.reveal, ...deps.myContent });
       res.writeHead(200, { "Content-Type": MIME[".json"], "Cache-Control": "no-store" }).end(JSON.stringify(result));
     } catch (e) { res.writeHead(400, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: false, code: "bad_request", error: String(e) })); }
     return true;

@@ -19,6 +19,7 @@ import { ASSETS, aroll, broll, timeline } from "./fixtures.js";
 import type { Json, SnapshotAsset } from "./snapshot-types.js";
 import { SUGGEST } from "./suggest.js";
 import { hostPolicy } from "../../../../mcp/host-policy.js";
+import { HUMAN_WRITE } from "../../../storage/first-body-guard.js";
 
 let env: Env, ccRoot: string;
 let media: (f: string) => Promise<MediaInfo | { error: string }>;
@@ -71,7 +72,7 @@ async function setup(o: { chatcut?: boolean; srt?: string | null; cutBytes?: str
   await founderApprove(env, c.id);
   const ar = await record(env, { content_id: c.id, kind: "aroll", path: await put(path.join(env.inbox, RAW_NAME), "raw"), request_id: "a" });
   if (o.chatcut !== false) await record(env, { content_id: c.id, kind: "chatcut_project", chatcut_project_id: PID, uses_aroll: [ar.fact_id], ...(o.timelineId ? { timeline_id: o.timelineId } : {}), request_id: "cc" });
-  const cut = await record(env, { content_id: c.id, kind: "cut", path: await put(path.join(env.chatcut, "抽帧测试.mp4"), o.cutBytes ?? "cut-v1"), request_id: "c" });
+  const cut = await record(env, { content_id: c.id, kind: "cut", path: await put(path.join(env.chatcut, "抽帧测试.mp4"), o.cutBytes ?? "cut-v1"), request_id: "c", review: true });
   if (o.srt !== null) await record(env, { content_id: c.id, kind: "srt", path: await put(path.join(env.chatcut, "抽帧测试.srt"), o.srt ?? "1\n00:00:01,000 --> 00:00:02,000\n你好\n"), for_cut: cut.fact_id, request_id: "s" });
   const doc = (await readProductionDoc(c.id, env.dir))!;
   const sha = doc.facts.find((f) => f.id === cut.fact_id)!.sha256!;
@@ -127,10 +128,12 @@ describe("有缝：拦、逐处放行（§6、§12-1、§12-8）", () => {
     const s = await setup();
     const p = ((await cardPanel(s.c.id, env.dir)) as unknown as Panel).slivers;
     await decide(s.c.id, "waive_sliver", { cut_sha: s.sha, fingerprint: p.fingerprint, sliver_key: p.items[0].key });
-    const v2 = await record(env, { content_id: s.c.id, kind: "cut", path: await put(path.join(env.chatcut, "抽帧测试-v2.mp4"), "cut-v2"), request_id: "c2" });
+    const v2 = await record(env, { content_id: s.c.id, kind: "cut", path: await put(path.join(env.chatcut, "抽帧测试-v2.mp4"), "cut-v2"), request_id: "c2", review: true });
     const sha2 = (await readProductionDoc(s.c.id, env.dir))!.facts.find((f) => f.id === v2.fact_id)!.sha256!;
     expect(await decide(s.c.id, "approve_cut", { fact_id: v2.fact_id, sha256: sha2 })).toMatchObject({ ok: false, code: "sliver_blocked" });
-    expect(await decide(s.c.id, "waive_sliver", { cut_sha: s.sha, fingerprint: p.fingerprint, sliver_key: p.items[0].key })).toMatchObject({ ok: false, code: "stale" });
+    // review-inbox §7-2：创始人可以挑任一版，v1 的放行还属于 v1（幂等），只是不继承到 v2
+    expect(await decide(s.c.id, "waive_sliver", { cut_sha: s.sha, fingerprint: p.fingerprint, sliver_key: p.items[0].key })).toMatchObject({ ok: true });
+    expect(await decide(s.c.id, "approve_cut", { fact_id: v2.fact_id, sha256: sha2 })).toMatchObject({ ok: false, code: "sliver_blocked" });
   });
 
   it("E27 修法按字幕：缝里有字幕 → 拖长；没有 → 剪气口；没有字幕事实 → 请人工判断；结论不变", async () => {
@@ -167,9 +170,20 @@ describe("没跑成：拦、写原因、整条放行（§8、E1–E5、E14、E17
     expect(await reasonOf(s.c.id)).toMatchObject({ status: "unchecked", reason: expect.stringContaining("本机找不到这个 ChatCut 工程") });
   });
 
-  it("E3 schemaVersion 不认识 → 未检查", async () => {
-    await writeProject([gapTimeline(5)], { schema: 5 });
-    expect(await reasonOf((await setup()).c.id)).toMatchObject({ status: "unchecked", reason: expect.stringContaining("格式版本（5）不认识") });
+  it.each([5, 12])("E3 schemaVersion %i 不认识 → 未检查", async (v) => {
+    await writeProject([gapTimeline(5)], { schema: v });
+    expect(await reasonOf((await setup()).c.id)).toMatchObject({ status: "unchecked", reason: expect.stringContaining(`格式版本（${v}）不认识`) });
+  });
+  it.each([9, 11])("E3 核过的格式版本 %i → 照常查", async (v) => {
+    await writeProject([gapTimeline(5)], { schema: v });
+    expect((await checks((await setup()).c.id)).at(-1)).toMatchObject({ status: "slivers" });
+  });
+  it("E3 版本不认识时记的「未检查」不复用：工程换成认识的版本后重查出结果", async () => {
+    await writeProject([gapTimeline(5)], { schema: 12 });
+    const s = await setup();
+    expect((await checks(s.c.id)).at(-1)).toMatchObject({ status: "unchecked", transient: true });
+    await writeProject([gapTimeline(5)], { schema: 11 });
+    expect((await runSliverCheck(s.c.id, env.dir))?.check).toMatchObject({ status: "slivers" });
   });
 
   it("E4 多条时间线且没指定 → 未检查；带 timeline_id 就查那条", async () => {
@@ -255,7 +269,7 @@ describe("Codex 审 sliver 回归", () => {
     await founderApprove(env, c.id);
     const ar = await record(env, { content_id: c.id, kind: "aroll", path: await put(path.join(env.inbox, RAW_NAME), "raw"), request_id: "a" });
     await record(env, { content_id: c.id, kind: "chatcut_project", chatcut_project_id: PID, uses_aroll: [ar.fact_id], request_id: "cc" });
-    await record(env, { content_id: c.id, kind: "cut", path: await put(path.join(env.chatcut, "AI又忘了怎么办.mp4"), "cut-v1"), request_id: "c" });
+    await record(env, { content_id: c.id, kind: "cut", path: await put(path.join(env.chatcut, "AI又忘了怎么办.mp4"), "cut-v1"), request_id: "c", review: true });
     expect((await checks(c.id)).at(-1)).toMatchObject({ status: "unchecked", reason: expect.stringContaining("符号链接") });
     expect(await fs.readdir(env.outside)).toEqual([]);
   });
@@ -301,9 +315,9 @@ describe("触发、缓存与范围（E15、E16、E18、E20）", () => {
     await writeProject([gapTimeline(5)]);
     const s = await setup();
     const before = (await readProductionDoc(s.c.id, env.dir))!.revision;
-    const r = await executeContentSave({ _dataDir: env.dir, _host: "codex", action: "check_slivers", content_id: s.c.id }) as Json;
+    const r = await executeContentSave({ _provenance: HUMAN_WRITE, _dataDir: env.dir, _host: "codex", action: "check_slivers", content_id: s.c.id }) as Json;
     expect(r).toMatchObject({ ok: true, status: "slivers", written: false, slivers: [{ start_frame: 100, end_frame: 105 }] });
     expect((await readProductionDoc(s.c.id, env.dir))!.revision).toBe(before);
-    expect(hostPolicy("codex", "autocrew_content", { action: "check_slivers" }, true)).toEqual({ ok: true });
+    expect(hostPolicy("codex", "autocrew_content", { action: "check_slivers" })).toEqual({ ok: true });
   });
 });

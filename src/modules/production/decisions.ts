@@ -5,7 +5,10 @@
  *
  * 写完决定：成片 / 封面批准齐了就在同一个文件归属事务里跑登记提交（§5 批准即登记）。
  */
-import { contentRoot } from "../../storage/content-project.js";
+import { reconcileContent } from "./reconcile.js";
+import { isImportedHistory } from "../../storage/imported-history.js";
+import { contentRoot, safeProjectPath } from "../../storage/content-project.js";
+import { commitSha } from "./hash-cache.js";
 import { readLibraryLocation } from "../../storage/storage-roots.js";
 import path from "node:path";
 import { getContent, getDataDir, listContents, type Content } from "../../storage/local-store.js";
@@ -17,23 +20,32 @@ import { bodyHash, isOntologyActive, newId, readProductionDocOrEmpty } from "../
 import type { Decision, DecisionType, Fact, ProductionDoc } from "../../storage/production-types.js";
 import { isModelCall } from "../../storage/stage-guard.js";
 import { withFileOwnership } from "./mutex.js";
+import { provenanceFields } from "./decision-provenance.js";
 import { validCoverApproval, validCutApproval } from "./derive.js";
-import { canonPlatform, normSlotId, slotGate, slotId, slotOf } from "./receipts.js";
+import { canonPlatform, normSlotId, overdueSchedule, slotGate, slotId, slotOf } from "./receipts.js";
 import { gateFromPlan, isUngated } from "./publish-check-link.js";
-import { adoptCandidate } from "./record.js";
+import { addReadyMark, adoptCandidate } from "./record.js";
+import { isStrayCover } from "./plain-reason.js";
+import { undoAutoAttach } from "./undo-attach.js";
 import { commitRegistration, type CommitResult } from "./registration.js";
 import { explainContent } from "./read.js";
-import { ensureProductionReady, mutateProduction } from "./service.js";
-import { currentCut, runSliverCheck } from "./sliver/check.js";
+import { approvedCoverShas, ensureProductionReady, mutateProduction } from "./service.js";
+import { groupById, groupOfPair, isRetired, withCoverGroups, type GroupView } from "./cover-groups.js";
+import { currentCut, cutOf, runSliverCheck } from "./sliver/check.js";
 import { latestCheck, sliverKey, sliverVerdict, type Verdict } from "./sliver/verdict.js";
+import { addWorkUrl, recordMetrics } from "./desk-writes.js";
 
 export type DecisionAction =
   | "confirm_candidate" | "reject_candidate" | "approve_cut" | "reject_cut" | "pick_cover" | "reject_cover"
-  | "revoke_approval" | "i_published" | "confirm_receipt" | "correct_publish" | "attach_aroll" | "waive_sliver" | "waive_sliver_check";
+  | "revoke_approval" | "i_published" | "confirm_receipt" | "correct_publish" | "attach_aroll" | "waive_sliver" | "waive_sliver_check"
+  | "undo_auto_attach" | "retire_cover_group" | "review_now" | "reject_stray_covers" | "recheck_files" | "retry_registration"
+  | "add_work_url" | "record_metrics";
 
 export const DECISION_ACTIONS: readonly DecisionAction[] = [
   "confirm_candidate", "reject_candidate", "approve_cut", "reject_cut", "pick_cover", "reject_cover",
   "revoke_approval", "i_published", "confirm_receipt", "correct_publish", "attach_aroll", "waive_sliver", "waive_sliver_check",
+  "undo_auto_attach", "retire_cover_group", "review_now", "reject_stray_covers", "recheck_files", "retry_registration",
+  "add_work_url", "record_metrics",
 ];
 
 type Result = Record<string, unknown>;
@@ -42,7 +54,7 @@ const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : "");
 
 export const FOUNDER_ONLY = "这是创始人的决定，只能在看板 / 工作台上点，AI 宿主不能代做。";
 
-interface Ctx { content: Content; doc: ProductionDoc; dataDir: string; params: Record<string, unknown> }
+export interface Ctx { content: Content; doc: ProductionDoc; dataDir: string; params: Record<string, unknown> }
 
 const inRound = (doc: ProductionDoc) => doc.facts.filter((f) => f.round === doc.round);
 
@@ -61,13 +73,29 @@ function sameDecision(doc: ProductionDoc, type: DecisionType, fp: (d: Decision) 
   return latest && fp(latest) && !revoked.has(latest.id) ? latest : null;
 }
 
-async function push(ctx: Ctx, d: Omit<Decision, "id" | "round" | "at" | "source">, event: string, fact?: (doc: ProductionDoc) => void): Promise<Decision> {
+export async function push(ctx: Ctx, d: Omit<Decision, "id" | "round" | "at" | "source">, event: string, fact?: (doc: ProductionDoc) => void): Promise<Decision> {
   return (await mutateProduction(ctx.content.id, ctx.dataDir, (doc) => {
-    const full: Decision = { id: newId("dec"), round: doc.round, at: new Date().toISOString(), source: "founder", ...d };
+    // 来源与原话同一次写进去（chat-approval §Codex 10）：对话确认流程在调用链上挂来源，网页照旧 founder
+    const full: Decision = { id: newId("dec"), round: doc.round, at: new Date().toISOString(), ...provenanceFields(), ...d };
     doc.decisions.push(full);
     fact?.(doc);
     return { value: full, events: [{ type: event, detail: { decision_id: full.id, ...d } }] };
   })).value;
+}
+
+/**
+ * 提交点：所批文件现算全文件（不信元数据缓存——字节被换、大小和修改时间没变也要逮住）；一分钟内还在变的拒绝。
+ * 盘上找不到这份文件时不在这里拦（对账会把它标成不在，登记提交时再核）。
+ */
+async function bytesStill(ctx: Ctx, f: Fact, label: string, code: string): Promise<Result | null> {
+  if (!f.path || !f.sha256) return null;
+  let abs: string;
+  try { abs = path.isAbsolute(f.path) ? f.path : safeProjectPath(contentRoot(ctx.content.id, ctx.dataDir), f.path); }
+  catch (e) { return fail("unsafe_path", `${label}路径不安全：${e instanceof Error ? e.message : String(e)}`); }
+  const r = await commitSha(abs).catch(() => null);
+  if (!r) return null;
+  if (!r.ok) return fail("file_unsettled", r.reason);
+  return r.sha256 === f.sha256 ? null : fail(code, `${label}的文件字节和记录的不一样了（被换过）：刷新看现在的${label}再定`);
 }
 
 async function approveCut(ctx: Ctx): Promise<Result> {
@@ -79,17 +107,20 @@ async function approveCut(ctx: Ctx): Promise<Result> {
   // 幂等重放只对仍然有效的批准（Codex 审 seg2 P2）：被打回之后再批，要落一条晚于打回的新决定
   const same = sameDecision(ctx.doc, "cut_approval", (d) => d.sha256 === f.sha256 && d.body_hash === bh && validCutApproval(ctx.doc, ctx.content.body)?.id === d.id);
   if (same) return { ok: true, decision: same };
+  const changed = await bytesStill(ctx, f, "成片", "cut_replaced");
+  if (changed) return changed;
   // 抽帧检查默认拦（spec 2026-09-30 §12-1）：写批准之前在服务端重跑 / 核对指纹，不只靠推导和界面
   const gate = await sliverGate(ctx, f.sha256!);
-  if (!gate.ok) return fail("sliver_blocked", `成片还不能通过：${gate.missing}。在卡片上看每处缝，修好重新导出，或逐处点「这处是故意的」`);
+  if (!gate.ok) return fail("sliver_blocked", `成片还不能通过：${gate.missing}。在「等你拍板」的「画面有闪帧」那件里看每处缝，修好重新导出，或逐处点「这处是故意的」`);
   return { ok: true, decision: await push(ctx, { type: "cut_approval", fact_id: f.id, sha256: f.sha256, body_hash: bh }, "cut_approved") };
 }
 
 /** 重跑（同指纹直接用缓存）→ 用重算出的当前指纹判：结果必须对应现在的输入 */
 async function sliverGate(ctx: Ctx, cutSha: string): Promise<Verdict> {
-  const run = await runSliverCheck(ctx.content.id, ctx.dataDir);
+  // 按所选的那一版查（review-inbox §7-2）：不改「最新」指针
+  const run = await runSliverCheck(ctx.content.id, ctx.dataDir, cutSha);
   const doc = await readProductionDocOrEmpty(ctx.content.id, ctx.dataDir);
-  if (currentCut(doc)?.sha256 !== cutSha) return { ok: false, missing: "这版已经不是当前成片", check: null, open: [], wholeWaived: false, wholeWaivable: false };
+  if (!cutOf(doc, cutSha)) return { ok: false, missing: "这版成片已经不在了", check: null, open: [], wholeWaived: false, wholeWaivable: false };
   return sliverVerdict(doc, cutSha, run?.fingerprint ?? "\u0000none");
 }
 
@@ -97,9 +128,9 @@ async function sliverGate(ctx: Ctx, cutSha: string): Promise<Verdict> {
 async function waiveSliver(ctx: Ctx): Promise<Result> {
   const cutSha = str(ctx.params.cut_sha), fingerprint = str(ctx.params.fingerprint), key = str(ctx.params.sliver_key);
   if (!cutSha || !fingerprint || !key) return fail("bad_request", "要带成片、检查结果和哪一处（刷新再点）");
-  const run = await runSliverCheck(ctx.content.id, ctx.dataDir);
+  const run = await runSliverCheck(ctx.content.id, ctx.dataDir, cutSha);
   const doc = await readProductionDocOrEmpty(ctx.content.id, ctx.dataDir);
-  if (currentCut(doc)?.sha256 !== cutSha) return fail("stale", "成片换过了，放行不继承：刷新看新成片的检查结果");
+  if (!cutOf(doc, cutSha)) return fail("stale", "这版成片不在了，放行不继承：刷新看成片的检查结果");
   const check = latestCheck(doc, cutSha);
   if (!run || !check || check.fingerprint !== fingerprint || run.fingerprint !== fingerprint || !check.slivers.some((x) => sliverKey(x) === key)) {
     return fail("stale", "这处缝已经不在当前的检查结果里了（时间线或成片变过）：刷新再看");
@@ -111,9 +142,9 @@ async function waiveSliver(ctx: Ctx): Promise<Result> {
 /** 「这条不查了，放行」：只在检查没跑成（或没结果）时有（E13）；绑 round + 成片 sha */
 async function waiveSliverCheck(ctx: Ctx): Promise<Result> {
   const cutSha = str(ctx.params.cut_sha);
-  await runSliverCheck(ctx.content.id, ctx.dataDir);
+  if (cutSha) await runSliverCheck(ctx.content.id, ctx.dataDir, cutSha);
   const doc = await readProductionDocOrEmpty(ctx.content.id, ctx.dataDir);
-  if (!cutSha || currentCut(doc)?.sha256 !== cutSha) return fail("stale", "成片换过了，放行不继承：刷新再看");
+  if (!cutSha || !cutOf(doc, cutSha)) return fail("stale", "这版成片不在了，放行不继承：刷新再看");
   const check = latestCheck(doc, cutSha);
   if (check && check.status !== "unchecked") return fail("not_unchecked", check.status === "clean" ? "这版成片查过了、没有缝，不用放行" : "这版成片查出了缝：逐处看，故意的点「这处是故意的」");
   const same = doc.decisions.find((d) => d.type === "sliver_waive_all" && d.round === doc.round && d.sha256 === cutSha);
@@ -129,23 +160,63 @@ async function rejectWith(ctx: Ctx, type: "cut_reject" | "cover_reject", kind: F
   if (!f.sha256) return fail("stale", "页面上没有可打回的产物，刷新再看");
   const same = sameDecision(ctx.doc, type, (d) => d.sha256 === f.sha256 && d.note === note);
   const shas = Array.isArray(ctx.params.cover_shas) ? ctx.params.cover_shas.map(String) : f.id ? [f.sha256] : [];
-  return { ok: true, decision: same ?? (await push(ctx, { type, ...(f.id ? { fact_id: f.id } : {}), sha256: f.sha256, note, ...(type === "cover_reject" ? { shas } : {}) }, type === "cut_reject" ? "cut_rejected" : "cover_rejected")) };
+  return { ok: true, decision: same ?? (await push(ctx, { type, ...(f.id ? { fact_id: f.id } : {}), sha256: f.sha256, note, ...(type === "cover_reject" ? { shas, ...(Array.isArray(ctx.params.group_ids) ? { group_ids: ctx.params.group_ids.map(String) } : {}) } : {}) }, type === "cut_reject" ? "cut_rejected" : "cover_rejected")) };
 }
 
-/** 用这一版封面：两个比例都得有（E10），封面字当场要有（E9：没写就用报上来的默认字，都没有就要创始人补） */
+/** 封面组按 §6.2 迁移后的样子（没落盘的迁移在内存里做） */
+function coverView(ctx: Ctx): ProductionDoc {
+  return withCoverGroups(ctx.doc, approvedCoverShas(ctx.doc, ctx.content.body));
+}
+
+/**
+ * 用这一组封面（review-inbox §6.1，Codex 10）：服务端校验两张属于同一有效组、没作废、每个比例恰好一张；
+ * 封面字：交了就用交的（空串 = 不要封面字）；没交就用这组报上来的默认字；都没有也能批，不记封面字。
+ * 带 group_id；旧工作台带两张的 fact id + sha，也必须同属一组。
+ */
 async function pickCover(ctx: Ctx): Promise<Result> {
-  const a = factBy(ctx.doc, { fact_id: ctx.params.cover_3x4_fact_id, sha256: ctx.params.cover_3x4_sha }, "cover");
-  const b = factBy(ctx.doc, { fact_id: ctx.params.cover_4x3_fact_id, sha256: ctx.params.cover_4x3_sha }, "cover");
-  if (typeof a === "string" || typeof b === "string") return fail("both_ratios_required", "两个比例（3:4 和 4:3）都选了才能用这一版封面");
-  if (a.ratio !== "3:4" || b.ratio !== "4:3" || a.state !== "accepted" || b.state !== "accepted") return fail("both_ratios_required", "要一张 3:4、一张 4:3，且都已确认是这条的封面");
-  // 被覆盖过（字节已不是这张）的封面选了也不会生效：直接说，不回「成功」
-  if (a.replaced_at || b.replaced_at) return fail("cover_replaced", "这张封面的文件被覆盖过，盘上已经不是这张图了：刷新看现在的封面再选");
-  const text = str(ctx.params.cover_text) || a.text || b.text || "";
-  if (!text) return fail("cover_text_required", "选封面时要写封面字");
+  const view = coverView(ctx);
+  let g: GroupView | null;
+  if (str(ctx.params.group_id)) {
+    g = groupById(view, str(ctx.params.group_id));
+    if (!g) return fail("stale", isRetired(view, str(ctx.params.group_id)) ? "这组已经点过「这组不要了」" : "这组封面不在了（换过或作废了），刷新再看");
+  } else {
+    const a = factBy(view, { fact_id: ctx.params.cover_3x4_fact_id, sha256: ctx.params.cover_3x4_sha }, "cover");
+    const b = factBy(view, { fact_id: ctx.params.cover_4x3_fact_id, sha256: ctx.params.cover_4x3_sha }, "cover");
+    if (typeof a === "string" || typeof b === "string") return fail("both_ratios_required", "两个比例（3:4 和 4:3）都选了才能用这一组封面");
+    if (a.replaced_at || b.replaced_at) return fail("cover_replaced", "这张封面的文件被覆盖过，盘上已经不是这张图了：刷新看现在的封面再选");
+    g = groupOfPair(view, a, b);
+    if (!g) return fail("not_same_group", "这两张不是同一组封面（成对只认 agent 显式记的一组）：挑同一组里的 3:4 和 4:3");
+  }
+  if (!g.complete) return fail("both_ratios_required", g.ambiguous ? `${g.group.label} 里同一个比例不止一张，说不清用哪张：让 agent 重新成对记一组` : `${g.group.label} 还差${g.slots["3:4"].length ? " 4:3" : " 3:4"}`);
+  const a = g.slots["3:4"][0], b = g.slots["4:3"][0];
+  // 明确交了封面字（包括故意清空成 ""）就照交的来；没交才用这组自带的字。没有字也能批，下游封面字检查记「没查」
+  const text = typeof ctx.params.cover_text === "string" ? ctx.params.cover_text.trim() : (g.text ?? "").trim();
   const bh = bodyHash(ctx.content.body);
-  const same = sameDecision(ctx.doc, "cover_approval", (d) => d.cover_3x4_sha === a.sha256 && d.cover_4x3_sha === b.sha256 && d.cover_text === text && d.body_hash === bh
-    && validCoverApproval(ctx.doc, ctx.content.body)?.id === d.id);
-  return { ok: true, decision: same ?? (await push(ctx, { type: "cover_approval", cover_3x4_sha: a.sha256, cover_4x3_sha: b.sha256, cover_text: text, body_hash: bh }, "cover_picked")) };
+  // 幂等键带组身份（Codex 审 2a-1 r6 P2）：同一对图的另一组 = 新批准，作废保护跟着当前批准走
+  const same = sameDecision(view, "cover_approval", (d) => d.group_id === g!.group.id && d.cover_3x4_sha === a.sha256 && d.cover_4x3_sha === b.sha256 && (d.cover_text ?? "") === text && d.body_hash === bh
+    && validCoverApproval(view, ctx.content.body)?.id === d.id);
+  for (const [f, label] of same ? [] : [[a, "3:4 封面"], [b, "4:3 封面"]] as const) {
+    const changed = await bytesStill(ctx, f, label, "cover_replaced");
+    if (changed) return changed;
+  }
+  return { ok: true, group_id: g.group.id, decision: same ?? (await push(ctx, { type: "cover_approval", cover_3x4_sha: a.sha256, cover_4x3_sha: b.sha256, ...(text ? { cover_text: text } : {}), body_hash: bh, group_id: g.group.id }, "cover_picked")) };
+}
+
+/** 「这组不要了」（§6.3）：已批的那组不能作废，先撤回批准；文件不删 */
+async function retireCoverGroup(ctx: Ctx): Promise<Result> {
+  const id = str(ctx.params.group_id);
+  if (!id) return fail("bad_request", "要带 group_id（刷新再点）");
+  const view = coverView(ctx);
+  const done = view.decisions.find((d) => d.type === "cover_group_retire" && d.group_id === id);
+  if (done) return { ok: true, decision: done };
+  const g = groupById(view, id);
+  if (!g) return fail("stale", "这组封面不在了，刷新再看");
+  const ok = validCoverApproval(view, ctx.content.body);
+  // 按批准的组身份保护（Codex 审 2a-1 r2 P2）；旧批准没有 group_id 时按整对比，不按共用的一张图
+  const isApproved = ok && (ok.group_id ? ok.group_id === id
+    : g.complete && g.slots["3:4"][0].sha256 === ok.cover_3x4_sha && g.slots["4:3"][0].sha256 === ok.cover_4x3_sha);
+  if (isApproved) return fail("cover_group_approved", "这组已经定了：先撤回封面批准，再说这组不要了");
+  return { ok: true, decision: await push(ctx, { type: "cover_group_retire", group_id: id, ...(str(ctx.params.note) ? { note: str(ctx.params.note) } : {}) }, "cover_group_retired") };
 }
 
 async function revoke(ctx: Ctx): Promise<Result> {
@@ -166,9 +237,19 @@ async function candidate(ctx: Ctx, confirm: boolean): Promise<Result> {
   return { ...adopted, decision: await push(ctx, { type: "candidate_confirm", fact_id: f.id, sha256: f.sha256 }, "candidate_confirmed") };
 }
 
+/** 卡上的按平台动作带着轮次：页面开着期间重开过文稿 = 旧轮的按钮，拒 */
+export function staleRound(ctx: Ctx): Result | null {
+  const r = ctx.params.round;
+  if (r === undefined || r === null || r === "") return null;
+  return Number(r) === ctx.doc.round ? null : fail("stale", "这条已经重开过，按钮是上一轮的：刷新再看");
+}
+
 async function published(ctx: Ctx): Promise<Result> {
-  const platform = canonPlatform(str(ctx.params.platform) || ctx.content.platform || "");
+  // 平台必须明说（一条视频发多平台，不拿稿件平台顶）；带了轮次就必须是这一轮（spec 2026-10-12 吸收 3）
+  const platform = canonPlatform(str(ctx.params.platform));
   if (!platform) return fail("platform_required", "说一下发在哪个平台");
+  const stale = staleRound(ctx);
+  if (stale) return stale;
   const url = str(ctx.params.url);
   if (url && !/^https?:\/\//i.test(url)) return fail("bad_url", "作品链接只接受 http / https 开头的地址");
   // 幂等只对「这个槽现在就是你标的那条」：纠正过之后再点，要落一条新的
@@ -184,6 +265,8 @@ async function published(ctx: Ctx): Promise<Result> {
 async function confirmReceipt(ctx: Ctx): Promise<Result> {
   const f = factBy(ctx.doc, ctx.params, "publish");
   if (typeof f === "string") return fail("stale", f);
+  // 定时过期追问答「对，发了」：确认的是作品已公开，不是当初那条定时说法——记成「我发了」（公开），可信观察照样能更新它
+  if (f.obs_source === "claim" && f.pub_state === "scheduled" && overdueSchedule(ctx.doc, f.round, canonPlatform(f.platform ?? "?"))?.id === f.id) return published({ ...ctx, params: { platform: f.platform, ...(f.url ? { url: f.url } : {}) } });
   const same = sameDecision(ctx.doc, "publish_confirm", (d) => d.fact_id === f.id);
   const gate = same ? undefined : slotGate(ctx.doc, f.round, canonPlatform(f.platform ?? "?")) ?? await gateFromPlan(ctx.content.id, canonPlatform(f.platform ?? "?"), ctx.dataDir);
   return { ok: true, decision: same ?? (await push(ctx, { type: "publish_confirm", fact_id: f.id, platform: f.platform, ...(gate ? { gate } : {}) }, "receipt_confirmed")) };
@@ -194,7 +277,10 @@ async function confirmReceipt(ctx: Ctx): Promise<Result> {
  * 槽里纠正之前的一切作废；之后新来的照算。槽已经空了再点 = 幂等。
  */
 async function correct(ctx: Ctx): Promise<Result> {
-  const raw = str(ctx.params.target_id);
+  // 对话里「X 平台没发」只知道平台：按本轮那个平台的槽算（直接认的 AI 回执不进列表，没有条目可点）
+  const stale = staleRound(ctx);
+  if (stale) return stale;
+  const raw = str(ctx.params.target_id) || (str(ctx.params.platform) ? slotId(ctx.doc.round, str(ctx.params.platform)) : "");
   const fact = ctx.doc.facts.find((f) => f.id === raw && f.kind === "publish");
   const dec = ctx.doc.decisions.find((d) => d.id === raw && d.type === "i_published");
   const id = raw.startsWith("slot:") ? normSlotId(raw) : fact ? slotId(fact.round, canonPlatform(fact.platform ?? "?")) : dec ? slotId(dec.round, canonPlatform(dec.platform ?? "?")) : "";
@@ -216,12 +302,14 @@ async function attachAroll(ctx: Ctx): Promise<Result> {
   if (!at.ok) return fail(at.code, at.error);
   const fp = await stableFingerprint(at.value, Date.now());
   if (!fp.ok) return fail(fp.code, fp.error);
+  // 「指定给…」绑着列表里那份字节：锁内再核，文件换过就不挂（整分支审 6 P2）
+  if (str(ctx.params.expect_sha) && fp.value.sha256 !== str(ctx.params.expect_sha)) return fail("stale", "收件箱里这个视频刚换过，重新看一眼");
   // 与 record 同一套完整性核验（Codex 审 seg3 P2）：读不出时长的不收，不挪、不冻结
   const dur = await checkDuration(at.value, probe);
   if (!dur.ok) return fail(dur.code, dur.error);
   if (ctx.params.confirm_other !== true) {
     const name = path.basename(at.value);
-    const other = (await listContents(ctx.dataDir)).find((c) => c.id !== ctx.content.id && isVideoPlatform(c.platform) && !c.deletedAt
+    const other = (await listContents(ctx.dataDir)).find((c) => c.id !== ctx.content.id && isVideoPlatform(c.platform) && !c.deletedAt && !isImportedHistory(c)
       && c.status !== "archived" && exportMatchesTitle(name, c.title) && !exportMatchesTitle(name, ctx.content.title));
     if (other) return { ok: false, code: "looks_like_other", error: `这个视频更像《${other.title}》，确定挂到这条？`, other_id: other.id };
   }
@@ -235,14 +323,52 @@ async function attachAroll(ctx: Ctx): Promise<Result> {
   })).value;
   const adopted = await adoptCandidate(ctx.content, fact, ctx.dataDir, { reassign: ctx.params.reassign === true });
   if (!adopted.ok) return adopted;
-  return { ...adopted, decision: await push(ctx, { type: "candidate_confirm", fact_id: fact.id, sha256: fact.sha256, note: "卡片挂载" }, "aroll_attached") };
+  const decision = await push(ctx, { type: "candidate_confirm", fact_id: fact.id, sha256: fact.sha256, note: "卡片挂载" }, "aroll_attached");
+  return { ...adopted, decision };
+}
+
+/** 1b §4.1：对本轮一条 accepted 原片说「不是」（撤下、挪回原处） */
+async function arollDecision(ctx: Ctx, run: (f: Fact) => Promise<Result>): Promise<Result> {
+  const f = factBy(ctx.doc, ctx.params, "aroll");
+  if (typeof f === "string") return fail("stale", f);
+  return run(f);
+}
+
+/**
+ * 「我现在就要审」（review-inbox B7）：agent 一直没标「可以审了」、创始人要审——创始人自己标本轮最新一版成片。
+ * 之后「成片剪好了，看一遍」条目出现，通过照常走「等你拍板」。
+ */
+async function reviewNow(ctx: Ctx): Promise<Result> {
+  const cut = currentCut(ctx.doc);
+  if (!cut) return fail("no_cut", "这条本轮还没有收下的成片");
+  const r = await mutateProduction(ctx.content.id, ctx.dataDir, (d) => {
+    const f = d.facts.find((x) => x.id === cut.id)!;
+    const events = addReadyMark(d, f, { host: "founder" });
+    return { value: events.length > 0, events };
+  });
+  return { ok: true, fact_id: cut.id, marked: r.value };
+}
+
+/** 卡片「以前的封面文件 N 张」→「都不要」：本轮正式封面文件夹以外的封面候选一次否掉（文件不动） */
+async function rejectStrayCovers(ctx: Ctx): Promise<Result> {
+  const ids = ctx.doc.facts.filter((f) => f.round === ctx.doc.round && isStrayCover(f)).map((f) => f.id);
+  if (!ids.length) return { ok: true, rejected: 0 };
+  await push(ctx, { type: "candidate_reject", note: `以前的封面文件 ${ids.length} 张都不要` }, "stray_covers_rejected", (doc) => {
+    for (const f of doc.facts) if (ids.includes(f.id)) f.state = "rejected";
+  });
+  return { ok: true, rejected: ids.length };
 }
 
 const HANDLERS: Record<DecisionAction, (ctx: Ctx) => Promise<Result>> = {
   confirm_candidate: (c) => candidate(c, true), reject_candidate: (c) => candidate(c, false),
   approve_cut: approveCut, reject_cut: (c) => rejectWith(c, "cut_reject", "cut"), reject_cover: (c) => rejectWith(c, "cover_reject", "cover"),
-  pick_cover: pickCover, revoke_approval: revoke, i_published: published, confirm_receipt: confirmReceipt, correct_publish: correct,
+  pick_cover: pickCover, retire_cover_group: retireCoverGroup, review_now: reviewNow, reject_stray_covers: rejectStrayCovers, revoke_approval: revoke, i_published: published, confirm_receipt: confirmReceipt, correct_publish: correct,
+  // 稿件页卡上的两个恢复动作（吸收 15）：重新核对文件（先对账再登记）、重试登记；登记由下面统一的 commitRegistration 跑
+  recheck_files: async () => ({ ok: true }), retry_registration: async () => ({ ok: true }),
   attach_aroll: attachAroll, waive_sliver: waiveSliver, waive_sliver_check: waiveSliverCheck,
+  undo_auto_attach: (c) => arollDecision(c, (f) => undoAutoAttach(c.content, c.doc, f, c.dataDir)),
+  // 发布台手动工具（spec 2026-10-12 发布台 吸收 4 / 5）：按槽补作品链接、按平台手填数据
+  add_work_url: addWorkUrl, record_metrics: recordMetrics,
 };
 
 /**
@@ -253,6 +379,8 @@ export async function founderDecision(contentId: string, action: string, params:
   if (!DECISION_ACTIONS.includes(action as DecisionAction)) return fail("bad_request", `不认识的决定：${action}`);
   if (!(await isOntologyActive(dataDir, contentId))) return fail("ontology_not_enabled", "本体还没启用（或这条被排除），这个决定还不能在这里做");
   await ensureProductionReady(dataDir);
+  // 文件找回来了：先按盘上现状对账（文件在不在由对账写），再走登记
+  if (action === "recheck_files") await reconcileContent(contentId, dataDir);
   return withFileOwnership(async () => {
     const content = await getContent(contentId, dataDir);
     if (!content || content.deletedAt) return fail("not_found", "这条稿不在了");

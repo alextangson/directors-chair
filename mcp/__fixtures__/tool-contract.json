@@ -10,12 +10,16 @@
        "list",
        "radar_pool",
        "radar_score",
-       "delete"
+       "delete",
+       "delete_example"
       ],
       "type": "string"
      },
      "description": {
       "type": "string"
+     },
+     "example": {
+      "type": "boolean"
      },
      "id": {
       "type": "string"
@@ -170,9 +174,28 @@
        "delete",
        "restore",
        "record",
-       "check_slivers"
+       "check_slivers",
+       "mark_ready",
+       "ask",
+       "answer_ask",
+       "withdraw_ask"
       ],
       "type": "string"
+     },
+     "aroll_offset": {
+      "minimum": 0,
+      "type": "integer"
+     },
+     "ask_id": {
+      "type": "string"
+     },
+     "asks_offset": {
+      "minimum": 0,
+      "type": "integer"
+     },
+     "attachments": {
+      "items": {},
+      "type": "array"
      },
      "body": {
       "type": "string"
@@ -192,11 +215,20 @@
      "diff_note": {
       "type": "string"
      },
+     "distinct_video": {
+      "type": "boolean"
+     },
+     "fact_id": {
+      "type": "string"
+     },
      "for_cut": {
       "type": "string"
      },
      "force": {
       "type": "boolean"
+     },
+     "founder_quote": {
+      "type": "string"
      },
      "from_status": {
       "enum": [
@@ -241,15 +273,37 @@
        "cover",
        "chatcut_project",
        "publish",
-       "storyboard"
+       "storyboard",
+       "粗剪",
+       "分镜",
+       "样片",
+       "花费",
+       "配乐",
+       "其他"
       ],
       "type": "string"
      },
      "note": {
       "type": "string"
      },
+     "option_id": {
+      "type": "string"
+     },
+     "options": {
+      "items": {},
+      "type": "array"
+     },
+     "pair_with": {
+      "type": "string"
+     },
      "path": {
       "type": "string"
+     },
+     "paths": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
      },
      "performance_data": {
       "patternProperties": {
@@ -262,7 +316,13 @@
      "platform": {
       "type": "string"
      },
+     "pub_state": {
+      "type": "string"
+     },
      "publish_url": {
+      "type": "string"
+     },
+     "question": {
       "type": "string"
      },
      "ratio": {
@@ -282,11 +342,21 @@
      "request_id": {
       "type": "string"
      },
+     "review": {
+      "type": "boolean"
+     },
+     "scheduled_at": {
+      "type": "string"
+     },
      "siblings": {
       "items": {
        "type": "string"
       },
       "type": "array"
+     },
+     "since_seq": {
+      "minimum": 0,
+      "type": "integer"
      },
      "source": {
       "const": "manual_import",
@@ -415,6 +485,12 @@
       ],
       "type": "string"
      },
+     "founder_words": {
+      "type": "string"
+     },
+     "inspiration": {
+      "type": "string"
+     },
      "kind": {
       "enum": [
        "full",
@@ -437,15 +513,8 @@
      "research_mode": {
       "enum": [
        "auto",
-       "provided",
-       "skip"
+       "provided"
       ],
-      "type": "string"
-     },
-     "research_reason": {
-      "type": "string"
-     },
-     "skip_reason": {
       "type": "string"
      },
      "topic_id": {
@@ -474,7 +543,10 @@
        "claim_offline",
        "perspective",
        "synthesize",
-       "angles"
+       "angles",
+       "claim",
+       "fail_perspective",
+       "account_data"
       ],
       "type": "string"
      },
@@ -518,6 +590,9 @@
       ],
       "type": "string"
      },
+     "perspective_token": {
+      "type": "string"
+     },
      "platform": {
       "type": "string"
      },
@@ -549,6 +624,187 @@
     "required": [
      "action",
      "topic_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "autocrew_draft",
+   "shape": {
+    "properties": {
+     "action": {
+      "enum": [
+       "start",
+       "exemplars",
+       "angle",
+       "opening",
+       "save",
+       "verify_quote",
+       "prepare_final",
+       "feedback_history",
+       "propose_promotion"
+      ],
+      "type": "string"
+     },
+     "base_version": {
+      "type": "integer"
+     },
+     "body": {
+      "type": "string"
+     },
+     "candidates": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "chain": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "chosen_option": {
+      "type": "string"
+     },
+     "citations": {
+      "items": {
+       "properties": {
+        "evidence_ids": {
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        },
+        "kind": {
+         "enum": [
+          "claim",
+          "example",
+          "judgment"
+         ],
+         "type": "string"
+        },
+        "text": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "text",
+        "evidence_ids"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     },
+     "cites": {},
+     "claim": {
+      "type": "string"
+     },
+     "content_id": {
+      "type": "string"
+     },
+     "exemplar_id": {
+      "type": "string"
+     },
+     "exemplars": {},
+     "feedback": {},
+     "for_whom": {
+      "type": "string"
+     },
+     "founder_words": {
+      "type": "string"
+     },
+     "genre": {
+      "type": "string"
+     },
+     "inspiration": {
+      "type": "string"
+     },
+     "main_line": {
+      "type": "string"
+     },
+     "note": {
+      "type": "string"
+     },
+     "opening": {
+      "type": "string"
+     },
+     "platform": {
+      "type": "string"
+     },
+     "quote": {
+      "type": "string"
+     },
+     "review_notes": {},
+     "target": {
+      "type": "string"
+     },
+     "test_read": {},
+     "text": {
+      "type": "string"
+     },
+     "title": {
+      "type": "string"
+     },
+     "topic_id": {
+      "type": "string"
+     },
+     "url": {
+      "type": "string"
+     },
+     "why_viral": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "action"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "autocrew_playbook",
+   "shape": {
+    "properties": {
+     "action": {
+      "enum": [
+       "list",
+       "get",
+       "propose",
+       "rollback"
+      ],
+      "type": "string"
+     },
+     "based_on": {
+      "type": "integer"
+     },
+     "expected_current_version": {
+      "type": "integer"
+     },
+     "founder_words": {
+      "type": "string"
+     },
+     "id": {
+      "type": "string"
+     },
+     "reason": {
+      "type": "string"
+     },
+     "request_id": {
+      "type": "string"
+     },
+     "text": {
+      "type": "string"
+     },
+     "to_version": {
+      "type": "integer"
+     },
+     "version": {
+      "type": "integer"
+     }
+    },
+    "required": [
+     "action"
     ],
     "type": "object"
    }
@@ -1023,12 +1279,8 @@
      "research_mode": {
       "enum": [
        "auto",
-       "provided",
-       "skip"
+       "provided"
       ],
-      "type": "string"
-     },
-     "research_reason": {
       "type": "string"
      },
      "review": {
@@ -1043,9 +1295,6 @@
       "type": "string"
      },
      "revision_of": {
-      "type": "string"
-     },
-     "skip_reason": {
       "type": "string"
      },
      "technique_ids": {
@@ -1116,6 +1365,118 @@
      },
      "takeover": {
       "type": "boolean"
+     }
+    },
+    "required": [
+     "action"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "autocrew_review_inbox",
+   "shape": {
+    "properties": {
+     "action": {
+      "enum": [
+       "list",
+       "decide",
+       "revoke",
+       "inbox_list",
+       "inbox_attach",
+       "sync"
+      ],
+      "type": "string"
+     },
+     "confirm_other": {
+      "type": "boolean"
+     },
+     "content_id": {
+      "type": "string"
+     },
+     "cover_text": {
+      "type": "string"
+     },
+     "decision": {
+      "enum": [
+       "confirm_receipt",
+       "correct_publish",
+       "i_published",
+       "answer_ask",
+       "ask_resend",
+       "publish_check_confirm",
+       "publish_check_revise",
+       "publish_check_override",
+       "pick_cover",
+       "retire_cover_group",
+       "reject_cover",
+       "approve_cut",
+       "reject_cut",
+       "confirm_candidate",
+       "reject_candidate",
+       "approve_rule",
+       "reject_rule",
+       "replace_rule",
+       "approve_playbook",
+       "reject_playbook",
+       "playbook_batch",
+       "approve_promotion",
+       "reject_promotion",
+       "waive_sliver_check",
+       "waive_sliver",
+       "approve_script",
+       "revise_script"
+      ],
+      "type": "string"
+     },
+     "decision_id": {
+      "type": "string"
+     },
+     "fact_id": {
+      "type": "string"
+     },
+     "file": {
+      "type": "string"
+     },
+     "founder_words": {
+      "type": "string"
+     },
+     "gen": {
+      "type": "string"
+     },
+     "group_id": {
+      "type": "string"
+     },
+     "item_id": {
+      "type": "string"
+     },
+     "items": {},
+     "note": {
+      "type": "string"
+     },
+     "option_id": {
+      "type": "string"
+     },
+     "platform": {
+      "type": "string"
+     },
+     "preview_dir": {
+      "type": "string"
+     },
+     "request_id": {
+      "type": "string"
+     },
+     "sha256": {
+      "type": "string"
+     },
+     "sliver_key": {
+      "type": "string"
+     },
+     "target_rule_id": {
+      "type": "string"
+     },
+     "url": {
+      "type": "string"
      }
     },
     "required": [
@@ -1561,6 +1922,9 @@
      },
      "publish_url": {
       "type": "string"
+     },
+     "round": {
+      "type": "integer"
      },
      "schedule": {
       "type": "string"
@@ -2157,7 +2521,8 @@
      "action": {
       "enum": [
        "check",
-       "video_kit"
+       "video_kit",
+       "title_methods"
       ],
       "type": "string"
      },
@@ -2183,6 +2548,13 @@
        },
        "post_title": {
         "type": "string"
+       },
+       "title_candidates": {
+        "items": {},
+        "type": "array"
+       },
+       "title_method": {
+        "type": "string"
        }
       },
       "required": [
@@ -2197,8 +2569,7 @@
      }
     },
     "required": [
-     "action",
-     "content_id"
+     "action"
     ],
     "type": "object"
    }
@@ -2246,8 +2617,27 @@
        "prepare",
        "submit",
        "list",
-       "get"
+       "get",
+       "meeting_brief",
+       "meeting_get",
+       "meeting_save",
+       "meeting_tag",
+       "calib_status",
+       "calib_blind",
+       "calib_predict",
+       "calib_retro",
+       "calib_bump",
+       "calib_observe",
+       "calib_learn",
+       "work_bind",
+       "work_claim",
+       "history_create",
+       "history_delete"
       ],
+      "type": "string"
+     },
+     "calib": {},
+     "date": {
       "type": "string"
      },
      "days": {
@@ -2264,6 +2654,7 @@
       "maxLength": 500,
       "type": "string"
      },
+     "meeting": {},
      "pack_id": {
       "pattern": "^insights-[a-f0-9-]{36}$",
       "type": "string"
@@ -2456,7 +2847,9 @@
        "limitations"
       ],
       "type": "object"
-     }
+     },
+     "tag": {},
+     "work": {}
     },
     "type": "object"
    }
@@ -2536,15 +2929,8 @@
      "research_mode": {
       "enum": [
        "auto",
-       "provided",
-       "skip"
+       "provided"
       ],
-      "type": "string"
-     },
-     "research_reason": {
-      "type": "string"
-     },
-     "skip_reason": {
       "type": "string"
      },
      "topic": {
@@ -2639,12 +3025,16 @@
        "list",
        "radar_pool",
        "radar_score",
-       "delete"
+       "delete",
+       "delete_example"
       ],
       "type": "string"
      },
      "description": {
       "type": "string"
+     },
+     "example": {
+      "type": "boolean"
      },
      "id": {
       "type": "string"
@@ -2799,9 +3189,28 @@
        "delete",
        "restore",
        "record",
-       "check_slivers"
+       "check_slivers",
+       "mark_ready",
+       "ask",
+       "answer_ask",
+       "withdraw_ask"
       ],
       "type": "string"
+     },
+     "aroll_offset": {
+      "minimum": 0,
+      "type": "integer"
+     },
+     "ask_id": {
+      "type": "string"
+     },
+     "asks_offset": {
+      "minimum": 0,
+      "type": "integer"
+     },
+     "attachments": {
+      "items": {},
+      "type": "array"
      },
      "body": {
       "type": "string"
@@ -2821,11 +3230,20 @@
      "diff_note": {
       "type": "string"
      },
+     "distinct_video": {
+      "type": "boolean"
+     },
+     "fact_id": {
+      "type": "string"
+     },
      "for_cut": {
       "type": "string"
      },
      "force": {
       "type": "boolean"
+     },
+     "founder_quote": {
+      "type": "string"
      },
      "from_status": {
       "enum": [
@@ -2870,15 +3288,37 @@
        "cover",
        "chatcut_project",
        "publish",
-       "storyboard"
+       "storyboard",
+       "粗剪",
+       "分镜",
+       "样片",
+       "花费",
+       "配乐",
+       "其他"
       ],
       "type": "string"
      },
      "note": {
       "type": "string"
      },
+     "option_id": {
+      "type": "string"
+     },
+     "options": {
+      "items": {},
+      "type": "array"
+     },
+     "pair_with": {
+      "type": "string"
+     },
      "path": {
       "type": "string"
+     },
+     "paths": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
      },
      "performance_data": {
       "patternProperties": {
@@ -2891,7 +3331,13 @@
      "platform": {
       "type": "string"
      },
+     "pub_state": {
+      "type": "string"
+     },
      "publish_url": {
+      "type": "string"
+     },
+     "question": {
       "type": "string"
      },
      "ratio": {
@@ -2911,11 +3357,21 @@
      "request_id": {
       "type": "string"
      },
+     "review": {
+      "type": "boolean"
+     },
+     "scheduled_at": {
+      "type": "string"
+     },
      "siblings": {
       "items": {
        "type": "string"
       },
       "type": "array"
+     },
+     "since_seq": {
+      "minimum": 0,
+      "type": "integer"
      },
      "source": {
       "const": "manual_import",
@@ -3044,6 +3500,12 @@
       ],
       "type": "string"
      },
+     "founder_words": {
+      "type": "string"
+     },
+     "inspiration": {
+      "type": "string"
+     },
      "kind": {
       "enum": [
        "full",
@@ -3066,15 +3528,8 @@
      "research_mode": {
       "enum": [
        "auto",
-       "provided",
-       "skip"
+       "provided"
       ],
-      "type": "string"
-     },
-     "research_reason": {
-      "type": "string"
-     },
-     "skip_reason": {
       "type": "string"
      },
      "topic_id": {
@@ -3103,7 +3558,10 @@
        "claim_offline",
        "perspective",
        "synthesize",
-       "angles"
+       "angles",
+       "claim",
+       "fail_perspective",
+       "account_data"
       ],
       "type": "string"
      },
@@ -3147,6 +3605,9 @@
       ],
       "type": "string"
      },
+     "perspective_token": {
+      "type": "string"
+     },
      "platform": {
       "type": "string"
      },
@@ -3178,6 +3639,187 @@
     "required": [
      "action",
      "topic_id"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "autocrew_draft",
+   "shape": {
+    "properties": {
+     "action": {
+      "enum": [
+       "start",
+       "exemplars",
+       "angle",
+       "opening",
+       "save",
+       "verify_quote",
+       "prepare_final",
+       "feedback_history",
+       "propose_promotion"
+      ],
+      "type": "string"
+     },
+     "base_version": {
+      "type": "integer"
+     },
+     "body": {
+      "type": "string"
+     },
+     "candidates": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "chain": {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "chosen_option": {
+      "type": "string"
+     },
+     "citations": {
+      "items": {
+       "properties": {
+        "evidence_ids": {
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        },
+        "kind": {
+         "enum": [
+          "claim",
+          "example",
+          "judgment"
+         ],
+         "type": "string"
+        },
+        "text": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "text",
+        "evidence_ids"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     },
+     "cites": {},
+     "claim": {
+      "type": "string"
+     },
+     "content_id": {
+      "type": "string"
+     },
+     "exemplar_id": {
+      "type": "string"
+     },
+     "exemplars": {},
+     "feedback": {},
+     "for_whom": {
+      "type": "string"
+     },
+     "founder_words": {
+      "type": "string"
+     },
+     "genre": {
+      "type": "string"
+     },
+     "inspiration": {
+      "type": "string"
+     },
+     "main_line": {
+      "type": "string"
+     },
+     "note": {
+      "type": "string"
+     },
+     "opening": {
+      "type": "string"
+     },
+     "platform": {
+      "type": "string"
+     },
+     "quote": {
+      "type": "string"
+     },
+     "review_notes": {},
+     "target": {
+      "type": "string"
+     },
+     "test_read": {},
+     "text": {
+      "type": "string"
+     },
+     "title": {
+      "type": "string"
+     },
+     "topic_id": {
+      "type": "string"
+     },
+     "url": {
+      "type": "string"
+     },
+     "why_viral": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "action"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "autocrew_playbook",
+   "shape": {
+    "properties": {
+     "action": {
+      "enum": [
+       "list",
+       "get",
+       "propose",
+       "rollback"
+      ],
+      "type": "string"
+     },
+     "based_on": {
+      "type": "integer"
+     },
+     "expected_current_version": {
+      "type": "integer"
+     },
+     "founder_words": {
+      "type": "string"
+     },
+     "id": {
+      "type": "string"
+     },
+     "reason": {
+      "type": "string"
+     },
+     "request_id": {
+      "type": "string"
+     },
+     "text": {
+      "type": "string"
+     },
+     "to_version": {
+      "type": "integer"
+     },
+     "version": {
+      "type": "integer"
+     }
+    },
+    "required": [
+     "action"
     ],
     "type": "object"
    }
@@ -3652,12 +4294,8 @@
      "research_mode": {
       "enum": [
        "auto",
-       "provided",
-       "skip"
+       "provided"
       ],
-      "type": "string"
-     },
-     "research_reason": {
       "type": "string"
      },
      "review": {
@@ -3672,9 +4310,6 @@
       "type": "string"
      },
      "revision_of": {
-      "type": "string"
-     },
-     "skip_reason": {
       "type": "string"
      },
      "technique_ids": {
@@ -3745,6 +4380,118 @@
      },
      "takeover": {
       "type": "boolean"
+     }
+    },
+    "required": [
+     "action"
+    ],
+    "type": "object"
+   }
+  },
+  {
+   "name": "autocrew_review_inbox",
+   "shape": {
+    "properties": {
+     "action": {
+      "enum": [
+       "list",
+       "decide",
+       "revoke",
+       "inbox_list",
+       "inbox_attach",
+       "sync"
+      ],
+      "type": "string"
+     },
+     "confirm_other": {
+      "type": "boolean"
+     },
+     "content_id": {
+      "type": "string"
+     },
+     "cover_text": {
+      "type": "string"
+     },
+     "decision": {
+      "enum": [
+       "confirm_receipt",
+       "correct_publish",
+       "i_published",
+       "answer_ask",
+       "ask_resend",
+       "publish_check_confirm",
+       "publish_check_revise",
+       "publish_check_override",
+       "pick_cover",
+       "retire_cover_group",
+       "reject_cover",
+       "approve_cut",
+       "reject_cut",
+       "confirm_candidate",
+       "reject_candidate",
+       "approve_rule",
+       "reject_rule",
+       "replace_rule",
+       "approve_playbook",
+       "reject_playbook",
+       "playbook_batch",
+       "approve_promotion",
+       "reject_promotion",
+       "waive_sliver_check",
+       "waive_sliver",
+       "approve_script",
+       "revise_script"
+      ],
+      "type": "string"
+     },
+     "decision_id": {
+      "type": "string"
+     },
+     "fact_id": {
+      "type": "string"
+     },
+     "file": {
+      "type": "string"
+     },
+     "founder_words": {
+      "type": "string"
+     },
+     "gen": {
+      "type": "string"
+     },
+     "group_id": {
+      "type": "string"
+     },
+     "item_id": {
+      "type": "string"
+     },
+     "items": {},
+     "note": {
+      "type": "string"
+     },
+     "option_id": {
+      "type": "string"
+     },
+     "platform": {
+      "type": "string"
+     },
+     "preview_dir": {
+      "type": "string"
+     },
+     "request_id": {
+      "type": "string"
+     },
+     "sha256": {
+      "type": "string"
+     },
+     "sliver_key": {
+      "type": "string"
+     },
+     "target_rule_id": {
+      "type": "string"
+     },
+     "url": {
+      "type": "string"
      }
     },
     "required": [
@@ -4190,6 +4937,9 @@
      },
      "publish_url": {
       "type": "string"
+     },
+     "round": {
+      "type": "integer"
      },
      "schedule": {
       "type": "string"
@@ -4654,7 +5404,8 @@
      "action": {
       "enum": [
        "check",
-       "video_kit"
+       "video_kit",
+       "title_methods"
       ],
       "type": "string"
      },
@@ -4680,6 +5431,13 @@
        },
        "post_title": {
         "type": "string"
+       },
+       "title_candidates": {
+        "items": {},
+        "type": "array"
+       },
+       "title_method": {
+        "type": "string"
        }
       },
       "required": [
@@ -4694,8 +5452,7 @@
      }
     },
     "required": [
-     "action",
-     "content_id"
+     "action"
     ],
     "type": "object"
    }
@@ -4743,8 +5500,27 @@
        "prepare",
        "submit",
        "list",
-       "get"
+       "get",
+       "meeting_brief",
+       "meeting_get",
+       "meeting_save",
+       "meeting_tag",
+       "calib_status",
+       "calib_blind",
+       "calib_predict",
+       "calib_retro",
+       "calib_bump",
+       "calib_observe",
+       "calib_learn",
+       "work_bind",
+       "work_claim",
+       "history_create",
+       "history_delete"
       ],
+      "type": "string"
+     },
+     "calib": {},
+     "date": {
       "type": "string"
      },
      "days": {
@@ -4761,6 +5537,7 @@
       "maxLength": 500,
       "type": "string"
      },
+     "meeting": {},
      "pack_id": {
       "pattern": "^insights-[a-f0-9-]{36}$",
       "type": "string"
@@ -4953,693 +5730,10 @@
        "limitations"
       ],
       "type": "object"
-     }
+     },
+     "tag": {},
+     "work": {}
     },
-    "type": "object"
-   }
-  }
- ],
- "codex": [
-  {
-   "name": "autocrew_content",
-   "shape": {
-    "properties": {
-     "account": {
-      "type": "string"
-     },
-     "action": {
-      "enum": [
-       "save",
-       "list",
-       "get",
-       "summary",
-       "update",
-       "transition",
-       "create_variant",
-       "siblings",
-       "allowed_transitions",
-       "adoption",
-       "delete",
-       "restore",
-       "record",
-       "check_slivers"
-      ],
-      "type": "string"
-     },
-     "body": {
-      "type": "string"
-     },
-     "chatcut_project_id": {
-      "type": "string"
-     },
-     "claim_token": {
-      "type": "string"
-     },
-     "content_id": {
-      "type": "string"
-     },
-     "cover_text": {
-      "type": "string"
-     },
-     "diff_note": {
-      "type": "string"
-     },
-     "for_cut": {
-      "type": "string"
-     },
-     "force": {
-      "type": "boolean"
-     },
-     "from_status": {
-      "enum": [
-       "topic_saved",
-       "drafting",
-       "needs_evidence",
-       "draft_ready",
-       "reviewing",
-       "revision",
-       "approved",
-       "editing",
-       "cover_pending",
-       "publish_ready",
-       "publishing",
-       "published",
-       "archived",
-       "draft",
-       "review"
-      ],
-      "type": "string"
-     },
-     "hashtags": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "id": {
-      "type": "string"
-     },
-     "import_reason": {
-      "type": "string"
-     },
-     "item_id": {
-      "type": "string"
-     },
-     "kind": {
-      "enum": [
-       "aroll",
-       "cut",
-       "srt",
-       "cover",
-       "chatcut_project",
-       "publish",
-       "storyboard"
-      ],
-      "type": "string"
-     },
-     "note": {
-      "type": "string"
-     },
-     "path": {
-      "type": "string"
-     },
-     "performance_data": {
-      "patternProperties": {
-       "^(.*)$": {
-        "type": "number"
-       }
-      },
-      "type": "object"
-     },
-     "platform": {
-      "type": "string"
-     },
-     "publish_url": {
-      "type": "string"
-     },
-     "ratio": {
-      "type": "string"
-     },
-     "reason": {
-      "enum": [
-       "style_mismatch",
-       "factual_error",
-       "structure_bad"
-      ],
-      "type": "string"
-     },
-     "reason_note": {
-      "type": "string"
-     },
-     "request_id": {
-      "type": "string"
-     },
-     "siblings": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "source": {
-      "const": "manual_import",
-      "type": "string"
-     },
-     "status": {
-      "enum": [
-       "topic_saved",
-       "drafting",
-       "needs_evidence",
-       "draft_ready",
-       "reviewing",
-       "revision",
-       "approved",
-       "editing",
-       "cover_pending",
-       "publish_ready",
-       "publishing",
-       "published",
-       "archived",
-       "draft",
-       "review"
-      ],
-      "type": "string"
-     },
-     "tags": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "target_status": {
-      "enum": [
-       "topic_saved",
-       "drafting",
-       "needs_evidence",
-       "draft_ready",
-       "reviewing",
-       "revision",
-       "approved",
-       "editing",
-       "cover_pending",
-       "publish_ready",
-       "publishing",
-       "published",
-       "archived",
-       "draft",
-       "review"
-      ],
-      "type": "string"
-     },
-     "timeline_id": {
-      "type": "string"
-     },
-     "title": {
-      "type": "string"
-     },
-     "topicId": {
-      "type": "string"
-     },
-     "url": {
-      "type": "string"
-     },
-     "uses_aroll": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "verdict": {
-      "enum": [
-       "adopted",
-       "light_edit",
-       "rewritten"
-      ],
-      "type": "string"
-     },
-     "version": {
-      "minimum": 1,
-      "type": "integer"
-     }
-    },
-    "required": [
-     "action"
-    ],
-    "type": "object"
-   }
-  },
-  {
-   "name": "autocrew_desk",
-   "shape": {
-    "properties": {
-     "action": {
-      "enum": [
-       "inbox",
-       "claim",
-       "release"
-      ],
-      "type": "string"
-     },
-     "claim_token": {
-      "type": "string"
-     },
-     "content_id": {
-      "type": "string"
-     },
-     "employee": {
-      "enum": [
-       "writer",
-       "cover",
-       "editor"
-      ],
-      "type": "string"
-     },
-     "takeover": {
-      "type": "boolean"
-     }
-    },
-    "required": [
-     "action"
-    ],
-    "type": "object"
-   }
-  },
-  {
-   "name": "autocrew_video",
-   "shape": {
-    "properties": {
-     "action": {
-      "enum": [
-       "status",
-       "start",
-       "transcript",
-       "cut_confirm",
-       "transcript_edit",
-       "cut_preview",
-       "rough_cut_rerun",
-       "transcribe_rerun",
-       "editor_plan",
-       "editor_slot_fill",
-       "editor_slot_remove",
-       "editor_back_to_cut",
-       "editor_confirm",
-       "editor_rerun",
-       "reassemble",
-       "retry",
-       "review",
-       "asr_status",
-       "handoff",
-       "revoke",
-       "register",
-       "report",
-       "citations",
-       "match",
-       "confirm"
-      ],
-      "type": "string"
-     },
-     "approvals": {
-      "properties": {
-       "covers": {
-        "properties": {
-         "approved_at": {
-          "type": "string"
-         },
-         "artifact_sha256": {
-          "type": "string"
-         },
-         "user_message": {
-          "type": "string"
-         }
-        },
-        "required": [
-         "artifact_sha256",
-         "approved_at",
-         "user_message"
-        ],
-        "type": "object"
-       },
-       "final_cut": {
-        "properties": {
-         "approved_at": {
-          "type": "string"
-         },
-         "artifact_sha256": {
-          "type": "string"
-         },
-         "user_message": {
-          "type": "string"
-         }
-        },
-        "required": [
-         "artifact_sha256",
-         "approved_at",
-         "user_message"
-        ],
-        "type": "object"
-       }
-      },
-      "required": [
-       "final_cut",
-       "covers"
-      ],
-      "type": "object"
-     },
-     "aroll_path": {
-      "type": "string"
-     },
-     "base_clean_revision": {
-      "type": "integer"
-     },
-     "base_cut_revision": {
-      "type": "integer"
-     },
-     "base_transcript_revision": {
-      "type": "integer"
-     },
-     "claim_token": {
-      "type": "string"
-     },
-     "confirmation_id": {
-      "type": "string"
-     },
-     "content_id": {
-      "type": "string"
-     },
-     "cover_text": {
-      "type": "string"
-     },
-     "coverage": {},
-     "covers": {
-      "properties": {
-       "3:4": {
-        "type": "string"
-       },
-       "4:3": {
-        "type": "string"
-       }
-      },
-      "required": [
-       "3:4",
-       "4:3"
-      ],
-      "type": "object"
-     },
-     "final_path": {
-      "type": "string"
-     },
-     "flags": {
-      "items": {
-       "properties": {
-        "flag": {
-         "type": "string"
-        },
-        "segment_id": {
-         "type": "string"
-        }
-       },
-       "required": [
-        "segment_id",
-        "flag"
-       ],
-       "type": "object"
-      },
-      "type": "array"
-     },
-     "full": {
-      "type": "boolean"
-     },
-     "jianying_draft": {
-      "type": "string"
-     },
-     "keeps": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "kept_overlay_ids": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "library_id": {
-      "type": "string"
-     },
-     "manifest_hash": {
-      "type": "string"
-     },
-     "note": {
-      "type": "string"
-     },
-     "notes": {
-      "type": "string"
-     },
-     "overlay_id": {
-      "type": "string"
-     },
-     "plan_revision": {
-      "type": "integer"
-     },
-     "project_root": {
-      "type": "string"
-     },
-     "receipt_id": {
-      "type": "string"
-     },
-     "rendered_revision": {
-      "type": "integer"
-     },
-     "report": {},
-     "request_id": {
-      "type": "string"
-     },
-     "revoke": {
-      "type": "boolean"
-     },
-     "srt_path": {
-      "type": "string"
-     },
-     "target": {
-      "enum": [
-       "edit",
-       "cut"
-      ],
-      "type": "string"
-     },
-     "target_seconds": {
-      "type": "number"
-     },
-     "text": {
-      "type": "string"
-     },
-     "timestamp_ms": {
-      "type": "integer"
-     },
-     "unit_id": {
-      "type": "string"
-     },
-     "verdict": {
-      "enum": [
-       "approve",
-       "revise",
-       "reject"
-      ],
-      "type": "string"
-     }
-    },
-    "required": [
-     "action"
-    ],
-    "type": "object"
-   }
-  },
-  {
-   "name": "autocrew_status",
-   "shape": {
-    "properties": {
-     "action": {
-      "enum": [
-       "overview",
-       "baseline",
-       "compare",
-       "track_performance",
-       "learning_report"
-      ],
-      "type": "string"
-     },
-     "brief": {
-      "type": "boolean"
-     },
-     "content_id": {
-      "type": "string"
-     },
-     "metrics": {
-      "patternProperties": {
-       "^(.*)$": {
-        "type": "number"
-       }
-      },
-      "type": "object"
-     },
-     "verbose": {
-      "type": "boolean"
-     }
-    },
-    "type": "object"
-   }
-  },
-  {
-   "name": "autocrew_asset",
-   "shape": {
-    "properties": {
-     "action": {
-      "enum": [
-       "add",
-       "list",
-       "remove",
-       "versions",
-       "get_version",
-       "revert"
-      ],
-      "type": "string"
-     },
-     "asset_type": {
-      "enum": [
-       "cover",
-       "broll",
-       "image",
-       "video",
-       "audio",
-       "subtitle",
-       "other"
-      ],
-      "type": "string"
-     },
-     "content_id": {
-      "type": "string"
-     },
-     "description": {
-      "type": "string"
-     },
-     "filename": {
-      "type": "string"
-     },
-     "source_path": {
-      "type": "string"
-     },
-     "version": {
-      "type": "number"
-     }
-    },
-    "required": [
-     "action",
-     "content_id"
-    ],
-    "type": "object"
-   }
-  },
-  {
-   "name": "autocrew_publish",
-   "shape": {
-    "properties": {
-     "action": {
-      "enum": [
-       "wechat_mp_draft",
-       "clipboard",
-       "ego_lite_prepare",
-       "confirm_published",
-       "digest",
-       "check",
-       "propose_preference"
-      ],
-      "type": "string"
-     },
-     "article_path": {
-      "type": "string"
-     },
-     "author": {
-      "type": "string"
-     },
-     "check_ids": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "content_id": {
-      "type": "string"
-     },
-     "digest": {
-      "type": "string"
-     },
-     "dry_run": {
-      "type": "boolean"
-     },
-     "force": {
-      "type": "boolean"
-     },
-     "founder_quote": {
-      "type": "string"
-     },
-     "founder_quotes": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "hashtags": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "image_api_key": {
-      "type": "string"
-     },
-     "image_base_url": {
-      "type": "string"
-     },
-     "image_generator_script": {
-      "type": "string"
-     },
-     "image_model": {
-      "type": "string"
-     },
-     "image_size": {
-      "type": "string"
-     },
-     "instruction_id": {
-      "type": "string"
-     },
-     "kind": {
-      "type": "string"
-     },
-     "overrides": {},
-     "plan": {},
-     "platform": {
-      "type": "string"
-     },
-     "publish_url": {
-      "type": "string"
-     },
-     "schedule": {
-      "type": "string"
-     },
-     "skip_images": {
-      "type": "boolean"
-     },
-     "theme": {
-      "type": "string"
-     },
-     "value": {},
-     "wechat_publish_script": {
-      "type": "string"
-     }
-    },
-    "required": [
-     "action"
-    ],
     "type": "object"
    }
   }

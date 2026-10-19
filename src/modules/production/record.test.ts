@@ -116,6 +116,29 @@ describe("record：克隆（§3-7，§13-B）", () => {
     const doc = (await readProductionDoc(c.id, env.dir))!;
     expect(doc.facts.find((f) => f.kind === "srt")!.for_cut).toBe(doc.facts.find((f) => f.kind === "cut")!.sha256);
   });
+
+  it("两版成片的字幕字节相同：各记一条、各绑各的成片；同成片换 request_id 重报不再多记，同 request_id 重放回原事实", async () => {
+    const c = await videoContent(env, TITLE);
+    const v1 = await record(env, { content_id: c.id, kind: "cut", path: await put(path.join(env.chatcut, "cut-v001.mp4"), "cut-v1"), request_id: "c1" });
+    const v2 = await record(env, { content_id: c.id, kind: "cut", path: await put(path.join(env.chatcut, "cut-v002.mp4"), "cut-v2"), request_id: "c2" });
+    const s1 = await record(env, { content_id: c.id, kind: "srt", path: await put(path.join(env.chatcut, "cut-v001.srt"), SRT), for_cut: v1.fact_id, request_id: "s1" });
+    const s2Path = await put(path.join(env.chatcut, "cut-v002.srt"), SRT);
+    const s2 = await record(env, { content_id: c.id, kind: "srt", path: s2Path, for_cut: v2.fact_id, request_id: "s2" });
+    expect(s2).toMatchObject({ ok: true, state: "accepted" });
+    expect(s2.fact_id).not.toBe(s1.fact_id);
+    expect(String(s2.next_action ?? "")).not.toContain("同一文件已经记过");
+    const doc = (await readProductionDoc(c.id, env.dir))!;
+    const sha = (id: unknown) => doc.facts.find((f) => f.id === id)!.sha256;
+    const srts = doc.facts.filter((f) => f.kind === "srt");
+    expect(srts).toHaveLength(2);
+    expect(new Set(srts.map((f) => f.sha256)).size).toBe(1);
+    expect(srts.find((f) => f.id === s1.fact_id)!.for_cut).toBe(sha(v1.fact_id));
+    expect(srts.find((f) => f.id === s2.fact_id)!.for_cut).toBe(sha(v2.fact_id));
+    const again = await record(env, { content_id: c.id, kind: "srt", path: s2Path, for_cut: v2.fact_id, request_id: "s2-retry" });
+    expect(again).toMatchObject({ ok: true, fact_id: s2.fact_id });
+    expect(await record(env, { content_id: c.id, kind: "srt", path: s2Path, for_cut: v2.fact_id, request_id: "s2" })).toMatchObject({ ok: true, fact_id: s2.fact_id });
+    expect((await readProductionDoc(c.id, env.dir))!.facts.filter((f) => f.kind === "srt")).toHaveLength(2);
+  });
 });
 
 describe("record：检查先于副作用（§3，E5/E7/E21/E24）", () => {
@@ -155,12 +178,14 @@ describe("record：检查先于副作用（§3，E5/E7/E21/E24）", () => {
     expect(await record(env, { content_id: c.id, kind: "chatcut_project", chatcut_project_id: "p1", uses_aroll: "{{{", request_id: "r4" })).toMatchObject({ ok: false, code: "bad_param" });
   });
 
-  it("kind=publish：模型报的发布回执记成待核，不动阶段（§6，§13-E）", async () => {
+  // 2026-10-11 起带本平台链接的直接认（verified:true）；只给作品 id 的仍待核
+  it("kind=publish：只给作品 id 记成待核；带本平台链接直接认（§6，§13-E，2026-10-11）", async () => {
     const c = await videoContent(env, TITLE);
     expect(await record(env, { content_id: c.id, kind: "publish", request_id: "r0" })).toMatchObject({ ok: false, code: "bad_param" });
-    const r = await record(env, { content_id: c.id, kind: "publish", platform: "douyin", url: "https://v.douyin.com/abc", request_id: "r1" });
-    expect(r).toMatchObject({ ok: true, kind: "publish", verified: false });
-    expect((await readProductionDoc(c.id, env.dir))!.facts).toMatchObject([{ kind: "publish", verified: false, pub_state: "reviewing" }]);
+    expect(await record(env, { content_id: c.id, kind: "publish", platform: "douyin", item_id: "7001", request_id: "r1" })).toMatchObject({ ok: true, kind: "publish", verified: false });
+    expect(await record(env, { content_id: c.id, kind: "publish", platform: "douyin", url: "https://v.douyin.com/abc", request_id: "r2" })).toMatchObject({ ok: true, kind: "publish", verified: true });
+    expect((await readProductionDoc(c.id, env.dir))!.facts).toMatchObject([{ kind: "publish", pub_state: "reviewing" }, { kind: "publish", pub_state: "reviewing", url: "https://v.douyin.com/abc" }]);
+    expect(await record(env, { content_id: c.id, kind: "publish", platform: "douyin", pub_state: "scheduled", request_id: "r3" })).toMatchObject({ ok: false, code: "bad_param" });
   });
 });
 
@@ -283,7 +308,7 @@ describe("record 与阶段：只报事实，不带批准", () => {
     await writeEnabledVersion(env.dir);
     const c = await videoContent(env, TITLE);
     const r = await record(env, { content_id: c.id, kind: "aroll", path: await put(path.join(env.inbox, "AI又忘了怎么办-原片.mov"), "x"), request_id: "r1" });
-    expect(r).toMatchObject({ ok: true, stage: "写稿中", badges: ["已有 A-roll，等你认稿"] });
+    expect(r).toMatchObject({ ok: true, stage: "写稿中", badges: ["已有原片，等你认稿"] });
     expect((await getContent(c.id, env.dir))!.status).toBe("draft_ready");
   });
 });

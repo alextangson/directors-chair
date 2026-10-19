@@ -14,13 +14,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { dimensionsOf, type ImageFormat } from "../../research/fetch-image.js";
 import { COVER_ROLES, type ArtifactEntry, type StoredExecution } from "./execution-index.js";
-import { sha256File } from "./manifest.js";
+import { cachedSha, unsettled } from "../../production/hash-cache.js";
 
 const COVER_DIR = "05-cover";
 const VERSION_DIR = /^v0*(\d+)$/i;
 const FORMATS: Record<string, ImageFormat> = { ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".webp": "webp" };
 const HEADER_BYTES = 256 * 1024;
-const hashCache = new Map<string, { key: string; sha256: string }>();
 
 export function coverRole(width: number, height: number): string | null {
   if (!(width > 0 && height > 0)) return null;
@@ -41,25 +40,18 @@ async function readHeader(file: string): Promise<Buffer> {
   }
 }
 
-async function cachedSha(file: string, size: number, mtimeMs: number): Promise<string> {
-  const key = `${size}:${Math.trunc(mtimeMs)}`;
-  const hit = hashCache.get(file);
-  if (hit?.key === key) return hit.sha256;
-  const sha256 = await sha256File(file);
-  hashCache.set(file, { key, sha256 });
-  return sha256;
-}
-
 /**
  * 清单里列出的文件名；没有清单或读不懂 → null（退回扫整个文件夹）。
  * 按文件名认、不按整条路径认：Codex 写的是绝对路径，资料库一搬家（09-27 从 ~/Documents 迁出、
  * 以后归档 NAS）整条路径就对不上了。只认本版本文件夹里真实存在的同名文件，清单指向别处的一律不算。
  */
-async function manifestNames(dir: string): Promise<Set<string> | null> {
+async function manifestNames(dir: string): Promise<Set<string> | null | "broken"> {
+  let text: string;
+  try { text = await fs.readFile(path.join(dir, "cover-manifest.json"), "utf8"); } catch { return null; }
   let raw: unknown;
-  try { raw = JSON.parse(await fs.readFile(path.join(dir, "cover-manifest.json"), "utf8")); } catch { return null; }
+  try { raw = JSON.parse(text); } catch { return "broken"; }
   const outputs = (raw as { outputs?: Array<{ path?: unknown }> })?.outputs;
-  if (!Array.isArray(outputs)) return null;
+  if (!Array.isArray(outputs)) return "broken";
   return new Set(outputs.filter((o) => typeof o?.path === "string").map((o) => path.basename(o.path as string)));
 }
 
@@ -67,18 +59,23 @@ async function coverEntry(projectRoot: string, file: string, version: number, ge
   const format = FORMATS[path.extname(file).toLowerCase()];
   if (!format) return null;
   const st = await fs.lstat(file).catch(() => null);
-  if (!st?.isFile()) return null;
+  // 一分钟内还在变（还在导出 / 拷贝）：这轮不收，下一轮再看
+  if (!st?.isFile() || unsettled(st.mtimeMs)) return null;
   const dims = dimensionsOf(format, await readHeader(file));
   const role = dims ? coverRole(dims.width, dims.height) : null;
   if (!role) return null;
   return {
-    path: path.relative(projectRoot, file), sha256: await cachedSha(file, st.size, st.mtimeMs), role, version, generation,
+    path: path.relative(projectRoot, file), sha256: (await cachedSha(file)).sha256, role, version, generation,
     reported_at: new Date(st.mtimeMs).toISOString(), size: st.size, mtime_ms: Math.trunc(st.mtimeMs),
   };
 }
 
 /** 05-cover/vNNN/ 下的封面，按版本从旧到新 */
-export async function scanCoverFolder(projectRoot: string, generation: number): Promise<ArtifactEntry[]> {
+/**
+ * `strict`（本体对账，review-inbox §6.2）：清单在但读不懂 → 这一版报错（进 `errors`），不退回扫整个目录。
+ * 旧交接的工作台照旧宽松（清单坏了当没有）。
+ */
+export async function scanCoverFolder(projectRoot: string, generation: number, opts: { strict?: boolean; errors?: string[] } = {}): Promise<ArtifactEntry[]> {
   const base = path.join(projectRoot, COVER_DIR);
   const dirs = await fs.readdir(base, { withFileTypes: true }).catch(() => []);
   const versions = dirs
@@ -87,7 +84,9 @@ export async function scanCoverFolder(projectRoot: string, generation: number): 
     .sort((a, b) => a.version - b.version);
   const out: ArtifactEntry[] = [];
   for (const { dir, version } of versions) {
-    const listed = await manifestNames(dir);
+    const got = await manifestNames(dir);
+    if (got === "broken" && opts.strict) { opts.errors?.push(`${path.relative(projectRoot, dir)}/cover-manifest.json 读不懂，这一版封面没收：修好清单或删掉它`); continue; }
+    const listed = got === "broken" ? null : got;
     const names = (await fs.readdir(dir)).filter((n) => !listed || listed.has(n)).sort();
     for (const name of names) {
       const entry = await coverEntry(projectRoot, path.join(dir, name), version, generation);

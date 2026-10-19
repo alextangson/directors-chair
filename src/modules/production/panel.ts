@@ -4,7 +4,11 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
-import { getContent } from "../../storage/local-store.js";
+import { getContent, LOCAL_HOST, type Content } from "../../storage/local-store.js";
+import { noOriginalPlace, undoBlocker } from "./undo-attach.js";
+import { candidateRow, originOf, type CandidateRow, type SourceDirs } from "./candidate-view.js";
+import type { Fact } from "../../storage/production-types.js";
+import { movableRoots } from "./roots.js";
 import { contentRoot } from "../../storage/content-project.js";
 import { isOntologyActive, readProductionDocOrEmpty } from "../../storage/production-store.js";
 import { isVideoPlatform } from "../../storage/stage-guard.js";
@@ -16,11 +20,19 @@ import { explainContent } from "./read.js";
 import { isUngated } from "./publish-check-link.js";
 import { currentCut } from "./sliver/check.js";
 import { storyboardPanel } from "./storyboard.js";
+import { markedCuts } from "./ready.js";
+import { draftRef } from "./inbox.js";
+import { readInbox } from "./inbox-read.js";
+import { isStrayCover } from "./plain-reason.js";
+import { hostLabel } from "./host-label.js";
+import { readPublishRecord } from "../../storage/publish-record.js";
+import { publishTargets } from "./targets.js";
 import { NO_RESULT, sliverKey, sliverVerdict, sliverWaived } from "./sliver/verdict.js";
 
 /** 这个槽的状态由谁定：给创始人看的来源说法 */
 function slotLabel(w: Slot): string {
   if (w.by === "founder") return w.source === "founder" && w.fact_id ? "你确认过 AI 说的发布" : "你标了已发布";
+  if (w.by === "accepted") return `${hostLabel(w.host)} ${w.pub_state === "scheduled" ? "报已定时" : "报已发布"}`;
   if (w.source === "metrics_id") return "数据回流按作品 id 对上";
   return "发布计划里的记录";
 }
@@ -57,15 +69,88 @@ function sliverPanel(doc: ProductionDoc, approvedSha: string | undefined): Recor
   };
 }
 
+/** 本轮 accepted 原片（1b §4.1）：能撤就给「不是这条」；前提不满足时不给按钮，给原因（「这条已经在剪了…」） */
+/** 这段原片是怎么来的（人话）：自动挂的、创始人从哪儿确认的、agent 报的、创始人挂的 */
+function arollOrigin(f: Fact, doc: ProductionDoc, dirs: SourceDirs): string {
+  if (f.auto_attached) return f.source === "reconcile" ? "收件箱自动挂上" : "核对后自动挂上";
+  if (f.source === "founder") return "你挂的";
+  if (f.source === "record") return "agent 报的";
+  const confirmed = doc.decisions.some((d) => d.type === "candidate_confirm" && d.fact_id === f.id);
+  const where = originOf({ ...f, path: f.source_path ?? f.path }, dirs);
+  const known = where === "收件箱" || where.endsWith("导出");
+  return confirmed ? (known ? `你从${where}确认的` : "你确认的") : where;
+}
+
+async function arollRows(content: Content, doc: ProductionDoc, dataDir: string, dirs: SourceDirs): Promise<Array<Record<string, unknown>>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const f of doc.facts.filter((x) => x.round === doc.round && x.kind === "aroll" && x.state === "accepted")) {
+    const blocked = undoBlocker(content, doc, f);
+    const noHome = await noOriginalPlace(content, f, dataDir);
+    out.push({ fact_id: f.id, sha256: f.sha256, path: f.path, name: path.basename(f.source_path ?? f.path ?? ""), origin: arollOrigin(f, doc, dirs),
+      duration_ms: f.duration_ms ?? null, at: f.at, auto_attached: f.auto_attached === true, source_path: f.source_path ?? null,
+      undo_blocked: noHome ?? blocked });
+  }
+  return out;
+}
+
+async function sourceDirs(dataDir: string): Promise<SourceDirs> {
+  const roots = await movableRoots(dataDir);
+  return { inbox: roots.inbox, chatcut: roots.chatcut, jianying: roots.jianying };
+}
+
+async function candidateRows(contentId: string, doc: ProductionDoc, dataDir: string): Promise<CandidateRow[]> {
+  const dirs = await sourceDirs(dataDir);
+  // 列表列不列它由「等你拍板」自己说了算（整分支审 16 P2）：不在这里重抄一遍规则
+  const listed = new Set((await readInbox(dataDir, { contentId })).items.filter((i) => i.type === "candidate").map((i) => String(i.detail.fact_id)));
+  return doc.facts.filter((f) => f.round === doc.round && (f.state === "candidate" || f.state === "pending_match") && !isStrayCover(f))
+    .sort((a, b) => b.at.localeCompare(a.at)).map((f) => ({ ...candidateRow(f, contentId, dirs), in_inbox: listed.has(f.id) }));
+}
+
+/**
+ * B7：本轮有收下的成片、却没有一版被 agent 标「可以审了」（也还没通过）→ 卡上说「有 N 个导出，X 还没说可以审了」，
+ * 给创始人「我现在就要审」。
+ */
+function unreviewedExports(doc: ProductionDoc, approvedSha: string | undefined): { count: number; editor_label: string } | null {
+  if (approvedSha || markedCuts(doc).length) return null;
+  const cuts = doc.facts.filter((f) => f.round === doc.round && f.kind === "cut" && f.state === "accepted" && !f.replaced_at);
+  if (!cuts.length) return null;
+  return { count: cuts.length, editor_label: hostLabel(cuts.map((f) => f.by?.host).filter(Boolean).at(-1)) };
+}
+
+function strayCovers(doc: ProductionDoc): { count: number } | null {
+  const n = doc.facts.filter((f) => f.round === doc.round && isStrayCover(f)).length;
+  return n ? { count: n } : null;
+}
+
+const HOUR_MS = 3600_000;
+
+/** 「AI 在做」只在认领租约有效且最近有写入时才说（吸收 15）；否则说 AI 已 N 小时没动静 */
+export function claimView(content: Content): { host: string; live: boolean; lease_ok: boolean; idle_hours: number | null } | null {
+  const c = content.claim;
+  // 创始人自己（local-user）占着不是「AI 在做」
+  if (!c || c.host === LOCAL_HOST) return null;
+  const leaseOk = Date.parse(c.leaseUntil) > Date.now();
+  const idle = Math.floor((Date.now() - Date.parse(c.lastWriteAt ?? content.updatedAt)) / HOUR_MS);
+  return { host: hostLabel(c.host), live: leaseOk && idle < 2, lease_ok: leaseOk, idle_hours: Number.isFinite(idle) ? idle : null };
+}
+
+import { handoffView } from "./handoff-view.js";
+
 export async function cardPanel(contentId: string, dataDir: string): Promise<Record<string, unknown>> {
   const content = await getContent(contentId, dataDir);
   if (!content || content.deletedAt) return { ok: false, code: "not_found", error: "这条稿不在了" };
   const active = isVideoPlatform(content.platform) && (await isOntologyActive(dataDir, contentId));
   const exp = await explainContent(content, dataDir);
-  const base = { ok: true, id: content.id, title: content.title, platform: content.platform ?? null, status: content.status, active,
-    column: exp.column, stage: exp.stage, reason: exp.reason, missing: exp.missing, badges: exp.badges, alerts: exp.alerts, candidates: exp.candidates };
-  if (!active) return base;
+  // 卡片上「稿子没问题」要带它：创始人看到的那一版（别的会话改过正文就对不上，服务端拒）
+  const draft = draftRef(content);
   const doc = await readProductionDocOrEmpty(contentId, dataDir);
+  const record = isVideoPlatform(content.platform) ? await readPublishRecord(content.id, content.manualPublications, dataDir) : null;
+  const base = { ok: true, ...(draft ? { draft_item: draft } : {}), id: content.id, title: content.title, platform: content.platform ?? null, status: content.status, active,
+    column: exp.column, stage: exp.stage, reason: exp.reason, missing: exp.missing, badges: exp.badges, alerts: exp.alerts, candidates: exp.candidates,
+    // 一条视频一张卡：各平台状态与剩下的动作（吸收 4）；只有回执没认稿 = 只提醒
+    targets: publishTargets(content, doc, record, active), no_script_approval: exp.no_script_approval === true,
+    claim: claimView(content), ...(handoffView(content) ? { handoff: handoffView(content) } : {}) };
+  if (!active) return base;
   const receipts = publishReceipts(doc);
   // 一行 = 一个平台的发布槽（本轮每个平台只有一个）；纠正指向槽 id；按真实时间新的在前
   const published = receipts.live.map((w) => ({ id: w.id, kind: "slot", platform: w.platform, url: w.url ?? null, work: w.item_id ?? null,
@@ -76,13 +161,20 @@ export async function cardPanel(contentId: string, dataDir: string): Promise<Rec
   const checklist = checklistRel && (await fs.stat(path.join(contentRoot(contentId, dataDir), checklistRel)).then(() => true, () => false)) ? checklistRel : null;
   const cut = validCutApproval(doc, content.body), cover = validCoverApproval(doc, content.body);
   return {
-    ...base, round: doc.round,
+    ...base, round: doc.round, arolls: await arollRows(content, doc, dataDir, await sourceDirs(dataDir)), candidate_rows: await candidateRows(content.id, doc, dataDir),
     pending_receipts: receipts.pending.map((w) => ({ fact_id: w.fact_id, slot_id: w.id, platform: w.platform, url: w.url ?? (w.item_id ? `作品 ${w.item_id}` : null), host: w.source === "claim" ? w.host ?? "AI" : "数据回流" })),
     published,
     approvals: { cut: cut ? { id: cut.id, sha256: cut.sha256 } : null, cover: cover ? { id: cover.id } : null },
     slivers: sliverPanel(doc, cut?.sha256),
+    unreviewed: unreviewedExports(doc, cut?.sha256),
+    // 正式封面文件夹以外的封面图（多半是中间文件）：只在制作中的稿卡上收成一行，给「都不要」；已发布的不提
+    stray_covers: exp.stage && exp.stage !== "已发布" ? strayCovers(doc) : null,
     storyboard: await storyboardPanel(contentId, dataDir, doc),
     checklist,
+    // 卡上的恢复动作（吸收 15）：登记的文件不见了 → 找回后重新核对；登记没写成 → 重试登记
+    recovery: exp.alerts.includes("文件不见了") ? { kind: "files_missing", reason: exp.reason }
+      // 只在 D3（成片、封面批准都有效、卡在登记）时给重试；批准被撤了要的是重新审，不是重试
+      : doc.commit_failure?.round === doc.round && exp.rule === "D3" && cut && cover ? { kind: "registration_failed", reason: doc.commit_failure.reason } : null,
     // 已发布的也能重开（创始人 09-30），确认框单独说明；published = 这张卡现在是已发布
     can_reopen: doc.facts.some((f) => f.round === doc.round && f.state === "accepted") || doc.decisions.some((d) => d.round === doc.round && d.type === "script_approval"),
     published_now: receipts.live.length > 0 || content.status === "published",

@@ -11,3 +11,12 @@ vi.mock("../modules/video/handoff/desktop-open.js", () => ({
   benchReachable: async () => false,
   mediaDuration: async () => null,
 }));
+
+// 转写器（认稿比对用）：测试里永远「没就绪」，绝不真跑 ffmpeg / FunASR。
+vi.mock("../modules/production/match/transcribe.js", async (importActual) => ({
+  ...(await importActual<typeof import("../modules/production/match/transcribe.js")>()),
+  funasrTranscriber: () => ({
+    transcribe: async () => ({ ok: false, unavailable: true, reason: "测试里不跑转写" }),
+    notReady: async () => "测试里不跑转写",
+  }),
+}));

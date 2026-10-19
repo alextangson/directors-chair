@@ -13,6 +13,8 @@
  * 不再混读口播稿的标题、标签和正文（P6 §3.6）。另有 action=video_kit：宿主交发布包，只校验与保存。
  */
 import { Type } from "@sinclair/typebox";
+import { historyGuard } from "./history-guard.js";
+import { historyRefusal } from "../storage/imported-history.js";
 import {
   getContent,
   getCoverReview,
@@ -32,9 +34,17 @@ import { editorialDraftHash } from "./editorial.js";
 import { getPlatformRules } from "../modules/writing/title-hashtag.js";
 import { COVER_TEXT_MAX, publishTitleChars, videoTitleLimit } from "../modules/publish/video-kit.js";
 import { isModelCall, isVideoPlatform, VIDEO_PLATFORMS } from "../storage/stage-guard.js";
-import { KIT_BEHIND_REGISTER, kitBehindRegister, kitRegisterHash } from "../modules/publish/kit-stale.js";
+import { kitRegisterHash } from "../modules/publish/kit-stale.js";
 import { ontologyApplies, registeredPackage } from "../modules/production/publish-gate.js";
-import { captionBounds, captionTags, KIT_CAPTION_MIN, mergeTags, PLATFORM_MAX_BODY, PLATFORM_MIN_BODY } from "../modules/publish/publish-limits.js";
+import { predictionPrompt } from "../modules/calibration/prompt.js";
+import { captionBounds, mergeTags, PLATFORM_MAX_BODY, PLATFORM_MIN_BODY } from "../modules/publish/publish-limits.js";
+import { SELF_WRITTEN, validateTitleChoice, type TitleChoice } from "../modules/writing/title-methods.js";
+import { kitTitleAdvisories, titleMethodsAction } from "../modules/writing/title-method-stats.js";
+import type { TitleMethod } from "../modules/writing/title-method-library.js";
+import { activeTitleMethods } from "../modules/calibration/title-library.js";
+import { maybeJson } from "../modules/publish/review-gate/plan.js";
+import { kitLimitsText, publishSurface, staleKit, targetPlatform, type PublishSurface } from "./pre-publish-kit.js";
+import { putVideoKit } from "../storage/video-kits.js";
 
 // --- Types ---
 
@@ -72,15 +82,7 @@ const COVER_REQUIRED_PLATFORMS = new Set(["xiaohongshu", "xhs", "douyin", "wecha
 
 // --- Schema ---
 
-const ACTIONS = ["check", "video_kit"] as const;
-
-/** 各视频平台的上限直接从常量拼进工具说明，数字只有一份，不会说明写 20、代码判 22 */
-function kitLimitsText(): string {
-  const platforms = [...VIDEO_PLATFORMS];
-  const titles = platforms.map((p) => `${p} ${videoTitleLimit(p)}`).join(" / ");
-  const captions = platforms.map((p) => `${p} ${PLATFORM_MAX_BODY[p] ?? "不设"}`).join(" / ");
-  return `post_title 上限：${titles}（中文 1 字、英文数字半字、空格不计）；caption ≥${KIT_CAPTION_MIN} 字，上限：${captions}；cover_text ≤${COVER_TEXT_MAX} 字`;
-}
+const ACTIONS = ["check", "video_kit", "title_methods"] as const;
 
 export const prePublishSchema = Type.Object({
   action: Type.Unsafe<(typeof ACTIONS)[number]>({
@@ -88,10 +90,11 @@ export const prePublishSchema = Type.Object({
     enum: [...ACTIONS],
     description:
       "check = 跑发布前检查（全过自动推进到待发布）。video_kit = 宿主交视频发布包（发布标题/简介/封面大字），" +
-      "产品只校验并保存，不调模型；稿件之后再改，发布包作废，check 报 kit_stale。",
+      "产品只校验并保存，不调模型；稿件之后再改，发布包作废，check 报 kit_stale。" +
+      "title_methods = 读发布标题方法库（写 post_title 前先读）与按方法汇总的试用期统计。",
   }),
-  content_id: Type.String({ description: "AutoCrew content id." }),
-  platform: Type.Optional(Type.String({ description: "video_kit 必填，须等于稿件平台。" })),
+  content_id: Type.Optional(Type.String({ description: "AutoCrew content id；check、video_kit 必填，title_methods 不需要。" })),
+  platform: Type.Optional(Type.String({ description: "video_kit 必填：要发的视频平台。同一条视频发多平台共用一条稿，每个平台各交一份包、各跑一次 check（check 不带时按稿件平台）；文字稿只能是稿件平台。" })),
   kit: Type.Optional(Type.Object({
     post_title: Type.String({ description: "平台发布标题，独立于口播稿标题，按平台习惯重拟、自带钩子。" }),
     caption: Type.String({ description: "平台发布简介，可直接粘贴；是让刷到的人停下的文案，不是口播稿摘要。" }),
@@ -99,7 +102,11 @@ export const prePublishSchema = Type.Object({
     hashtags: Type.Optional(Type.Array(Type.String(), {
       description: "话题标签（不带空格）。caption 里还没有的会并到 caption 末尾，字数按合并后的简介算。",
     })),
-  }, { description: `video_kit 必填。${kitLimitsText()}。` })),
+    title_candidates: Type.Optional(Type.Array(Type.Unknown(), {
+      description: "3 个四平台通用标题候选 [{title, method, reason}]，分属方法库 3 个不同类（方法库见 action=title_methods）。",
+    })),
+    title_method: Type.Optional(Type.String({ description: `本平台 post_title 用的方法 id；创始人自己写的填「${SELF_WRITTEN}」。` })),
+  }, { description: `video_kit 必填。${kitLimitsText()}。标题先按方法库出 3 个通用候选给创始人挑，再按平台落成 post_title。` })),
   claim_token: Type.Optional(Type.String({ description: "video_kit 与会推进到待发布的 check 是写：这篇有活认领时必须带令牌（pack 或 autocrew_desk claim 回的），同宿主的另一个会话也一样。" })),
 });
 
@@ -129,48 +136,6 @@ async function runAutoTransition(contentId: string, dataDir?: string, modelCall 
 }
 
 // --- 实际发布文本（P6 §3.6：预检读发出去的那份，不混读口播稿） ---
-
-interface PublishSurface {
-  /** true = 视频平台且有本平台发布包，标题/简介/标签都从发布包取 */
-  fromKit: boolean;
-  title: string;
-  text: string;
-  hashtags: string[];
-}
-
-/** 与剪贴板 / ego-lite 同口径：有发布包发的是发布包（没填发布标题才退回稿件标题），标签只算简介里的 */
-function publishSurface(content: Content, platform: string): PublishSurface {
-  const kit = content.videoKit;
-  if (isVideoPlatform(platform) && kit?.platform === platform && kit.caption?.trim()) {
-    return { fromKit: true, title: kit.postTitle?.trim() || content.title || "", text: kit.caption, hashtags: captionTags(kit.caption) };
-  }
-  return { fromKit: false, title: content.title || "", text: content.body || "", hashtags: content.hashtags || [] };
-}
-
-function videoKitNextAction(content: Content): Record<string, unknown> {
-  const platform = content.platform || "";
-  return {
-    tool: "autocrew_pre_publish",
-    params: { action: "video_kit", content_id: content.id, platform },
-    required_input: "kit",
-    message: `读当前稿，按平台重拟 kit{post_title, caption, cover_text, hashtags?}。${kitLimitsText()}。`,
-  };
-}
-
-/** 发布包带指纹且与当前稿对不上 = 按旧稿做的；旧发布包没有指纹，不判过期 */
-function staleKit(content: Content, platform: string): PrePublishFailure | null {
-  const kit = content.videoKit;
-  if (!isVideoPlatform(platform) || kit?.platform !== platform) return null;
-  if (kitBehindRegister(content, kit)) return { ok: false, code: "kit_stale", error: KIT_BEHIND_REGISTER, next_action: videoKitNextAction(content) };
-  if (!kit.draftHash) return null;
-  if (kit.draftHash === editorialDraftHash(content)) return null;
-  return {
-    ok: false,
-    code: "kit_stale",
-    error: "视频发布包是按旧稿做的（稿件后来改过），标题和简介可能对不上新稿：按当前稿重做发布包，再跑发布前检查",
-    next_action: videoKitNextAction(content),
-  };
-}
 
 function hashtagCheck(surface: PublishSurface, platform: string): CheckItem {
   const name = "Hashtags";
@@ -235,7 +200,7 @@ function overLimitFix(surface: PublishSurface, platform: string): string {
   if (!isVideoPlatform(platform)) return "编辑器里选段用「缩写」压缩，或 autocrew_rewrite 精简正文";
   // 视频稿的正文是口播全文，超限不该压缩它——该做的是交发布包，预检改按发布简介校验
   return `先交视频发布包：autocrew_pre_publish action='video_kit' {content_id, platform:'${platform}', ` +
-    "kit:{post_title, caption, cover_text, hashtags?}}，预检改按发布简介校验；不要压缩口播全文";
+    "kit:{post_title, caption, cover_text, hashtags?, title_candidates, title_method}}，预检改按发布简介校验；不要压缩口播全文";
 }
 
 // --- video_kit：宿主交发布包（P6 §3.6，host-first，不调模型） ---
@@ -256,8 +221,9 @@ function readTags(raw: unknown, failures: KitFailure[]): string[] {
   return bad.length > 0 ? [] : [...new Set(tags)];
 }
 
-function validateKit(raw: unknown, platform: string): { failures: KitFailure[]; fields: KitFields } {
-  const obj = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+function validateKit(raw: unknown, platform: string, lib: TitleMethod[]): { failures: KitFailure[]; fields: KitFields; title: TitleChoice } {
+  const parsed = maybeJson(raw);
+  const obj = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
   const text = (key: string) => (typeof obj[key] === "string" ? (obj[key] as string).trim() : "");
   const failures: KitFailure[] = [];
   const postTitle = text("post_title");
@@ -274,18 +240,21 @@ function validateKit(raw: unknown, platform: string): { failures: KitFailure[]; 
   const coverText = text("cover_text");
   if (!coverText) failures.push({ field: "cover_text", detail: "缺封面大字：一眼能读完的一句话" });
   else if (coverText.length > COVER_TEXT_MAX) failures.push({ field: "cover_text", detail: `${coverText.length} 字，超出 ${COVER_TEXT_MAX}：封面大字要一眼读完，压缩后重交` });
-  return { failures, fields: { postTitle, caption, coverText } };
+  const title = validateTitleChoice(obj.title_candidates, obj.title_method, lib);
+  return { failures: [...failures, ...title.failures], fields: { postTitle, caption, coverText }, title: title.choice };
 }
 
-/** 平台与稿件的前置核对：发布包按平台定字数，存错平台等于拿别的平台的规矩放行 */
-function kitPlatformError(content: Content, requested: unknown): Record<string, unknown> | null {
-  const platform = content.platform || "";
-  if (!isVideoPlatform(platform)) {
-    return { ok: false, code: "not_video_platform", error: `视频发布包只服务视频平台（${[...VIDEO_PLATFORMS].join(" / ")}），这篇是 ${platform || "未知平台"}` };
+/** 平台前置核对：发布包按平台定字数，必须明说是哪个视频平台；视频稿四平台共用一条稿 */
+function kitPlatform(content: Content, requested: unknown): string | Record<string, unknown> {
+  const own = content.platform || "";
+  if (!isVideoPlatform(own)) {
+    return { ok: false, code: "not_video_platform", error: `视频发布包只服务视频平台（${[...VIDEO_PLATFORMS].join(" / ")}），这篇是 ${own || "未知平台"}` };
   }
-  if (requested === platform) return null;
-  const got = typeof requested === "string" && requested ? requested : "空";
-  return { ok: false, code: "platform_mismatch", error: `platform 必须等于稿件平台 ${platform}（收到 ${got}）`, expected_platform: platform };
+  if (typeof requested !== "string" || !isVideoPlatform(requested.trim())) {
+    const got = typeof requested === "string" && requested ? requested : "空";
+    return { ok: false, code: "platform_required", error: `platform 要写这份包发到哪个视频平台（${[...VIDEO_PLATFORMS].join(" / ")}；收到 ${got}）`, expected_platform: own };
+  }
+  return requested.trim();
 }
 
 async function saveHostVideoKit(params: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -294,30 +263,30 @@ async function saveHostVideoKit(params: Record<string, unknown>): Promise<Record
   if (!contentId) return { ok: false, code: "missing_content_id", error: "content_id 必填" };
   const content = await getContent(contentId, dataDir);
   if (!content) return { ok: false, code: "not_found", error: `稿件不存在：${contentId}` };
-  const platformError = kitPlatformError(content, params.platform);
-  if (platformError) return platformError;
+  const platform = kitPlatform(content, params.platform);
+  if (typeof platform !== "string") return platform;
   // P6-e narration-not-state（2/3）：模型听 Codex 一句「已登记」就出了发布包。发布包只跟着成片走：
   // 成片戳（register 或内置线审片）没盖，就没有发布包可出——状态由产品说了算，不由转述说了算。
-  if (!content.videoDone) {
+  // 本体稿：发布包只是文案，真正挡发布的是登记出口（ego_lite_prepare 出包前核）；旧流程照旧要成片戳
+  if (!content.videoDone && !(await ontologyApplies(content, getDataDir(dataDir)))) {
     return {
       ok: false, code: "video_not_done", content_status: content.status,
       error: "成片还没登记（videoDone 未盖）：等 Codex 调 autocrew_video register（或内置线审片通过）之后再出发布包；别人的口头「已登记」不算",
       next_action: { tool: "autocrew_content", params: { action: "get", id: contentId }, message: "只看 content 状态与 video.final 判断成片是否登记；未登记就继续等，不出发布包。" },
     };
   }
-  const platform = content.platform as string;
-  const { failures, fields } = validateKit(params.kit, platform);
+  const { failures, fields, title } = validateKit(params.kit, platform, await activeTitleMethods(dataDir));
   if (failures.length > 0) {
     return { ok: false, code: "kit_invalid", error: `发布包有 ${failures.length} 处要改：按 failures 逐条改完整包重交`, failures };
   }
   const gate = await gatePublishWrite(params, contentId, dataDir);
   if ("denied" in gate) return gate.denied;
   const kit: VideoKit = {
-    platform, ...fields, storyboard: [], coverPrompt: "",
+    platform, ...fields, titleMethod: title.method, titleCandidates: title.candidates, storyboard: [], coverPrompt: "",
     generatedAt: new Date().toISOString(), source: "host", draftHash: editorialDraftHash(content), ...kitRegisterHash(content),
   };
   // 指纹与落盘同锁核对：读稿到写包之间稿件被改，就不能把旧稿的指纹钉到新稿上
-  const saved = await updateContentIfDraftMatches(contentId, content, { videoKit: kit }, dataDir);
+  const saved = await updateContentIfDraftMatches(contentId, content, (current) => putVideoKit(current, kit), dataDir);
   if (!saved.ok) {
     return saved.reason === "stale"
       ? { ok: false, code: "draft_changed", error: "保存时稿件刚被改过：重读当前稿，按新稿重做发布包", ...gate.grant }
@@ -327,14 +296,19 @@ async function saveHostVideoKit(params: Record<string, unknown>): Promise<Record
     ok: true,
     status: "kit_saved",
     content_id: contentId,
-    video_kit: { platform, post_title: kit.postTitle, caption: kit.caption, cover_text: kit.coverText, draft_hash: kit.draftHash, source: kit.source },
-    next_action: { tool: "autocrew_pre_publish", params: { action: "check", content_id: contentId } },
+    video_kit: { platform, post_title: kit.postTitle, caption: kit.caption, cover_text: kit.coverText, title_method: kit.titleMethod, draft_hash: kit.draftHash, source: kit.source },
+    ...(await kitTitleAdvisories(kit.postTitle, content.body || "", dataDir)),
+    next_action: { tool: "autocrew_pre_publish", params: { action: "check", content_id: contentId, platform } },
+    calibration: predictionPrompt(contentId), // 判断要对账 §二：交发布包时先盲预测
     ...gate.grant,
   };
 }
 
 /** MCP 入口按 action 分派；GUI 与发布门只跑 check，直接调 executePrePublish */
 export async function executePrePublishTool(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const history = await historyGuard(params.content_id, (params._dataDir as string) || undefined);
+  if (history) return history;
+  if (params.action === "title_methods") return titleMethodsAction(params);
   return params.action === "video_kit" ? saveHostVideoKit(params) : executePrePublish(params);
 }
 
@@ -348,9 +322,17 @@ export async function executePrePublish(params: Record<string, unknown>): Promis
 
   const content = await getContent(contentId, dataDir);
   if (!content) return { ok: false, error: `Content ${contentId} not found` };
+  // GUI 与发布门直接调这里，不经 executePrePublishTool
+  const history = historyRefusal(content);
+  if (history) return { ok: false, code: "imported_history", error: history };
 
-  const platform = content.platform || "";
-  const stale = staleKit(content, platform);
+  const target = targetPlatform(content, params.platform);
+  if (typeof target !== "string") return target;
+  const platform = target;
+  // 本体视频稿出包（_ontologyGated 只由 ToolRunner 带，参数本身不可信，要这条真按本体走）：
+  // 标题 / 标签 / 字数按发布计划在 autocrew_publish check 里核，这里不再按旧稿件 / 旧发布包重复拦
+  const ontologyGated = params._ontologyGated === true && COVER_REQUIRED_PLATFORMS.has(platform) && (await ontologyApplies(content, getDataDir(dataDir)));
+  const stale = ontologyGated ? null : staleKit(content, platform);
   if (stale) return stale;
   const surface = publishSurface(content, platform);
   const checks: CheckItem[] = [];
@@ -391,8 +373,6 @@ export async function executePrePublish(params: Record<string, unknown>): Promis
 
   // --- Check 2: Cover review (all video platforms) ---
   // 启用本体的稿出包（_ontologyGated，只由 ToolRunner 内部带）：封面由登记记录 + 发布前把关（槽位 / 登记那一对）核，旧封面审核不再适用
-  // 参数本身不可信（模型也能带下划线参数）：只有这条真按本体走才生效
-  const ontologyGated = params._ontologyGated === true && COVER_REQUIRED_PLATFORMS.has(platform) && (await ontologyApplies(content, getDataDir(dataDir)));
   if (ontologyGated) {
     checks.push({ name: "封面审核", status: "skip", detail: "本体稿：封面由登记记录与发布前把关核对" });
   } else if (COVER_REQUIRED_PLATFORMS.has(platform)) {
@@ -412,8 +392,9 @@ export async function executePrePublish(params: Record<string, unknown>): Promis
   }
 
   // --- Check 3: Hashtags / Check 4: Title length（有发布包读发布包） ---
-  checks.push(hashtagCheck(surface, platform));
-  checks.push(titleCheck(surface, platform));
+  const byPlan = (name: string): CheckItem => ({ name, status: "skip", detail: "本体稿：标题 / 标签 / 字数按发布计划在 autocrew_publish check 里核" });
+  checks.push(ontologyGated ? byPlan("Hashtags") : hashtagCheck(surface, platform));
+  checks.push(ontologyGated ? byPlan("标题规范") : titleCheck(surface, platform));
 
   // --- Check 5: Platform set ---
   const supportedPlatforms = ["xiaohongshu", "xhs", "douyin", "wechat_mp", "wechat_video", "bilibili"];
@@ -426,13 +407,13 @@ export async function executePrePublish(params: Record<string, unknown>): Promis
   }
 
   // --- Check 6: Body length（有发布包读发布简介） ---
-  checks.push(lengthCheck(surface, platform));
+  checks.push(ontologyGated ? byPlan("正文字数") : lengthCheck(surface, platform));
 
   // --- Check 6b: 发布出口（本体 §5）：按本体走的视频稿只发当前有效登记记录里的成片与封面 ---
-  const gated = isVideoPlatform(platform) ? await registeredPackage(content, getDataDir(dataDir)) : null;
+  const gated = isVideoPlatform(platform) ? await registeredPackage(content, getDataDir(dataDir), { fresh: true }) : null;
   if (gated) checks.push(gated.ok
     ? { name: "登记（发布出口）", status: "pass", detail: `发当前登记的成片与封面（${gated.files.registration.id}）` }
-    : { name: "登记（发布出口）", status: "fail", detail: gated.error, fix: "在工作台重新通过成片 / 封面，登记会自动完成" });
+    : { name: "登记（发布出口）", status: "fail", detail: gated.error, fix: "在对话里调 autocrew_review_inbox list，把缺的批准给创始人定；批准齐了登记会自动完成" });
 
   // --- Check 7: 阶段门（阶段制 spec §1.2/§4 #1） ---
   // 六项全过之后才谈流转。**预检不许绕过阶段门**：视频稿卡在剪辑阶段时，

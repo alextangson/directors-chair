@@ -6,18 +6,19 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
-import { listContents, type Content } from "../../storage/local-store.js";
+import type { Content } from "../../storage/local-store.js";
 import { contentRoot } from "../../storage/content-project.js";
 import { readLibraryLocation } from "../../storage/storage-roots.js";
 import type { Fact, ProductionDoc } from "../../storage/production-types.js";
-import { isVideoPlatform } from "../../storage/stage-guard.js";
-import { exportMatchesTitle } from "../video/unregistered-cut.js";
+import { l1Strong } from "./match/l1.js";
+import { admittedGroupKey, retiredGroupOfLabel, groupsOfFact, groupOfVersion, MAX_COVER_GROUPS, nextCoverVersion, slotTaken, validCoverGroups, versionLabelOf, type GroupKey } from "./cover-groups.js";
+import { arollPool } from "./match/pool.js";
+import { chatcutHold, inUseEvidence } from "./chatcut-refs.js";
 import { checkCover, checkDuration, resolveLocalFile, stableFingerprint, type FileIdentity } from "./files.js";
 import type { Parsed, RecordArgs } from "./record-args.js";
 import { classify, movableRoots, now, probe, type Location } from "./roots.js";
 import { arollOwnerElsewhere } from "./sha-index.js";
 
-export const MAX_COVER_VERSIONS = 30;
 
 export type Action = "existing" | "in_place" | "move" | "clone" | "candidate";
 
@@ -35,6 +36,8 @@ export interface FilePlan {
   ratio?: Fact["ratio"];
   version?: number;
   for_cut?: string;
+  /** cover：记进哪一组（review-inbox §6.1） */
+  group?: GroupKey;
 }
 
 const deny = <T>(code: string, error: string): Parsed<T> => ({ ok: false, code, error });
@@ -85,26 +88,68 @@ function resolveForCut(a: RecordArgs, doc: ProductionDoc): Parsed<string | undef
   return hit ? { ok: true, value: hit.sha256 } : deny("cut_required", `for_cut 对不上本轮任何一版成片：${a.for_cut}`);
 }
 
-function coverVersion(a: RecordArgs, doc: ProductionDoc): Parsed<number | undefined> {
+/**
+ * 同一文件已记过的那条事实。字幕按「文件 + 所属成片」认：两版成片字幕字节相同（同一段口播）时，
+ * 绑给别的成片的那条不算记过，另记一条给这版——否则一份字幕只能属于一版成片，新版永远缺字幕。
+ * 没绑成片的同 sha 字幕照旧复用（commitFile 补上绑定）。
+ */
+function sameFileFact(doc: ProductionDoc, kind: Fact["kind"], sha: string, forCut: string | undefined): Fact | undefined {
+  const same = inRound(doc).filter((f) => f.kind === kind && f.sha256 === sha);
+  if (kind !== "srt") return same[0];
+  return same.find((f) => f.for_cut === forCut) ?? same.find((f) => !f.for_cut) ?? same.find((f) => f.state === "rejected");
+}
+
+/**
+ * 封面落到哪一组（review-inbox §6.1）：显式成对才同组——pair_with 进那条事实的组、带 version 进那一版；
+ * 都没有 = 自成一组（新版本号），不再凭「最新一版缺哪个比例」猜。同组同比例已有活成员 → 拒。
+ */
+function coverTarget(a: RecordArgs, doc: ProductionDoc, ratio: Fact["ratio"]): Parsed<{ version: number; group: GroupKey } | undefined> {
   if (a.kind !== "cover") return { ok: true, value: undefined };
-  const versions = new Set(doc.facts.filter((f) => f.kind === "cover" && f.version).map((f) => f.version!));
-  const version = a.version ?? Math.max(0, ...versions) + 1;
-  if (!versions.has(version) && versions.size >= MAX_COVER_VERSIONS) return deny("cover_limit", `这条已经有 ${MAX_COVER_VERSIONS} 个封面版本了，先让创始人选或清掉旧版`);
-  return { ok: true, value: version };
+  const full = () => validCoverGroups(doc).length >= MAX_COVER_GROUPS
+    ? deny<never>("cover_limit", `这条已经有 ${MAX_COVER_GROUPS} 组封面了，先让创始人挑一组或在「等你拍板」里点「这组不要了」`) : null;
+  if (a.pair_with) {
+    // 单张认组只在它恰好属于一组时成立：同一张图在几组里就说不清配哪组，不猜（Codex 审 2a-1 r3 P1）
+    const hits = groupsOfFact(doc, a.pair_with);
+    if (hits.length > 1) return deny("pair_ambiguous", "这张封面在几组里都有，说不清配哪一组：用 paths 一次记一对");
+    const g = hits[0];
+    if (!g) return deny("pair_not_found", `pair_with 对不上本轮任何一组有效封面：${a.pair_with}（用 record 回执里的封面 fact_id）`);
+    if (!g.group.version) return deny("pair_not_found", "那一组在 05-cover/final/ 里：把另一张直接放进 final/ 让对账收");
+    if (ratio && slotTaken(doc, g.group, ratio)) return deny("cover_slot_taken", `那一组已经有 ${ratio} 了：换一组，或不带 pair_with 自成一组`);
+    return { ok: true, value: { version: g.group.version, group: { label: g.group.label, version: g.group.version } } };
+  }
+  if (a.version) {
+    if (retiredGroupOfLabel(doc, versionLabelOf(a.version))) return deny("cover_group_retired", `${versionLabelOf(a.version)} 那组已作废（「这组不要了」）：不带 version 放新一组`);
+    const g = groupOfVersion(doc, a.version);
+    if (g && ratio && slotTaken(doc, g, ratio)) return deny("cover_slot_taken", `${versionLabelOf(a.version)} 已经有 ${ratio} 了：换一个版本号，或用 paths 一次记一组`);
+    if (!g) { const f = full(); if (f) return f; }
+    return { ok: true, value: { version: a.version, group: { label: versionLabelOf(a.version), version: a.version } } };
+  }
+  const f = full();
+  if (f) return f;
+  const version = nextCoverVersion(doc);
+  return { ok: true, value: { version, group: { label: versionLabelOf(version), version } } };
 }
 
 /** 被 ChatCut 工程引用的原片（显式 uses_aroll）不挪（§13-A） */
-function referencedByChatcut(doc: ProductionDoc, fact: Fact | undefined): boolean {
+export function referencedByChatcut(doc: ProductionDoc, fact: Fact | undefined): boolean {
   return Boolean(fact && inRound(doc).some((f) => f.kind === "chatcut_project" && f.uses_aroll?.includes(fact.id)));
 }
 
-/** A-roll 从收件箱来：文件名前缀对上本条标题、且没对上别的在制视频稿（现有前缀规则）才算授权搬入；否则 null + 原因 */
+/**
+ * A-roll 从收件箱来（1b §3-1）：统一 L1 强命中（1a 前缀规则或 matchL1 强命中）对上本条、且比对池里没有别条也强命中，
+ * 才算授权直接搬入；否则 null 以外返回原因（交给转写核对或候选）。
+ */
 async function arollNameMiss(file: string, content: Content, dataDir: string): Promise<string | null> {
   const name = path.basename(file);
-  if (!exportMatchesTitle(name, content.title)) return `文件名「${name}」对不上标题，等创始人在卡片上确认是不是这条`;
-  const others = (await listContents(dataDir)).filter((c) => c.id !== content.id && isVideoPlatform(c.platform) && !c.deletedAt
-    && c.status !== "archived" && c.status !== "published" && exportMatchesTitle(name, c.title));
-  return others.length ? `文件名同时对得上《${others.map((c) => c.title).join("》《")}》，等创始人确认` : null;
+  const strong = (await arollPool(dataDir, content.id)).filter((p) => l1Strong(name, p.title));
+  if (!strong.some((p) => p.content_id === content.id)) return `文件名「${name}」对不上标题`;
+  const others = strong.filter((p) => p.content_id !== content.id);
+  return others.length ? `文件名同时对得上《${others.map((p) => p.title).join("》《")}》` : null;
+}
+
+/** 收件箱原片名字没对上：只记候选并说原因，等创始人在对话里说是哪条（手动收件 spec 2026-10-06：不再听开头核对） */
+function arollNotByName(miss: string, from: string): { action: Action; evidence: string } {
+  return { action: "candidate", evidence: `${from}：${miss}，等创始人说是不是这条` };
 }
 
 /**
@@ -112,13 +157,20 @@ async function arollNameMiss(file: string, content: Content, dataDir: string): P
  * 不可搬入的路径、对不上标题的收件箱原片一律只记候选，等创始人确认。
  */
 async function decideAction(a: RecordArgs, content: Content, doc: ProductionDoc, file: string, location: Location, existing: Fact | undefined, dataDir: string): Promise<Parsed<{ action: Action; evidence: string }>> {
+  // 封面统一准入（review-inbox §6.2）：项目里不在 vNNN/ 或 final/ 的图克隆进新一组，不原地收
+  if (location === "project" && a.kind === "cover" && !admittedGroupKey(path.relative(await fs.realpath(contentRoot(content.id, dataDir)), file))) return { ok: true, value: { action: "clone", evidence: "项目里其他目录的封面，克隆进这一组" } };
   if (location === "project") return { ok: true, value: { action: "in_place", evidence: "已在本条项目里" } };
   const movable = location === "inbox" || (location === "export" && a.kind !== "aroll");
   if (!movable) return { ok: true, value: { action: "candidate", evidence: `在可搬入目录之外（${path.dirname(file)}），等创始人确认` } };
   if (a.kind === "aroll") {
     const miss = await arollNameMiss(file, content, dataDir);
-    if (miss) return { ok: true, value: { action: "candidate", evidence: `原片收件箱：${miss}` } };
+    const from = "原片收件箱";
+    if (miss) return { ok: true, value: arollNotByName(miss, from) };
     if (referencedByChatcut(doc, existing)) return { ok: true, value: { action: "in_place", evidence: "收件箱原片对上标题；已被 ChatCut 工程引用，留原位不挪" } };
+    const hold = await chatcutHold(file);
+    if (hold.project) return { ok: true, value: { action: "in_place", evidence: inUseEvidence(hold.project) } };
+    // 核不了 ChatCut 引用（Codex 审 segB18 P2）：不挪，记候选并写原因
+    if (hold.unverified) return { ok: true, value: { action: "candidate", evidence: `${from}：文件名对上标题，但${hold.unverified}` } };
     return { ok: true, value: { action: "move", evidence: "收件箱里的原片，文件名对上标题" } };
   }
   return { ok: true, value: { action: "clone", evidence: location === "inbox" ? "收件箱" : "剪辑软件导出目录" } };
@@ -150,14 +202,15 @@ export async function planFileRecord(a: RecordArgs, content: Content, doc: Produ
   const library = readLibraryLocation()?.root;
   const file = await inspectFile(a, [contentRoot(content.id, dataDir), ...(library ? [library] : [])]);
   if (!file.ok) return file;
-  const existing = inRound(doc).find((f) => f.kind === a.kind && f.sha256 === file.value.sha256);
-  if (existing?.state === "rejected") return deny("rejected_before", "创始人已经说过这个文件「不是这条」，不再收");
   const forCut = resolveForCut(a, doc);
   if (!forCut.ok) return forCut;
-  const version = coverVersion(a, doc);
-  if (!version.ok) return version;
+  const existing = sameFileFact(doc, a.kind, file.value.sha256, forCut.value);
+  if (existing?.state === "rejected") return deny("rejected_before", "创始人已经说过这个文件「不是这条」，不再收");
+  const target = coverTarget(a, doc, file.value.ratio);
+  if (!target.ok) return target;
+  const version = { value: target.value?.version };
   const projectRoot = await fs.realpath(contentRoot(content.id, dataDir));
-  const base = { ...file.value, kind: a.kind, projectRoot, existing, ...(forCut.value ? { for_cut: forCut.value } : {}), ...(version.value ? { version: version.value } : {}) };
+  const base = { ...file.value, kind: a.kind, projectRoot, existing, ...(forCut.value ? { for_cut: forCut.value } : {}), ...(version.value ? { version: version.value } : {}), ...(target.value ? { group: target.value.group } : {}) };
   if (a.kind === "aroll") {
     const owner = await arollOwnerElsewhere(dataDir, file.value.sha256, content.id);
     if (owner) return deny("aroll_conflict", `这个原片已经是另一条稿（${owner}）的 A-roll，一个原片只能属于一条稿；要改挂只能创始人在卡片上确认`);

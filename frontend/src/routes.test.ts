@@ -43,7 +43,7 @@ describe("页面导航兼容", () => {
     expect(parseRouteHash(hash)).toEqual({ view: "board" });
   });
 
-  it.each(["board", "calibration", "report", "library", "logs", "campaigns", "inbox"] as const)("前后退可还原 %s", (view) => {
+  it.each(["board", "calibration", "report", "library", "logs", "playbooks", "campaigns", "inbox"] as const)("前后退可还原 %s", (view) => {
     expect(parseRouteHash(routeHash({ view }))).toEqual({ view });
   });
 
@@ -58,5 +58,17 @@ describe("页面导航兼容", () => {
   it("保留旧 /v2 入口和查询参数，稿件位置只写 hash", () => {
     expect(routeUrl({ view: "editor", id: "content-1" }, { pathname: "/v2", search: "?token=test-boot" }))
       .toBe("/v2?token=test-boot#/editor/content-1");
+  });
+});
+
+describe("看板深链到卡片（1b 验收）", () => {
+  it("旧的 #/board?card=… 深链直接打开稿件页（卡片面板已去掉）", () => {
+    expect(parseRouteHash("#/board?card=content-1-a")).toEqual({ view: "editor", id: "content-1-a" });
+    expect(routeHash({ view: "board" })).toBe("#/board");
+  });
+  it("「去『等你拍板』处理」带上要看的那类事项，能来回转换", () => {
+    expect(parseRouteHash("#/board?inbox=content-1-a&types=cut_review,sliver")).toEqual({ view: "board", inbox: "content-1-a", inboxTypes: ["cut_review", "sliver"] });
+    expect(routeHash({ view: "board", inbox: "content-1-a", inboxTypes: ["cut_review", "sliver"] } as never)).toBe("#/board?inbox=content-1-a&types=cut_review%2Csliver");
+    expect(parseRouteHash("#/board?inbox=content-1-a")).toEqual({ view: "board", inbox: "content-1-a" });
   });
 });

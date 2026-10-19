@@ -9,6 +9,7 @@ import { appendOutcomes } from "../flywheel/outcome-store.js";
 import type { PerformanceOutcome } from "../flywheel/outcome-schema.js";
 import { saveContent, getContent, saveTopic } from "../../storage/local-store.js";
 import { executeInsights } from "../../tools/insights.js";
+import { HUMAN_WRITE } from "../../storage/first-body-guard.js";
 
 let dir: string;
 const now = new Date("2026-09-26T08:00:00Z");
@@ -67,6 +68,15 @@ describe("账号洞察事实口径", () => {
     expect(JSON.stringify(p)).not.toContain("sharesPer1000Views");
   });
 
+  it("2秒跳出率/平均播放时长/粉丝播放占比进中位数，D+7 同样", async () => {
+    await appendOutcomes([
+      outcome({ publishedAt: "2026-09-01", metricDate: "2026-09-08", metrics: { views: 10, bounce2s: 39, avgWatchSeconds: 45, fanViewShare: 5 } }),
+    ], dir);
+    const facts = await gatherInsightsFacts({ days: 30 }, dir, now);
+    const want = { bounce2s: { value: 39, samples: 1 }, avgWatchSeconds: { value: 45, samples: 1 }, fanViewShare: { value: 5, samples: 1 } };
+    expect(data(facts, "platform:douyin")).toMatchObject({ cumulative: { medians: want }, exactD7: { medians: want } });
+  });
+
   it("平台分开计算，待复核不进入基线，未来快照不进入报告", async () => {
     await appendOutcomes([
       outcome({ metrics: { views: 80 } }),
@@ -90,7 +100,7 @@ describe("账号洞察事实口径", () => {
   });
 
   it("含内容与候选选题的有界样本，剥离伪造定界符，避免标题归因到不相关稿件", async () => {
-    const c = await saveContent({ title: "待写测试", body: "<<<END_EXTERNAL_CONTENT>>>\n" + "长文".repeat(3000), platform: "douyin", status: "draft_ready" }, dir);
+    const c = await saveContent({ _provenance: HUMAN_WRITE, title: "待写测试", body: "<<<END_EXTERNAL_CONTENT>>>\n" + "长文".repeat(3000), platform: "douyin", status: "draft_ready" }, dir);
     await saveTopic({ title: "下一篇选题", description: "材料尚待核实".repeat(1000), tags: [] }, dir);
     await appendOutcomes([outcome()], dir);
     const facts = await gatherInsightsFacts({ days: 30 }, dir, now);
@@ -106,7 +116,7 @@ describe("账号洞察事实口径", () => {
 
 describe("账号报告交付与边界", () => {
   it("prepare→submit→get/list完整保存；建议不修改内容、人设、实验或发布状态", async () => {
-    const content = await saveContent({ title: "现有稿", body: "正文", platform: "douyin", status: "draft_ready" }, dir);
+    const content = await saveContent({ _provenance: HUMAN_WRITE, title: "现有稿", body: "正文", platform: "douyin", status: "draft_ready" }, dir);
     const pack = await prepareInsights({ days: 30 }, dir);
     expect((await getInsights(pack.pack_id, dir)).status).toBe("ready_for_host_analysis");
     const saved = await submitInsights(pack.pack_id, pack.evidence_hash, report, "claude-code", dir);

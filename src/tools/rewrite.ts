@@ -2,7 +2,11 @@ import { Type } from "@sinclair/typebox";
 import { getContent, saveContent, updateContent } from "../storage/local-store.js";
 import { type SupportedPlatform } from "../modules/writing/platform-rewrite.js";
 import { adaptPlatformLLM } from "../modules/writing/platform-adapt-llm.js";
-import { generateForPlatform } from "../modules/writing/title-hashtag.js";
+import { generateHashtags } from "../modules/writing/title-hashtag.js";
+import { titleMethodGuide } from "../modules/writing/title-methods.js";
+import { activeTitleMethods } from "../modules/calibration/title-library.js";
+import { provenanceOf, type WriteProvenance } from "../storage/first-body-guard.js";
+import { aiContentWriteRefusal, newDraftAngleRefusal } from "../modules/research/angle-gate.js";
 
 export const rewriteSchema = Type.Object({
   action: Type.Unsafe<"adapt_platform" | "batch_adapt">({
@@ -56,30 +60,38 @@ async function resolveSource(params: Record<string, unknown>) {
   }
 
   if (!title || !body) return { ok: false as const, error: "content_id or title + body is required" };
-
-  return { ok: true as const, title, body, tags, contentId, topicId, dataDir };
+  // 模型发起的改写/多平台适配在调模型之前就过选题会判定（admission）：源稿是真稿放行，
+  // 占位稿 = 在给选题开第一篇；裸文本要存成稿必然没有选题。落盘时存储层的卡口还会再判一次。
+  const declared = provenanceOf(params);
+  // 由已有稿改写：把源稿 id 一起交给存储层卡口，它会严格读源稿确认是真稿（新稿没挂选题也能放行）
+  const provenance = declared?.kind === "model" && contentId ? { ...declared, derivedFrom: contentId } : declared;
+  if (provenance?.kind === "model") {
+    const refused = contentId ? await aiContentWriteRefusal(contentId, dataDir)
+      : params.save_as_draft ? await newDraftAngleRefusal(undefined, dataDir) : null;
+    if (refused) return refused;
+  }
+  return { ok: true as const, title, body, tags, contentId, topicId, dataDir, provenance };
 }
 
 /**
- * Adapt a single platform: rewrite + generate title/hashtag + optionally save.
+ * Adapt a single platform: rewrite + title method guide + hashtags + optionally save.
  */
 async function adaptOne(
   title: string,
   body: string,
   tags: string[],
   platform: SupportedPlatform,
-  opts: { saveAsDraft?: boolean; topicId?: string; siblingIds?: string[]; dataDir?: string },
+  opts: { saveAsDraft?: boolean; topicId?: string; siblingIds?: string[]; dataDir?: string; provenance: WriteProvenance | undefined },
 ) {
   // LLM 按平台腔调重写(X 偏观点、小红书体验流…);引擎不可用自动落回机械兜底。
   const adapted = await adaptPlatformLLM(title, body, tags, platform, opts.dataDir);
 
-  // Generate title variants + hashtags
-  const titleResult = generateForPlatform(adapted.title, platform, { tags });
-  const hashtags = titleResult.hashtags.map((h) => h.tag);
+  // 标题不再由代码拼：返回方法库指引，由宿主按方法写；标签仍按平台规则给建议
+  const hashtags = generateHashtags(adapted.title, platform, tags).map((h) => h.tag);
 
   const result: Record<string, unknown> = {
     ...adapted,
-    titleVariants: titleResult.titles,
+    titleGuide: titleMethodGuide(platform, await activeTitleMethods(opts.dataDir)),
     hashtags,
   };
 
@@ -94,6 +106,7 @@ async function adaptOne(
         hashtags,
         topicId: opts.topicId,
         siblings: opts.siblingIds || [],
+        _provenance: opts.provenance,
       } as any,
       opts.dataDir,
     );
@@ -118,6 +131,7 @@ export async function executeRewrite(params: Record<string, unknown>) {
       saveAsDraft: Boolean(params.save_as_draft),
       topicId: src.topicId,
       dataDir: src.dataDir,
+      provenance: src.provenance,
     });
   }
 
@@ -139,6 +153,7 @@ export async function executeRewrite(params: Record<string, unknown>) {
         saveAsDraft: Boolean(params.save_as_draft),
         topicId: src.topicId,
         dataDir: src.dataDir,
+        provenance: src.provenance,
       });
       results.push(result);
       const savedContent = result.content as { id: string } | undefined;

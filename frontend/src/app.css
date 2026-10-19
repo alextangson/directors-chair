@@ -114,13 +114,7 @@
 .chat-controls .picker-trigger-label { max-width: 12em; }
 .chat-compose-bar > button { flex: none; white-space: nowrap; margin-left: auto; }
 .chat-model-picker .picker-panel { width: 264px; }
-/* 后端下拉：标签不截断，状态与计费说明放右侧可换行（v1.1 修截断） */
-.chat-backend-picker .picker-panel { width: 340px; }
-.chat-backend-picker .picker-label { flex: none; overflow: visible; }
-.chat-backend-picker .picker-hint { flex: 1; min-width: 0; text-align: right; white-space: normal; }
-.chat-next-turn { font-size: var(--fs-xs); }
 .chat-copy-wb { margin-left: var(--s2); border: none; background: none; padding: 0; color: var(--muted); font-size: var(--fs-xs); text-decoration: underline; cursor: pointer; }
-.chat-bypass-flag { color: var(--danger); font-size: var(--fs-xs); margin-left: var(--s2); }
 .worklog { margin: var(--s1) 0; font-size: var(--fs-xs); color: var(--muted); }
 .worklog-toggle { border: none; background: none; padding: 0; color: var(--muted); font-size: var(--fs-xs); cursor: pointer; }
 .worklog-list { list-style: none; margin: var(--s1) 0 0; padding-left: var(--s3); }
@@ -427,3 +421,43 @@ h2.serif { font-size: var(--fs-2xl); line-height: 1.3; margin-bottom: var(--s3);
 .engine-alert > summary::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--danger); margin-right: var(--s1); vertical-align: 1px; }
 .engine-alert-panel { position: absolute; right: 0; top: 26px; z-index: 20; width: 360px; background: var(--card); border: 1px solid var(--ink); padding: var(--s3) var(--s3); font-size: var(--fs-xs); }
 .engine-alert-panel p { margin-bottom: var(--s2); }
+.chat-nokey { padding: var(--s4); }
+
+/* 一条视频的平台标签（看板卡、稿件页共用；spec 2026-10-12） */
+.pchips { display: flex; flex-wrap: wrap; gap: var(--s1); margin-top: var(--s2); }
+.pchip { display: inline-flex; align-items: center; gap: var(--s1); padding: 2px var(--s2); border: 1px solid var(--border); border-radius: 999px; font-size: var(--fs-xs); line-height: 1.6; background: var(--card); color: var(--text); }
+.pchip-done { border-color: var(--text); }
+.pchip-wait { color: var(--text); }
+.pchip-todo { color: var(--muted); border-style: dashed; }
+.pchip-bad { color: var(--danger); border-color: var(--danger-line); }
+.pchip-unknown { color: var(--muted); }
+.pchip-act { padding: 0 var(--s1); border: none; background: none; font-size: var(--fs-xs); text-decoration: underline; cursor: pointer; color: inherit; }
+.bcard-same { display: block; font-size: var(--fs-xs); color: var(--muted); }
+.bcard-same button { padding: 0; border: none; background: none; font-size: inherit; text-decoration: underline; cursor: pointer; color: inherit; }
+
+/* 稿件页「现在轮到你 / AI 在做」卡（草图 G-draft） */
+.stage-card { margin: var(--s3) 0; padding: var(--s3) var(--s4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+.stage-card.is-you { border-color: var(--text); }
+.stage-card.is-loading { color: var(--muted); }
+.stage-card-top { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); }
+.stage-card-head { font-size: var(--fs-xs); color: var(--muted); }
+.stage-card-text { margin: var(--s1) 0 0; font-weight: 600; }
+.stage-card-note { margin: var(--s1) 0 0; font-size: var(--fs-sm); color: var(--danger); }
+.stage-card-row { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s3); }
+.stage-card-why { font-size: var(--fs-xs); color: var(--muted); }
+.stage-card-error { margin: var(--s2) 0 0; font-size: var(--fs-sm); color: var(--danger); }
+.stage-card-more { position: relative; font-size: var(--fs-sm); }
+.stage-card-more > summary { cursor: pointer; list-style: none; color: var(--muted); }
+.stage-card-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; width: 264px; padding: var(--s2); border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); box-shadow: 0 12px 32px #16150f24; }
+.stage-card-menu > button { width: 100%; display: block; text-align: left; padding: var(--s2) var(--s3); border: none; border-radius: var(--radius); background: transparent; }
+.stage-card-menu > button:hover:not(:disabled) { background: var(--surface); }
+.stage-card-menu small { display: block; font-size: var(--fs-xs); color: var(--muted); }
+.stage-card-wrap { max-width: var(--w-draft); margin: var(--s4) auto var(--s3); padding: 0 var(--s4); }
+.stage-card-wrap .stage-card { margin: var(--s2) 0 0; }
+.stage-card-meta { margin: 0; font-size: var(--fs-xs); color: var(--muted); }
+.stage-card-title { margin: var(--s1) 0 0; font-family: var(--font-serif, serif); font-size: var(--fs-2xl); line-height: 1.3; }
+.stage-card-wrap { box-sizing: border-box; width: 100%; }
+
+/* 「交给 X 写 / 看」旁的小下拉「换一个」、选题卡「换一个 AI 写」（spec 2026-10-15 §B2、§B4）：安静、不抢主按钮 */
+.handoff { display: inline-flex; align-items: center; gap: 4px; }
+.handoff-other, .bcard-other { font-size: var(--fs-xs); color: var(--muted, #787774); background: transparent; border: none; padding: 2px 4px; cursor: pointer; max-width: 9em; }

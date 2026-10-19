@@ -26,7 +26,7 @@ async function edited(opts: { srt?: boolean; coverText?: string } = {}) {
   const c = await videoContent(env, TITLE);
   await founderApprove(env, c.id);
   await record(env, { content_id: c.id, kind: "aroll", path: await put(path.join(env.inbox, "AI又忘了怎么办-原片.mov"), "raw"), request_id: "a" });
-  const cut = await record(env, { content_id: c.id, kind: "cut", path: await put(path.join(env.chatcut, "AI又忘了怎么办.mp4"), "cut-v1"), request_id: "c" });
+  const cut = await record(env, { content_id: c.id, kind: "cut", path: await put(path.join(env.chatcut, "AI又忘了怎么办.mp4"), "cut-v1"), request_id: "c", review: true });
   if (opts.srt !== false) await record(env, { content_id: c.id, kind: "srt", path: await put(path.join(env.chatcut, "a.srt"), SRT), for_cut: cut.fact_id, request_id: "s" });
   const c34 = await record(env, { content_id: c.id, kind: "cover", path: await put(path.join(env.chatcut, "c34.png"), png(900, 1200)), ...(opts.coverText ? { cover_text: opts.coverText } : {}), request_id: "p1" });
   const c43 = await record(env, { content_id: c.id, kind: "cover", path: await put(path.join(env.chatcut, "c43.png"), png(1200, 900)), version: 1, request_id: "p2" });
@@ -55,10 +55,12 @@ describe("创始人决定（§2.4）", () => {
     expect((await readProductionDoc(s.c.id, env.dir))!.decisions.filter((d) => d.type === "cut_approval")).toHaveLength(1);
   });
 
-  it("封面：两个比例都要（E10）；封面字当场要有（E9），报上来的默认字可用", async () => {
+  it("封面：两个比例都要（E10）；没封面字也能批（不记字），报上来的默认字可用", async () => {
     const s = await edited();
     expect(await decide(s.c.id, "pick_cover", { cover_3x4_fact_id: s.c34.fact_id, cover_3x4_sha: s.c34.sha })).toMatchObject({ ok: false, code: "both_ratios_required" });
-    expect(await pick(s)).toMatchObject({ ok: false, code: "cover_text_required" });
+    const bare = await pick(s);
+    expect(bare).toMatchObject({ ok: true });
+    expect((bare.decision as { cover_text?: string }).cover_text).toBeUndefined();
     expect(await pick(s, "AI 又忘了？")).toMatchObject({ ok: true });
     const withDefault = await edited({ coverText: "默认字" });
     expect(await pick(withDefault)).toMatchObject({ ok: true, decision: { cover_text: "默认字" } });
@@ -115,6 +117,31 @@ describe("批准即登记（§5）", () => {
     expect(srt).toMatchObject({ ok: true });
     expect(srt.registration).toBeTruthy();
     expect((await getContent(s.c.id, env.dir))!.status).toBe("publish_ready");
+  });
+
+  it("新一版成片的字幕和上一版字节相同：照样绑上新版，批新版后登记成功，旧版绑定不动", async () => {
+    const s = await edited();
+    const v2 = await record(env, { content_id: s.c.id, kind: "cut", path: await put(path.join(env.chatcut, "cut-v002.mp4"), "cut-v2"), request_id: "c2", review: true });
+    const srt = await record(env, { content_id: s.c.id, kind: "srt", path: await put(path.join(env.chatcut, "cut-v002.srt"), SRT), for_cut: v2.fact_id, request_id: "s2" });
+    expect(srt).toMatchObject({ ok: true, state: "accepted" });
+    const before = (await readProductionDoc(s.c.id, env.dir))!;
+    const v2sha = before.facts.find((f) => f.id === v2.fact_id)!.sha256!;
+    expect(await decide(s.c.id, "approve_cut", { fact_id: v2.fact_id, sha256: v2sha })).toMatchObject({ ok: true });
+    const r = await pick(s, "字");
+    expect(r.missing ?? []).not.toContain("缺这版成片的字幕");
+    const doc = (await readProductionDoc(s.c.id, env.dir))!;
+    expect(doc.registrations).toMatchObject([{ source: "commit", cut_sha: v2sha, srt_for_cut: v2sha }]);
+    const srts = doc.facts.filter((f) => f.kind === "srt");
+    expect(srts.map((f) => f.for_cut).sort()).toEqual([s.cut.sha256, v2sha].sort());
+    expect((await getContent(s.c.id, env.dir))!.status).toBe("publish_ready");
+    // 发布出口 / 登记投影认的是绑新版的那份字幕：删掉旧版字幕不影响（Codex 审 P2）
+    const v1srt = srts.find((f) => f.for_cut === s.cut.sha256)!, v2srt = srts.find((f) => f.for_cut === v2sha)!;
+    expect(v2srt.path).not.toBe(v1srt.path);
+    await fs.rm(path.join(projectRoot(env, s.c.id), v1srt.path!));
+    const pkg = await registeredPackage((await getContent(s.c.id, env.dir))!, env.dir);
+    expect(pkg).toMatchObject({ ok: true });
+    expect(pkg!.ok && pkg!.files.srt).toBe(path.join(projectRoot(env, s.c.id), v2srt.path!));
+    expect((await getContent(s.c.id, env.dir))!.video?.final?.srt_path).toBe(path.join(projectRoot(env, s.c.id), v2srt.path!));
   });
 
   it("登记记录写不进去（提交点之前失败）：拷进项目的副本撤回，旧封面放回", async () => {
@@ -201,9 +228,10 @@ describe("发布回执（§6）", () => {
     expect(c.publishedAt).toBeTruthy();
   });
 
-  it("模型说发了（record kind=publish / 模型调 confirm_published）→ 待核，不动阶段；创始人确认后已发布", async () => {
+  // 2026-10-11 起带本平台链接的直接认：这里用对不上平台的链接，留住「待核 → 创始人确认」这条路
+  it("模型说发了但链接不是这个平台的（record kind=publish / 模型调 confirm_published）→ 待核，不动阶段；创始人确认后已发布", async () => {
     const s = await registered();
-    await executePublish({ _dataDir: env.dir, _host: "codex", action: "confirm_published", content_id: s.c.id, publish_url: "https://v.douyin.com/x" });
+    await executePublish({ _dataDir: env.dir, _host: "codex", action: "confirm_published", content_id: s.c.id, platform: "douyin", publish_url: "https://example.com/x" });
     expect((await getContent(s.c.id, env.dir))!.status).toBe("publish_ready");
     const doc = (await readProductionDoc(s.c.id, env.dir))!;
     const claim = doc.facts.find((f) => f.kind === "publish")!;

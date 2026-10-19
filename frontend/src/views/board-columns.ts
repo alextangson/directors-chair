@@ -3,7 +3,9 @@
  * 发布行文案、估时长。列归属由服务端按「我的内容」同一张表算好，这里不再推一遍。
  */
 import { VIDEO_PLATFORMS, platformLabel } from "../lib";
+import type { PublishTarget } from "./publish-targets";
 import { clockLabel, durationText, relativeLabel } from "../time-format";
+import { handoffLine, type HandoffView } from "./handoff-line";
 
 export const COLUMNS = ["选题", "写稿中", "待录制", "剪辑中", "待发布", "已发布"] as const;
 export type BoardColumn = (typeof COLUMNS)[number];
@@ -19,7 +21,7 @@ export const COLUMN_HINT: Record<BoardColumn, string> = {
   选题: "雷达 · 收件箱 · 你建的",
   写稿中: "AI 在写 / 审 · 写完等你认稿",
   待录制: "按上一条语速估时长 · 点开看稿",
-  剪辑中: "Codex 在剪",
+  剪辑中: "AI 在剪",
   待发布: "成片、封面都过了",
   已发布: "按发布时间 · 更早的去数据页",
 };
@@ -29,7 +31,7 @@ export const EMPTY_NOTE: Record<BoardColumn, string> = {
   选题: "雷达找到的、你记下的想法会出现在这",
   写稿中: "点选题的「开始写」，稿子会出现在这",
   待录制: "你认过的稿会出现在这，等你录",
-  剪辑中: "Codex 在剪的会出现在这",
+  剪辑中: "在剪的会出现在这",
   待发布: "成片和封面都过了会出现在这",
   已发布: "发出去的会出现在这",
 };
@@ -54,6 +56,8 @@ export type PublishRecord =
 
 export interface BoardItem {
   id: string;
+  /** 试跑示例稿（O20） */
+  example?: boolean;
   title: string;
   platform: string | null;
   status: string;
@@ -75,19 +79,63 @@ export interface BoardItem {
   /** 真有问题的提示（卡上标红）；中性信息在 badges */
   alerts?: string[];
   badges?: string[];
+  /** 本轮候选 / 核对中的事实（本体 explain 给的；写稿段也带） */
+  candidates?: Array<{ kind: string; state?: string }>;
   reason?: string;
   /** 最新一版分镜（「v001」） */
   storyboard?: string | null;
+  /** 谁在剪（后端按事实的宿主给：Claude / Codex / WorkBuddy / 你 / agent） */
+  editorLabel?: string;
+  /** 「稿子写好了」这件事的身份与代次：拖「写稿中 → 待录制」认稿要带它 */
+  draftRef?: { item_id: string; gen: string };
+  /** 正在写（后台生成 / 写手认领还活着）：不许移入回收站 */
+  writing?: boolean;
+  /** 「开始写」交给了谁、有没有 agent 接手、谁正认领着（spec 2026-10-15 §B5） */
+  handoff?: HandoffView;
+  /** 视频稿各发布平台的状态与剩下的动作（一条视频一张卡）；文字稿为空 */
+  targets?: PublishTarget[];
+  /** 只有回执、没走认稿就发了：卡上一行提醒 */
+  noScriptApproval?: boolean;
+  /** 本轮轮次（按平台动作带它）；不按本体走 = null */
+  round?: number | null;
 }
+
+/** 「移入回收站」只给前三列（创始人 10-04 定）：进了剪辑就不在看板上弃用 */
+export const TRASH_COLUMNS: ReadonlySet<BoardColumn> = new Set<BoardColumn>(["选题", "写稿中", "待录制"]);
+export const canTrash = (item: Pick<BoardItem, "column">): boolean => TRASH_COLUMNS.has(item.column);
+export const WRITING_REFUSAL = "这篇正在写，先停掉再弃用";
 
 export interface BoardTopic {
   id: string;
+  /** 试跑示例选题（O20） */
+  example?: boolean;
   title: string;
   source: string | null;
   link?: string | null;
   score: number | null;
   createdAt: string;
   renewedAt: string | null;
+  /** 本周片单（选题会选中）：置顶 + 标签；选中≠开工 */
+  inSlate?: boolean;
+}
+
+
+/**
+ * 写稿中卡片的原片提示（1b 预演反馈）：有 pending_match → 「正在核对原片」；有原片候选 → 「发现 N 个疑似原片」。
+ * 别的列有自己的阶段说法，不重复。
+ */
+/** 看板卡上的原片徽章：自动挂上的（任何列）+ 写稿中的疑似 / 核对中 */
+export function cardArollBadges(item: Pick<BoardItem, "column"> & { badges?: string[]; candidates?: Array<{ kind: string; state?: string }> }): string[] {
+  const auto = (item.badges ?? []).some((b) => b.includes("自动挂上，不对就点"));
+  const writing = writingArollBadge(item);
+  return [...(auto ? ["原片已自动挂上"] : []), ...(writing ? [writing] : [])];
+}
+
+export function writingArollBadge(item: Pick<BoardItem, "column"> & { candidates?: Array<{ kind: string; state?: string }> }): string | null {
+  if (item.column !== "写稿中") return null;
+  const arolls = (item.candidates ?? []).filter((c) => c.kind === "aroll");
+  if (arolls.some((c) => c.state === "pending_match")) return "正在核对原片";
+  return arolls.length ? `发现 ${arolls.length} 个疑似原片` : null;
 }
 
 /** 本体对账报告（服务端 /api/board 的 ontology，spec 2026-09-29 §4.1）：未启用时的「要挪」清单与逐条失败 */
@@ -127,7 +175,7 @@ export function topicSourceLabel(source: string | null | undefined): string {
 }
 
 function sortTopics(topics: BoardTopic[]): BoardTopic[] {
-  return [...topics].sort((a, b) => (b.score ?? -1) - (a.score ?? -1) || time(b.renewedAt ?? b.createdAt) - time(a.renewedAt ?? a.createdAt));
+  return [...topics].sort((a, b) => Number(!!b.inSlate) - Number(!!a.inSlate) || (b.score ?? -1) - (a.score ?? -1) || time(b.renewedAt ?? b.createdAt) - time(a.renewedAt ?? a.createdAt));
 }
 
 function itemKey(item: BoardItem): number {
@@ -162,8 +210,8 @@ export type DropAction =
   | { kind: "open-final" }
   | { kind: "publish" }
   | { kind: "back"; move: BackMove }
-  /** 本体（spec §10）：其余前向拖只打开卡片面板，不改状态 */
-  | { kind: "panel" }
+  /** 本体（spec §10）：其余前向拖只打开稿件页，不改状态 */
+  | { kind: "open" }
   /** 本体：往回拖 = 撤销具体决定 / 重开文稿 / 纠正发布，先确认 */
   | { kind: "undo"; undo: UndoMove }
   | { kind: "refuse"; reason: string };
@@ -199,7 +247,7 @@ function ontologyDrop(from: BoardColumn, item: DragCard, to: BoardColumn): DropA
   if (!back) {
     if (from === "写稿中") return forwardDrop(from, item, to);
     if (from === "待发布" && to === "已发布") return { kind: "publish" };
-    return { kind: "panel" };
+    return { kind: "open" };
   }
   if (from === "待录制" && to === "写稿中") return { kind: "undo", undo: UNDO.unapprove };
   if ((from === "剪辑中" || from === "待发布") && (to === "待录制" || to === "写稿中")) return { kind: "undo", undo: UNDO.reopen };
@@ -314,13 +362,13 @@ export const LEGACY_REGISTERED = "按旧流程登记";
 export function itemMeta(item: BoardItem, wpm: number | null, now: number = Date.now()): string {
   const parts: string[] = [];
   if (item.column === "写稿中" && item.status === "draft_ready") parts.push(`写完 ${relativeLabel(item.draftReadyAt ?? item.updatedAt, now)}`);
-  else if (item.column === "写稿中") parts.push(item.status === "needs_evidence" ? "缺证据" : item.status === "reviewing" ? "在审" : "在写", `更新 ${relativeLabel(item.updatedAt, now)}`);
+  else if (item.column === "写稿中") parts.push(item.status === "needs_evidence" ? "缺证据" : item.status === "reviewing" ? "在审" : (item.status === "drafting" && handoffLine(item.handoff, now)?.text) || "在写", `更新 ${relativeLabel(item.updatedAt, now)}`);
   if (item.column === "待录制") {
     const est = estimateText(item.chars, wpm);
     if (est) parts.push(est);
     parts.push(`定稿 ${relativeLabel(item.draftReadyAt ?? item.updatedAt, now)}`);
   }
-  if (item.column === "剪辑中") parts.push(item.status === "cover_pending" ? "等挑封面" : "Codex 在剪", `更新 ${relativeLabel(item.updatedAt, now)}`);
+  if (item.column === "剪辑中") parts.push(item.status === "cover_pending" ? "等挑封面" : `${item.editorLabel ?? "agent"} 在剪`, `更新 ${relativeLabel(item.updatedAt, now)}`);
   if (item.column === "待发布" || item.column === "已发布") {
     if (item.finalDurationMs) parts.push(durationText(item.finalDurationMs));
     const days = item.publishTime ? Math.ceil((Date.parse(item.publishTime) - now) / 86_400_000) : 0;
@@ -329,6 +377,6 @@ export function itemMeta(item: BoardItem, wpm: number | null, now: number = Date
     if (item.column === "已发布" && item.badges?.includes(LEGACY_REGISTERED)) parts.push(LEGACY_REGISTERED);
   }
   // 有分镜时带上最新版本（分镜 spec §4）
-  if (item.storyboard) parts.push(`分镜 ${item.storyboard}`);
+  if (item.storyboard) parts.push("有分镜");
   return parts.join(" · ");
 }

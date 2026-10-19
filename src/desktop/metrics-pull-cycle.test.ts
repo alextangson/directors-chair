@@ -1,5 +1,5 @@
 /**
- * 调度语义锁（回流 spec §4.3）：TTL 门 / 退避状态机 / single-flight / 写序。
+ * 调度语义锁（回流 spec §4.3 + 2026-10-03 每天 09:00）：定时门 / 退避状态机 / single-flight / 写序。
  * 全程注入假抓取器（不连浏览器）+ 注入 now/sleep（不等真时间）；
  * 生命周期那一组用 fake timer 验「启动跑一轮 + 30 分钟再一轮 + stop 后不再跑」。
  */
@@ -11,6 +11,7 @@ import {
   METRICS_PULL_TICK_MS,
   PLATFORM_GAP_MS,
   applyPullOutcome,
+  MAX_AUTO_PULLS_PER_DAY,
   isPullDue,
   nextDayAtNine,
   pullPlatformNow,
@@ -27,7 +28,7 @@ import {
   type PullPlatform,
 } from "../modules/flywheel/pull-state.js";
 import type { PullResult, TypedRow } from "../adapters/browser/pull-types.js";
-import type { ImportReport } from "../modules/flywheel/row-import.js";
+import { PartialImportError, type ImportReport } from "../modules/flywheel/row-import.js";
 
 let dir: string;
 
@@ -80,7 +81,7 @@ afterEach(async () => {
 
 // ── 纯函数：判定与退避 ───────────────────────────────────────────────────────
 
-describe("isPullDue — 三道门", () => {
+describe("isPullDue — 每天 09:00 的门", () => {
   const base = (over: Partial<PlatformPullState> = {}): PlatformPullState => ({
     ...defaultPlatformState(),
     enabled: true,
@@ -91,11 +92,20 @@ describe("isPullDue — 三道门", () => {
     expect(isPullDue(base({ enabled: false }), NOW)).toBe(false);
   });
 
-  it("TTL 门：12h 内成功过就不重抓，超过才抓", () => {
-    const sixHoursAgo = new Date(NOW.getTime() - 6 * 3_600_000).toISOString();
-    const thirteenHoursAgo = new Date(NOW.getTime() - 13 * 3_600_000).toISOString();
-    expect(isPullDue(base({ lastSuccessAt: sixHoursAgo }), NOW)).toBe(false);
-    expect(isPullDue(base({ lastSuccessAt: thirteenHoursAgo }), NOW)).toBe(true);
+  it("09:00 之前不抓，09:00 起该抓", () => {
+    const yesterday = new Date(2026, 7, 22, 9, 5).toISOString();
+    expect(isPullDue(base({ lastSuccessAt: yesterday }), new Date(2026, 7, 23, 8, 59))).toBe(false);
+    expect(isPullDue(base({ lastSuccessAt: yesterday }), new Date(2026, 7, 23, 9, 0))).toBe(true);
+  });
+
+  it("今天 09:00 之后成功过就不再抓（一天一次）；09:00 之前的成功（如手动）不算今天这一抓", () => {
+    expect(isPullDue(base({ lastSuccessAt: new Date(2026, 7, 23, 9, 1).toISOString() }), NOW)).toBe(false);
+    expect(isPullDue(base({ lastSuccessAt: new Date(2026, 7, 23, 8, 0).toISOString() }), NOW)).toBe(true);
+  });
+
+  it("错过 09:00（睡眠 / 服务没开）：之后任意一次检查补抓", () => {
+    const twoDaysAgo = new Date(2026, 7, 21, 9, 0).toISOString();
+    expect(isPullDue(base({ lastSuccessAt: twoDaysAgo }), new Date(2026, 7, 23, 22, 30))).toBe(true);
   });
 
   it("nextEligibleAt 未到 = 退避中，不抓", () => {
@@ -103,9 +113,10 @@ describe("isPullDue — 三道门", () => {
     expect(isPullDue(base({ nextEligibleAt: later }), NOW)).toBe(false);
   });
 
-  it("当日自动抓取满 2 次 = 红线拦下（次日重新计数）", () => {
-    expect(isPullDue(base({ autoAttemptDate: "2026-08-23", autoAttemptCount: 2 }), NOW)).toBe(false);
-    expect(isPullDue(base({ autoAttemptDate: "2026-08-23", autoAttemptCount: 1 }), NOW)).toBe(true);
+  it("当日自动尝试满 3 次 = 红线拦下（次日重新计数）", () => {
+    expect(MAX_AUTO_PULLS_PER_DAY).toBe(3);
+    expect(isPullDue(base({ autoAttemptDate: "2026-08-23", autoAttemptCount: 3 }), NOW)).toBe(false);
+    expect(isPullDue(base({ autoAttemptDate: "2026-08-23", autoAttemptCount: 2 }), NOW)).toBe(true);
     expect(isPullDue(base({ autoAttemptDate: "2026-08-22", autoAttemptCount: 9 }), NOW)).toBe(true);
   });
 });
@@ -113,13 +124,17 @@ describe("isPullDue — 三道门", () => {
 describe("applyPullOutcome — 退避状态机", () => {
   const prev = { ...defaultPlatformState(), enabled: true };
 
-  it("ok：记成功时间/行数/批次，失败计数清零，下次 = now + TTL", () => {
+  it("ok：记成功时间/行数/批次，失败计数清零，下次 = 下一个 09:00", () => {
     const next = applyPullOutcome(prev, { status: "ok", rowCount: 7, imported: 7, batchId: "b1" }, NOW, "auto");
     expect(next.lastSuccessAt).toBe(NOW.toISOString());
     expect(next.lastRowCount).toBe(7);
     expect(next.lastBatchId).toBe("b1");
     expect(next.failureCount).toBe(0);
-    expect(Date.parse(next.nextEligibleAt!) - NOW.getTime()).toBe(12 * 3_600_000);
+    expect(next.nextEligibleAt).toBe(nextDayAtNine(NOW));
+    // 09:00 之前的成功（手动）→ 下次就是今天 09:00，不挡掉今天的定时抓取
+    const early = new Date(2026, 7, 23, 8, 0);
+    const manual = applyPullOutcome(prev, { status: "ok", rowCount: 1 }, early, "manual");
+    expect(manual.nextEligibleAt).toBe(new Date(2026, 7, 23, 9, 0).toISOString());
   });
 
   it("needs_login 不算失败：计数不动，下次 = 次日 09:00", () => {
@@ -207,7 +222,7 @@ describe("pullPlatformNow — 入库与状态", () => {
     expect((await stateOf("douyin")).lastRowCount).toBe(1);
   });
 
-  it("全部行被拒收 = 失败，不盖成功时间也不进入 12h TTL", async () => {
+  it("全部行被拒收 = 失败，不盖成功时间，按失败退避 1 小时", async () => {
     const attempt = await pullPlatformNow("douyin", {
       dataDir: dir,
       ...deps({
@@ -278,6 +293,58 @@ describe("pullPlatformNow — 入库与状态", () => {
     expect(event.kind).toBe("metrics_pull");
     expect(event.metricsPull).toEqual({ platform: "wechat_video", status: "needs_login", rowCount: 0 });
     expect(String(event.label)).toContain("视频号");
+  });
+
+  it("P2-4 中途风控：已拿到的行入库，状态记 risk_control，手动抓也锚到次日 09:00（今天不再碰）", async () => {
+    await seed("douyin");
+    const importRows = vi.fn(async () => report());
+    const before9 = new Date(2026, 7, 23, 7, 0, 0);
+    const attempt = await pullPlatformNow("douyin", {
+      dataDir: dir,
+      ...deps({ registry: { douyin: async () => ({ status: "risk_control", rows: ROWS, errorCode: "partial:risk_page" }) }, importRows, now: () => before9 }),
+    });
+    expect(importRows).toHaveBeenCalledTimes(1);
+    expect(attempt).toMatchObject({ status: "risk_control", rowCount: ROWS.length, imported: 1 });
+    const st = await stateOf("douyin");
+    expect(st.lastStatus).toBe("risk_control");
+    expect(st.nextEligibleAt).toBe(nextDayAtNine(before9));
+  });
+
+  it("R2-P2 风控前的行入库抛错 → 状态仍是 risk_control(次日 09:00),入库失败单独可见", async () => {
+    await seed("douyin");
+    const importRows = vi.fn(async () => Promise.reject(new Error("disk full")));
+    const attempt = await pullPlatformNow("douyin", {
+      dataDir: dir,
+      ...deps({ registry: { douyin: async () => ({ status: "risk_control", rows: ROWS, errorCode: "partial:risk_page" }) }, importRows }),
+    });
+    expect(attempt).toMatchObject({ status: "risk_control", importError: "import_failed" });
+    const st = await stateOf("douyin");
+    expect(st.lastStatus).toBe("risk_control");
+    expect(st.nextEligibleAt).toBe(nextDayAtNine(NOW));
+    expect(st.lastErrorCode).toBe("partial:risk_page+import_failed");
+  });
+
+  it("P2-4 中途跳登录页：行入库，状态记 needs_login（登录待办的来源）", async () => {
+    await seed("wechat_video");
+    const importRows = vi.fn(async () => report());
+    await pullPlatformNow("wechat_video", {
+      dataDir: dir,
+      ...deps({ registry: { wechat_video: async () => ({ status: "needs_login", rows: ROWS, errorCode: "partial:login_page" }) }, importRows }),
+    });
+    expect(importRows).toHaveBeenCalledTimes(1);
+    expect((await stateOf("wechat_video")).lastStatus).toBe("needs_login");
+  });
+
+  it("旁听的不完整结果都看得见：只拿到第 1 页 / 中途风控 / 页面没返回数据", async () => {
+    const labelOf = async (result: PullResult) => {
+      const emit = vi.fn(async () => ({ ts: "", role: "analyst" as const, kind: "metrics_pull", label: "" }));
+      await pullPlatformNow("xiaohongshu", { dataDir: dir, ...deps({ registry: { xiaohongshu: async () => result }, emit }) });
+      return String((emit.mock.calls[0][0] as unknown as Record<string, unknown>).label);
+    };
+    expect(await labelOf({ ...okResult(), errorCode: "only_first_page" })).toContain("只拿到第 1 页");
+    expect(await labelOf({ ...okResult(), errorCode: "partial:risk_control:risk_page" })).toContain("风控");
+    expect(await labelOf(fail("error", "no_data_response"))).toContain("页面没返回作品数据");
+    expect(await labelOf({ ...okResult(), errorCode: "incomplete:no_new_response" })).toContain("没抓全");
   });
 
   it("single-flight：同平台并发只真抓一次，后到的直接拿 in_flight", async () => {
@@ -360,7 +427,7 @@ describe("runMetricsPullTick — 编排", () => {
       dir,
       deps({
         registry: {
-          douyin: async () => fail("browser_unreachable", "cdp_unreachable"),
+          douyin: async () => fail("browser_unreachable", "ego_unreachable"),
           wechat_video: others,
           xiaohongshu: others,
         },
@@ -391,9 +458,9 @@ describe("runMetricsPullTick — 编排", () => {
     expect(state.nextEligibleAt).toBe(nextDayAtNine(NOW));
   });
 
-  it("当日自动抓取 ≤2 次：第 3 轮直接不出手", async () => {
-    // 两次都失败(不改 lastSuccessAt)且 nextEligibleAt 已过 —— 只剩红线能拦住它
-    await seed("douyin", { autoAttemptDate: "2026-08-23", autoAttemptCount: 2, failureCount: 1 });
+  it("当日自动尝试 ≤3 次：第 4 轮直接不出手（ego lite 没开也不刷屏）", async () => {
+    // 三次都失败(不改 lastSuccessAt)且 nextEligibleAt 已过 —— 只剩红线能拦住它
+    await seed("douyin", { autoAttemptDate: "2026-08-23", autoAttemptCount: 3, failureCount: 1 });
     const fetcher = vi.fn(async () => okResult());
     const attempts = await runMetricsPullTick(dir, deps({ registry: { douyin: fetcher } }));
     expect(attempts).toHaveLength(0);
@@ -404,7 +471,8 @@ describe("runMetricsPullTick — 编排", () => {
     await seed("douyin", {
       nextEligibleAt: new Date(NOW.getTime() + 5 * 3_600_000).toISOString(),
       autoAttemptDate: "2026-08-23",
-      autoAttemptCount: 2,
+      autoAttemptCount: 3,
+      lastSuccessAt: new Date(2026, 7, 23, 9, 0).toISOString(),
     });
     const fetcher = vi.fn(async () => okResult());
     const attempt = await pullPlatformNow("douyin", {
@@ -444,6 +512,30 @@ describe("startMetricsPullCycle — 生命周期", () => {
     vi.advanceTimersByTime(METRICS_PULL_TICK_MS * 2);
     await new Promise((r) => setTimeout(r, 20));
     expect(onTick).toHaveBeenCalledTimes(2);
+  });
+
+  it("每轮回流之后都跑 afterPull（自动数字对账），带同一个数据目录", async () => {
+    fakeInterval();
+    const onTick = vi.fn();
+    const afterPull = vi.fn(async () => undefined);
+    const stop = startMetricsPullCycle({ resolveDataDir: async () => dir, onTick, afterPull, ...deps() });
+    await waitForCalls(onTick, 1);
+    stop();
+    expect(afterPull).toHaveBeenCalledWith(dir);
+  });
+
+  it("对账跑完（成败都）再广播一次账本刷新（不落盘），打开着的账本不停在旧计数", async () => {
+    fakeInterval();
+    const onTick = vi.fn();
+    const order: string[] = [];
+    const emit = vi.fn(async (e: { kind: string }, _d?: string, o?: { persist?: boolean }) => { order.push(`${e.kind}:${o?.persist === false ? "mem" : "disk"}`); return e as never; });
+    const afterPull = vi.fn(async () => { order.push("reconcile"); throw new Error("boom"); });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const stop = startMetricsPullCycle({ resolveDataDir: async () => dir, onTick, afterPull, ...deps({ emit: emit as never }) });
+    await waitForCalls(onTick, 1);
+    stop();
+    spy.mockRestore();
+    expect(order.slice(order.indexOf("reconcile"))).toEqual(["reconcile", "calibration_ledger:mem"]);
   });
 
   it("上一轮没跑完，下一 tick 直接跳过（双闸，不叠罗汉）", async () => {
@@ -510,5 +602,37 @@ describe("顺手抓封面（数据页规格 §I.57）", () => {
     const st = await stateOf("douyin");
     expect(st.lastStatus).toBe("ok");
     expect(st.lastCoverError).toBe("cover_download_failed:2/2:http_403");
+  });
+});
+
+describe("入库到一半失去写入权（行已落盘）", () => {
+  const partial = () => new PartialImportError(report({ imported: 1 }), new Error("library_writer_lost: x"));
+
+  it("ok 抓取：报 imported N + library_writer_lost，不谎报 rowCount 0 / import_failed", async () => {
+    const attempt = await pullPlatformNow("douyin", {
+      dataDir: dir,
+      ...deps({ registry: { douyin: async () => okResult() }, importRows: vi.fn(async () => Promise.reject(partial())) }),
+    });
+    expect(attempt).toMatchObject({ status: "error", rowCount: 1, imported: 1, errorCode: "library_writer_lost" });
+  });
+
+  it("事件文案说出已入账条数，不说零写入；事件不落盘（资料库不可写）", async () => {
+    const emit = vi.fn(async () => ({ ts: NOW.toISOString(), role: "analyst" as const, kind: "metrics_pull", label: "x" }));
+    await pullPlatformNow("douyin", {
+      dataDir: dir,
+      ...deps({ registry: { douyin: async () => okResult() }, importRows: vi.fn(async () => Promise.reject(partial())), emit }),
+    });
+    const [event, , opts] = emit.mock.calls[0] as unknown as [{ label: string }, string, { persist?: boolean }];
+    expect(event.label).toContain("已入账 1 条");
+    expect(event.label).not.toContain("零写入");
+    expect(opts).toEqual({ persist: false });
+  });
+
+  it("登录/风控中途：状态保留，importError=library_writer_lost，imported=N", async () => {
+    const attempt = await pullPlatformNow("douyin", {
+      dataDir: dir,
+      ...deps({ registry: { douyin: async () => ({ status: "risk_control", rows: ROWS, errorCode: "partial:risk_page" }) }, importRows: vi.fn(async () => Promise.reject(partial())) }),
+    });
+    expect(attempt).toMatchObject({ status: "risk_control", imported: 1, importError: "library_writer_lost" });
   });
 });

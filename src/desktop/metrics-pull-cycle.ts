@@ -2,10 +2,13 @@
  * 三平台自动回流的进程内调度（spec §4.3）——照 managed-host/radar-cycle 的范式：
  * 进程活着才滚，进程一关全停，不在用户机器上留后台任务。
  *
+ * 节奏（2026-10-03 创始人裁定）：每天本地 09:00 自动抓一次；错过 09:00（睡眠 / 服务没开）就在
+ * 下一次检查时补抓，当天抓成一次就不再抓。手动「立即抓取」不受限。
  * 一轮 tick = 读状态 → 按平台判「该不该抓」→ 命中的**串行**抓（平台间 ≥10s）。
- * 判据三道门：开关 / nextEligibleAt（退避）/ TTL（12h 内抓过就不重抓）+ 当日 ≤2 次红线。
+ * 判据：开关 / 今天 09:00 到了没 / nextEligibleAt（失败退避、风控、需登录锚到次日 09:00）/
+ * 今天 09:00 之后成功过没 / 当日自动尝试 ≤3 次红线（1 次定时 + 退避重试，ego lite 没开也不刷屏）。
  *
- * 写序（spec §4.3）：**先入库 outcomes，后写状态**。两写之间崩溃 → 状态偏旧 → 下轮按 TTL
+ * 写序（spec §4.3）：**先入库 outcomes，后写状态**。两写之间崩溃 → 状态偏旧 → 下轮
  * 重抓 → 幂等键去重吸收。一致性靠幂等重放，不靠事务；状态写失败会如实报出来，不静默。
  *
  * single-flight 在本模块按平台统一管理：手动 IPC 与定时 tick 走同一入口 `pullPlatformNow`，
@@ -20,22 +23,23 @@ import {
   type PlatformPullState,
   type PullPlatform,
 } from "../modules/flywheel/pull-state.js";
-import { importPerformanceRows } from "../modules/flywheel/row-import.js";
+import { importPerformanceRows, PartialImportError } from "../modules/flywheel/row-import.js";
 import { saveAutoCover, type FetchLike } from "../modules/flywheel/data-covers.js";
 import { getDataDir } from "../storage/local-store.js";
+import { assertDataDirWritable } from "../storage/storage-roots.js";
 import type { PullResult, PullStatus, TypedRow } from "../adapters/browser/pull-types.js";
 import { emitEngineEvent } from "./event-hub.js";
 
-/** 30 分钟一 tick：比 12h TTL 密得多（错过窗口最多迟到半小时），又不至于让 tick 变噪音 */
+/** 30 分钟一次检查：09:00 那一抓最多迟到半小时；错过（睡眠/没开服务）就在醒来后的这一检查补上 */
 export const METRICS_PULL_TICK_MS = 30 * 60_000;
-/** 默认 TTL 12h：保守默认值（社区经验，不是事实断言，spec §0） */
-export const PULL_TTL_MS = 12 * 3_600_000;
+/** 每天自动抓取的时刻（本地时区） */
+export const DAILY_PULL_HOUR = 9;
 /** 平台间隔：不并发打三家后台 */
 export const PLATFORM_GAP_MS = 10_000;
-export const MAX_AUTO_PULLS_PER_DAY = 2;
+/** 当日自动尝试红线：1 次定时 + 失败退避重试；手动不计数 */
+export const MAX_AUTO_PULLS_PER_DAY = 3;
 export const MAX_FAILURES_PER_DAY = 3;
 const RETRY_BACKOFF_MS = 3_600_000;
-const NEXT_DAY_HOUR = 9;
 
 export type PullTrigger = "auto" | "manual";
 
@@ -49,6 +53,8 @@ export interface PullAttempt {
   errorCode?: string;
   /** 抓到分页上限：「至少还有更多」，不谎报精确丢弃数（codex #23） */
   hasMore?: boolean;
+  /** 登录/风控前已拿到的行没入成库（状态仍是登录/风控） */
+  importError?: string;
   /** 入库成功但状态没写住：下轮会重抓，重复导入无害——如实报出来，不静默 */
   persistError?: string;
 }
@@ -61,7 +67,6 @@ export interface MetricsPullDeps {
   importRows?: typeof importPerformanceRows;
   emit?: typeof emitEngineEvent;
   now?: () => Date;
-  ttlMs?: number;
   gapMs?: number;
   sleep?: (ms: number) => Promise<void>;
   warn?: (msg: string) => void;
@@ -85,16 +90,33 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 
 // ── 纯函数：调度判定与状态推进（fake timer 下可直接锁行为） ────────────────────
 
-/** 次日 09:00（本地时区）——「等人明早扫码」的锚点 */
+/** 当天 09:00（本地时区） */
+export function todayAtNine(now: Date): Date {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), DAILY_PULL_HOUR, 0, 0, 0);
+}
+
+/** 次日 09:00（本地时区）——「等人明早登录」「风控明天再试」的锚点 */
 export function nextDayAtNine(now: Date): string {
-  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, NEXT_DAY_HOUR, 0, 0, 0);
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, DAILY_PULL_HOUR, 0, 0, 0);
   return next.toISOString();
 }
 
-export function isPullDue(state: PlatformPullState, now: Date, ttlMs = PULL_TTL_MS): boolean {
+/** 下一个定时点：今天 09:00 还没到就是今天，否则明天 */
+export function nextScheduledPull(now: Date): string {
+  const nine = todayAtNine(now);
+  return now.getTime() < nine.getTime() ? nine.toISOString() : nextDayAtNine(now);
+}
+
+/**
+ * 每天 09:00 抓一次：09:00 之前不抓；09:00 之后（含错过后补抓）只要今天 09:00 以来还没成功过、
+ * 不在退避里、当日自动尝试没到红线，就该抓。
+ */
+export function isPullDue(state: PlatformPullState, now: Date): boolean {
   if (!state.enabled) return false;
+  const nine = todayAtNine(now).getTime();
+  if (now.getTime() < nine) return false;
   if (state.nextEligibleAt && Date.parse(state.nextEligibleAt) > now.getTime()) return false;
-  if (state.lastSuccessAt && now.getTime() - Date.parse(state.lastSuccessAt) <= ttlMs) return false;
+  if (state.lastSuccessAt && Date.parse(state.lastSuccessAt) >= nine) return false;
   // 当日自动抓取红线：手动触发不计数，人明确要抓时不该被红线拦
   if (state.autoAttemptDate === localDay(now) && state.autoAttemptCount >= MAX_AUTO_PULLS_PER_DAY) return false;
   return true;
@@ -108,6 +130,8 @@ interface Landing {
   batchId?: string;
   hasMore?: boolean;
   coverError?: string;
+  /** 登录/风控前已拿到的行入库失败：单独记，不覆盖登录/风控状态 */
+  importError?: string;
 }
 
 /** 结果 → 下一份平台状态。退避语义全在这里，一个 switch 看全（spec §4.3） */
@@ -116,7 +140,6 @@ export function applyPullOutcome(
   landing: Landing,
   now: Date,
   trigger: PullTrigger,
-  ttlMs = PULL_TTL_MS,
 ): PlatformPullState {
   const day = localDay(now);
   const next: PlatformPullState = {
@@ -129,19 +152,20 @@ export function applyPullOutcome(
   };
   if (landing.errorCode) next.lastErrorCode = landing.errorCode;
   else delete next.lastErrorCode;
+  if (landing.importError) next.lastErrorCode = `${landing.errorCode ?? landing.status}+${landing.importError}`;
 
   if (landing.status === "ok") {
     next.lastSuccessAt = now.toISOString();
     next.lastRowCount = landing.imported ?? landing.rowCount;
     next.failureCount = 0;
     next.failureDate = null;
-    next.nextEligibleAt = new Date(now.getTime() + ttlMs).toISOString();
+    next.nextEligibleAt = nextScheduledPull(now);
     if (landing.batchId) next.lastBatchId = landing.batchId;
     if (landing.coverError) next.lastCoverError = landing.coverError;
     else delete next.lastCoverError;
     return next;
   }
-  // needs_login 不算失败（等人扫码）；risk_control 当日不再碰这家——两者都锚到次日 09:00
+  // needs_login 不算失败（等人去 ego lite 登录）；risk_control 当日不再碰这家——两者都锚到次日 09:00
   if (landing.status === "needs_login" || landing.status === "risk_control") {
     next.nextEligibleAt = nextDayAtNine(now);
     return next;
@@ -166,23 +190,43 @@ function labelOf(platform: PullPlatform): string {
   return PULL_PLATFORM_LABELS[platform];
 }
 
+/** 登录/风控前已拿到的行（照常入账）——说清楚，不让人以为一条没进 */
+function keptNote(attempt: PullAttempt): string {
+  if (attempt.rowCount === 0) return "";
+  if (attempt.importError) return `（此前已拿到的 ${attempt.rowCount} 条入库失败：${attempt.importError}）`;
+  return `（此前已拿到的 ${attempt.rowCount} 条，入账 ${attempt.imported ?? 0} 条）`;
+}
+
+/** 成功但不完整：只拿到第 1 页 / 中途出错（已拿到的完整页照常入账）——都要看得见 */
+function partialNote(errorCode: string | undefined): string {
+  if (!errorCode) return "";
+  if (errorCode === "only_first_page") return "（只拿到第 1 页）";
+  if (errorCode.startsWith("incomplete:")) return `（没抓全：${errorCode === "incomplete:no_new_response" ? "翻页后页面没返回新数据" : "后面的翻页控件找不到"}；已拿到的页照常入账）`;
+  if (errorCode.startsWith("partial:risk_control")) return "（中途出现风控提示，已停手；已拿到的页照常入账）";
+  return `（中途出错：${errorCode}，已拿到的页照常入账）`;
+}
+
 /** 事件文案：一行人话，说清发生了什么、人要不要动手（Report 页与工作日志共用） */
 function eventLabel(attempt: PullAttempt): string {
   const name = labelOf(attempt.platform);
   switch (attempt.status) {
     case "ok":
-      return `自动回流：${name} 抓回 ${attempt.rowCount} 条，入账 ${attempt.imported ?? 0} 条`;
+      return `自动回流：${name} 抓回 ${attempt.rowCount} 条，入账 ${attempt.imported ?? 0} 条${partialNote(attempt.errorCode)}`;
     case "needs_login":
-      return `${name}登录态过期——扫码后数据继续回流`;
+      return `${name}登录态过期——在 ego lite 里登录${name}后台，之后数据继续回流${keptNote(attempt)}`;
     case "risk_control":
-      return `${name}触发风控，今天不再自动抓取`;
+      return `${name}触发风控，已停手，今天不再自动抓取${keptNote(attempt)}`;
     case "browser_unreachable":
-      return "浏览器未连接（chrome-cdp），自动回流本轮暂停";
+      return "浏览器未连接（ego lite）：打开 ego lite 并保持运行，自动回流一小时后再试";
     case "schema_changed":
       return `${name}后台接口变了（${attempt.errorCode ?? "schema"}），本次零写入`;
     case "timeout":
       return `${name}抓取超时，稍后重试`;
     default:
+      if (attempt.errorCode === "library_writer_lost" && (attempt.imported ?? 0) > 0) return `${name}已入账 ${attempt.imported} 条后失去资料库写入权（另一个 AutoCrew 服务在占用），自动回流暂停`;
+      if (attempt.errorCode === "library_writer_lost") return `${name}没抓：当前进程没有资料库写入权（另一个 AutoCrew 服务在占用），本次零写入`;
+      if (attempt.errorCode === "library_unavailable") return `${name}没抓：资料库暂时连不上，本次零写入`;
+      if (attempt.errorCode === "no_data_response") return `${name}页面没返回作品数据，本次零写入`;
       return `${name}抓取失败：${attempt.errorCode ?? "unknown"}`;
   }
 }
@@ -217,21 +261,28 @@ export async function captureCovers(platform: PullPlatform, rows: TypedRow[], op
   return `cover_download_failed:${failed}/${todo.length}:${firstError}`;
 }
 
+/** 带行的结果：ok，或中途碰到登录/风控前已拿到完整页的 needs_login / risk_control */
+function carriesRows(result: PullResult): boolean {
+  return result.status === "ok" || result.status === "needs_login" || result.status === "risk_control";
+}
+
 /** 先入库后写状态：入库失败就当整次抓取失败（零写入），不给「抓到了但没落地」留模糊地带 */
 async function land(platform: PullPlatform, result: PullResult, now: Date, opts: PullNowOptions): Promise<Landing> {
   const base: Landing = {
     status: result.status,
-    rowCount: result.status === "ok" ? result.rows.length : 0,
+    rowCount: carriesRows(result) ? result.rows.length : 0,
     ...(result.errorCode ? { errorCode: result.errorCode } : {}),
     ...(result.hasMore ? { hasMore: true } : {}),
   };
-  if (result.status !== "ok" || result.rows.length === 0) return base;
+  if (!carriesRows(result) || result.rows.length === 0) return base;
   const batchId = `pull-${platform}-${now.getTime()}`;
   try {
     const report = await (opts.importRows ?? importPerformanceRows)(platform, result.rows, {
       source: "auto",
       dataDir: opts.dataDir,
     });
+    // 中途碰到登录/风控：行照常入库，但状态保持登录/风控（调度当天不再碰、待办提示登录），入库失败不改写它
+    if (result.status !== "ok") return { ...base, imported: report.imported };
     if (report.imported === 0) {
       return {
         status: "error",
@@ -243,21 +294,81 @@ async function land(platform: PullPlatform, result: PullResult, now: Date, opts:
     const coverError = await captureCovers(platform, result.rows, opts);
     return { ...base, imported: report.imported, batchId, ...(coverError ? { coverError } : {}) };
   } catch (err) {
+    if (err instanceof PartialImportError) return partialLanding(platform, base, err, opts);
     opts.warn?.(`[metrics-pull] ${platform} 入库失败：${err instanceof Error ? err.message : String(err)}`);
+    // 登录/风控是这次抓取的结论（决定当天碰不碰、要不要提醒登录），入库失败不能把它改写成可重试的 error
+    if (result.status !== "ok") return { ...base, imported: 0, importError: "import_failed" };
     return { status: "error", rowCount: 0, errorCode: "import_failed" };
   }
 }
 
+/** 行已入账、提交绑定时失去写入权：如实报「入账 N 条 + 写入权丢失」，不报零写入 */
+function partialLanding(platform: PullPlatform, base: Landing, err: PartialImportError, opts: PullNowOptions): Landing {
+  const code = err.message.startsWith("library_writer_lost") ? "library_writer_lost" : "import_failed";
+  const imported = err.report.imported;
+  (opts.warn ?? console.warn)(`[metrics-pull] ${platform} 已入账 ${imported} 条后写入中断：${err.message}`);
+  if (base.status !== "ok") return { ...base, imported, importError: code };
+  return { status: "error", rowCount: base.rowCount, imported, errorCode: code };
+}
+
+// ── 写入权拒绝记录：只存本进程内存（资料库已不可写，不能往里记），pull_status 带给界面 ──
+
+export interface WriteRefusal { code: string; at: string }
+const refusals = new Map<string, WriteRefusal>();
+
+export function writeRefusalFor(dataDir: string | undefined, platform: PullPlatform): WriteRefusal | null {
+  return refusals.get(flightKey(dataDir, platform)) ?? null;
+}
+
+/** 抓之前先核写入权：没权就不打平台后台、不写状态/账本/事件（这些写也都会被拒） */
+function writeRefusalCode(dataDir?: string): string | null {
+  try { assertDataDirWritable(dataDir); return null; }
+  catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return msg.startsWith("library_writer_lost") ? "library_writer_lost" : "library_unavailable";
+  }
+}
+
+/** 发 metrics_pull 事件让打开着的页面刷新；没写入权时只广播不落盘（资料库不可写） */
+function notifyPull(attempt: PullAttempt, label: string, opts: PullNowOptions, persist: boolean): void {
+  const emit = opts.emit ?? emitEngineEvent;
+  const event = {
+    role: "analyst" as const,
+    kind: "metrics_pull",
+    label,
+    metricsPull: { platform: attempt.platform, status: attempt.status, rowCount: attempt.rowCount },
+  };
+  const sent = persist ? emit(event, opts.dataDir) : emit(event, opts.dataDir, { persist: false });
+  void Promise.resolve(sent).catch(() => {
+    /* 观测层不得破坏执行层 */
+  });
+}
+
 async function runPull(platform: PullPlatform, opts: PullNowOptions): Promise<PullAttempt> {
+  const refused = writeRefusalCode(opts.dataDir);
+  const key = flightKey(opts.dataDir, platform);
   const now = opts.now?.() ?? new Date();
+  if (refused) {
+    refusals.set(key, { code: refused, at: now.toISOString() });
+    (opts.warn ?? console.warn)(`[metrics-pull] ${platform} 没抓：${refused}（资料库写入权不在本进程，自动回流暂停）`);
+    const refusedAttempt: PullAttempt = { platform, status: "error", rowCount: 0, errorCode: refused };
+    notifyPull(refusedAttempt, eventLabel(refusedAttempt), opts, false);
+    return refusedAttempt;
+  }
+  // 写入权在：旧的拒绝记录作废（持久状态从这一轮起重新说真话）
+  refusals.delete(key);
   const trigger = opts.trigger ?? "manual";
   const landing = await land(platform, await callFetcher(platform, opts), now, opts);
+
+  if (landing.errorCode === "library_writer_lost" || landing.importError === "library_writer_lost") {
+    refusals.set(key, { code: "library_writer_lost", at: now.toISOString() });
+  }
 
   let persistError: string | undefined;
   try {
     await updatePlatformPullState(
       platform,
-      (prev) => applyPullOutcome(prev, landing, now, trigger, opts.ttlMs ?? PULL_TTL_MS),
+      (prev) => applyPullOutcome(prev, landing, now, trigger),
       opts.dataDir,
     );
   } catch (err) {
@@ -271,20 +382,11 @@ async function runPull(platform: PullPlatform, opts: PullNowOptions): Promise<Pu
     ...(landing.imported !== undefined ? { imported: landing.imported } : {}),
     ...(landing.errorCode ? { errorCode: landing.errorCode } : {}),
     ...(landing.hasMore ? { hasMore: true } : {}),
+    ...(landing.importError ? { importError: landing.importError } : {}),
     ...(persistError ? { persistError } : {}),
   };
-  const emit = opts.emit ?? emitEngineEvent;
-  void emit(
-    {
-      role: "analyst",
-      kind: "metrics_pull",
-      label: persistError ? `${eventLabel(attempt)}（状态未写住，下轮会重抓）` : eventLabel(attempt),
-      metricsPull: { platform, status: attempt.status, rowCount: attempt.rowCount },
-    },
-    opts.dataDir,
-  ).catch(() => {
-    /* 观测层不得破坏执行层 */
-  });
+  const label = persistError ? `${eventLabel(attempt)}（状态未写住，下轮会重抓）` : eventLabel(attempt);
+  notifyPull(attempt, label, opts, !refusals.has(key));
   return attempt;
 }
 
@@ -317,7 +419,7 @@ export async function pullPlatformNow(platform: PullPlatform, opts: PullNowOptio
 export async function runMetricsPullTick(dataDir?: string, deps: MetricsPullDeps = {}): Promise<PullAttempt[]> {
   const now = deps.now?.() ?? new Date();
   const state = await readPullState(dataDir, deps.warn);
-  const due = PULL_PLATFORMS.filter((p) => isPullDue(state.platforms[p], now, deps.ttlMs ?? PULL_TTL_MS));
+  const due = PULL_PLATFORMS.filter((p) => isPullDue(state.platforms[p], now));
   const attempts: PullAttempt[] = [];
   for (const platform of due) {
     // 串行 + 间隔：不并发打三家后台（风控面最小）
@@ -335,6 +437,16 @@ export interface StartMetricsPullCycleOptions extends MetricsPullDeps {
   tickIntervalMs?: number;
   /** 每轮跑完的回调（失败轮给空数组）：让「这一轮到底跑没跑完」可观测，而不是只能猜 */
   onTick?: (attempts: PullAttempt[]) => void;
+  /** 每轮回流跑完之后（成功失败都跑）：自动数字对账挂在这里；它自己不抛错，失败记进对账状态 */
+  afterPull?: (dataDir: string | undefined) => Promise<unknown>;
+}
+
+/** 对账跑完（成功失败都）广播一次不落盘的账本刷新：metrics_pull 事件早于对账，单靠它账本会停在旧计数 */
+async function reconcileAndNotify(options: StartMetricsPullCycleOptions, dataDir: string | undefined): Promise<void> {
+  try { await options.afterPull!(dataDir); } finally {
+    const emit = options.emit ?? emitEngineEvent;
+    void Promise.resolve(emit({ role: "analyst", kind: "calibration_ledger", label: "预测账本已刷新" }, dataDir, { persist: false })).catch(() => undefined);
+  }
 }
 
 /** 启动即跑一轮，之后每 30 分钟一轮；返回 stop（server close 时调用） */
@@ -347,7 +459,9 @@ export function startMetricsPullCycle(options: StartMetricsPullCycleOptions): ()
     ticking = true;
     let attempts: PullAttempt[] = [];
     try {
-      attempts = await runMetricsPullTick(await options.resolveDataDir(), options);
+      const dataDir = await options.resolveDataDir();
+      try { attempts = await runMetricsPullTick(dataDir, options); }
+      finally { if (options.afterPull) await reconcileAndNotify(options, dataDir); }
     } catch (error) {
       console.error("[metrics-pull] tick 失败:", error instanceof Error ? error.message : error);
     } finally {

@@ -1,10 +1,12 @@
 /** 「我的内容」视图的目标清单：从稿件算出每个栏目下应该出现哪些文件。只读，不碰视图目录。 */
+import { primaryVideoKit } from "./video-kits.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Content, VideoKit } from "./local-store.js";
 import { listContents } from "./local-store.js";
 import { resolveContentProject, projectRelativeFile, isMissing } from "./content-project.js";
 import { isVideoPlatform } from "./stage-guard.js";
+import { isImportedHistory } from "./imported-history.js";
 import { listRetros, readRetro } from "../modules/retro/retro.js";
 import { renderCheckList, unverifiedAdditions } from "../modules/video/handoff/spoken.js";
 import { spokenRel } from "../modules/video/handoff/register-spoken.js";
@@ -14,6 +16,8 @@ import { registeredPackage } from "../modules/production/publish-gate.js";
 import { KEPT_DIR, locateProjectFile } from "./nas-kept.js";
 import { publishedFiles } from "./my-content-published.js";
 import { publishedSet } from "./round-publish-time.js";
+import { listMeetingDates, readMeeting } from "../modules/meetings/meeting-store.js";
+import { renderMeetingMinutes } from "../modules/meetings/meeting-render.js";
 
 /** 已发布栏只留最近几条；NAS 归档也不动这几条 */
 export { KEEP_PUBLISHED } from "./round-publish-time.js";
@@ -46,6 +50,7 @@ export const GUIDE = `# 我的内容 · 使用说明
 - 待发布：成片、两张封面、口播稿、发布文案都在一个文件夹里，拖去上传即可。缺什么写在「还缺什么.txt」里。登记过成片的还有「口播稿-实拍版.md」（按成片字幕还原的实际说法）；实拍时新说了定稿里没有的数字或出处，会列在「发布前核对.txt」里，发布前看一眼，不挡发布。
 - 已发布：只留最近 5 条。发布满 7 天、又不在最近 5 条里的，素材会搬到 NAS，搬了什么、腾出多少空间记在「归档记录.md」。
 - 复盘：最新一份复盘报告。
+- 排期会：每次排期会的纪要（片单、下注、毙题理由），只读副本。
 
 口播稿、发布文案是副本，AI 改稿后会自动更新。写稿中、待录制里的口播稿你可以直接改，下一次对账会把你的改稿存成稿件新版本，AI 以后写稿也会学你的改法。这几种情况不会同步：AI 正在写这篇、文件被清空、稿子已经交剪辑、你改的同时 AI 也改了——这时你的文件另存成「口播稿（我改过的 时间）.md」保留，原因写在「⚠️ 同步出错.txt」里。其它栏目的副本是只读的，改了也不会同步，同样另存保留。
 
@@ -100,7 +105,7 @@ export async function scriptText(c: Content, root: string): Promise<string | nul
 async function publishKit(c: Content, root: string): Promise<VideoKit | null> {
   const raw = await readIfExists(path.join(root, "06-publish/copy", `${c.platform ?? "unknown"}.json`));
   if (raw !== null) return (JSON.parse(raw) as { kit?: VideoKit }).kit ?? null;
-  return c.videoKit ?? null;
+  return primaryVideoKit(c) ?? null;
 }
 
 function renderKit(c: Content, kit: VideoKit): string {
@@ -221,6 +226,8 @@ async function visible(contents: Content[], keepPublished: number, dataDir: stri
   const ctx = await explainContext(dataDir);
   const columns = new Map<string, Column>();
   for (const c of contents) {
+    // 历史作品记录没有制作状态，explain 会把它落到「写稿中」；与看板、晨报一样不进任何栏目
+    if (isImportedHistory(c)) continue;
     try {
       const col = await columnOf(c, dataDir, ctx);
       if (col) columns.set(c.id, col);
@@ -244,6 +251,18 @@ async function addRetro(plan: Plan, dataDir: string): Promise<void> {
   const latest = (await listRetros(dataDir))[0];
   const text = latest ? await readRetro(dataDir, latest.file) : null;
   if (text !== null) plan.entries.push({ rel: `${columnDir("复盘")}/最新复盘.md`, owner: "_retro", kind: "copy", text });
+}
+
+/** 选题会纪要：与复盘栏同样从数据目录渲染只读副本，不往视图里手写 */
+const MEETING_DIR = "排期会";
+async function addMeetings(plan: Plan, dataDir: string): Promise<void> {
+  const dates = await listMeetingDates(dataDir);
+  if (!dates.length) return;
+  plan.dirs[MEETING_DIR] = "_meeting";
+  for (const date of dates) {
+    const record = await readMeeting(date, dataDir);
+    if (record) plan.entries.push({ rel: `${MEETING_DIR}/${date} 排期会.md`, owner: "_meeting", kind: "copy", text: renderMeetingMinutes(record) });
+  }
 }
 
 export async function buildPlan(dataDir: string, keepPublished: number): Promise<Plan> {
@@ -271,5 +290,7 @@ export async function buildPlan(dataDir: string, keepPublished: number): Promise
   } catch (e) { plan.failed.add("_archive"); plan.errors.push(`归档记录：${e instanceof Error ? e.message : String(e)}`); }
   try { await addRetro(plan, dataDir); }
   catch (e) { plan.failed.add("_retro"); plan.errors.push(`复盘：${e instanceof Error ? e.message : String(e)}`); }
+  try { await addMeetings(plan, dataDir); }
+  catch (e) { plan.failed.add("_meeting"); plan.errors.push(`排期会：${e instanceof Error ? e.message : String(e)}`); }
   return plan;
 }

@@ -6,20 +6,25 @@
  * 批准有效 = 未撤销 + 正文哈希未变 + 所绑文件记录的 sha 未被替换。文件缺失只影响 availability：
  * 不让批准失效、不让阶段倒退，只让 publishable=false（Codex P1-9）。
  */
+import { isChatSource } from "./decision-provenance.js";
 import { bodyHash } from "../../storage/production-store.js";
 import { platformLabel } from "../../desktop/platform-label.js";
 import { receiptsOfRound, type Slot } from "./receipts.js";
 import { isUngated } from "./publish-check-link.js";
+import { hostLabel } from "./host-label.js";
 import { sliverVerdict } from "./sliver/verdict.js";
+import { validCoverGroups, withCoverGroups } from "./cover-groups.js";
+import { latestMarkedCut } from "./ready.js";
 import { PRODUCTION_KINDS, type Decision, type Fact, type ProductionDoc, type Registration } from "../../storage/production-types.js";
 
 export type Stage = "待录制" | "剪辑中" | "待发布" | "已发布";
-export type Rule = "D1" | "D2" | "D3" | "D4" | "D5";
+/** D1R = 本轮各平台全部被驳回（吸收 12）：回待发布 */
+export type Rule = "D1" | "D1R" | "D2" | "D3" | "D4" | "D5";
 
 /** D1 的外部输入：AutoCrew 发布器写的 publish-plan / 数据回流 = 已核实回执（§6） */
 export interface PublishEvidence { verified: boolean; badge?: string; /** 最早投出的时间（投影到 published 时盖 publishedAt） */ at?: string }
 
-export interface CandidateView { fact_id: string; kind: Fact["kind"]; path?: string; evidence?: string; post_publish?: boolean; state: Fact["state"]; sha256?: string }
+export interface CandidateView { fact_id: string; kind: Fact["kind"]; path?: string; evidence?: string; post_publish?: boolean; state: Fact["state"]; sha256?: string; started_at?: string }
 
 export interface Derived {
   stage: Stage;
@@ -83,9 +88,14 @@ export function validCoverApproval(doc: ProductionDoc, body: string): Decision |
   if (!d || revokedIds(doc, "approval_revoke").has(d.id) || d.body_hash !== bodyHash(body)) return null;
   // 批准之后又打回了其中一张（或含它的整批）→ 这组封面失效（Codex 审 seg2 P1）
   const pair = [d.cover_3x4_sha, d.cover_4x3_sha];
+  // 按组打回（等你拍板）只作废那几组的批准：同一张图被用进新组又被打回，不连带已批的组（Codex 审 2a-1 P2）
   const rejected = inRound(doc, doc.decisions).some((r) => r.type === "cover_reject" && r.at > d.at
-    && ((r.sha256 && pair.includes(r.sha256)) || (r.shas ?? []).some((s) => pair.includes(s))));
+    && (r.group_ids ? Boolean(d.group_id) && r.group_ids.includes(d.group_id!)
+      : (r.sha256 && pair.includes(r.sha256)) || (r.shas ?? []).some((s) => pair.includes(s))));
   if (rejected) return null;
+  // 按组绑定的批准：只看这一组自己那几份文件有没有被覆盖（同一张图在别的组被覆盖不算，整分支审 4 P2）
+  // 只看这条批准绑的那一对（整分支审 7 P2）：组里以前被换掉、后来补过新图的旧成员不算
+  if (d.group_id && (doc.cover_members ?? []).some((m) => m.group_id === d.group_id && m.replaced_at && pair.includes(m.sha256))) return null;
   return liveFact(doc, "cover", d.cover_3x4_sha, "3:4") && liveFact(doc, "cover", d.cover_4x3_sha, "4:3") ? d : null;
 }
 
@@ -99,6 +109,15 @@ function overwrittenAlerts(doc: ProductionDoc): string[] {
   if (cut && !revoked.has(cut.id) && gone("cut", cut.sha256)) out.push("所批成片的文件被覆盖了，成片批准已失效：重新审这版成片");
   if (cover && !revoked.has(cover.id) && (gone("cover", cover.cover_3x4_sha) || gone("cover", cover.cover_4x3_sha))) out.push("所选封面的文件被覆盖了，封面批准已失效：重新选封面");
   return out;
+}
+
+/**
+ * 登记绑的那份字幕：sha 和所属成片都对上。同一份字幕字节可以分别绑给几版成片（同一段口播），
+ * 只按 sha 找会拿到绑旧版的那条；早期登记没存 srt_for_cut 的退回只按 sha。
+ */
+export function registeredSrt(doc: ProductionDoc, reg: Pick<Registration, "srt_sha" | "srt_for_cut">): Fact | undefined {
+  const same = accepted(doc).filter((f) => f.kind === "srt" && f.sha256 === reg.srt_sha && !f.replaced_at);
+  return reg.srt_for_cut ? same.find((f) => f.for_cut === reg.srt_for_cut) : same[0];
 }
 
 /** 某版成片的字幕：for_cut = 成片 sha 的最近一条 accepted srt */
@@ -148,10 +167,15 @@ function pendingText(w: Slot): string {
 function publishedReason(live: Slot[]): string {
   if (!live.length) return "发布记录显示已投出";
   if (live.every((s) => s.by === "founder")) return `${[...new Set(live.map((s) => label(s.platform)))].join("、")} 你标了已发布`;
-  const by = new Map<string, string[]>();
-  for (const f of live) by.set(f.pub_state, [...(by.get(f.pub_state) ?? []), label(f.platform)]);
   const text: Record<string, string> = { scheduled: "已定时投出", reviewing: "已投出、审核中", public: "已公开", overdue: "应已公开" };
-  return [...by].map(([st, ps]) => `${[...new Set(ps)].join("、")} ${text[st] ?? "已投出"}`).join("；");
+  // 直接认的 AI 说法写明是谁报的（「抖音 Codex 报已定时」）
+  const said: Record<string, string> = { scheduled: "报已定时", reviewing: "报已投出、审核中", public: "报已公开" };
+  const by = new Map<string, string[]>();
+  for (const f of live) {
+    const key = f.by === "accepted" ? `${hostLabel(f.host)} ${said[f.pub_state] ?? "报已投出"}` : text[f.pub_state] ?? "已投出";
+    by.set(key, [...(by.get(key) ?? []), label(f.platform)]);
+  }
+  return [...by].map(([t, ps]) => `${[...new Set(ps)].join("、")} ${t}`).join("；");
 }
 
 export function candidatesOf(doc: ProductionDoc): CandidateView[] {
@@ -159,7 +183,7 @@ export function candidatesOf(doc: ProductionDoc): CandidateView[] {
     .filter((f) => f.state === "candidate" || f.state === "pending_match")
     .sort((a, b) => b.at.localeCompare(a.at))
     // 文件名规则得出的候选全列（E4）；只有 1b 的转写打分候选才截前三
-    .map((f) => ({ fact_id: f.id, kind: f.kind, state: f.state, ...(f.sha256 ? { sha256: f.sha256 } : {}), ...(f.path ? { path: f.path } : {}), ...(f.evidence ? { evidence: f.evidence } : {}), ...(f.post_publish ? { post_publish: true } : {}) }));
+    .map((f) => ({ fact_id: f.id, kind: f.kind, state: f.state, ...(f.sha256 ? { sha256: f.sha256 } : {}), ...(f.path ? { path: f.path } : {}), ...(f.evidence ? { evidence: f.evidence } : {}), ...(f.post_publish ? { post_publish: true } : {}), ...(f.state === "pending_match" && f.match_started_at ? { started_at: f.match_started_at } : {}) }));
 }
 
 /**
@@ -178,8 +202,10 @@ export function matchingRegistration(doc: ProductionDoc, body: string, cut: Deci
 
 /** 登记绑的文件都在（availability=present）才可发布；缺了阶段不退，只拦发布 */
 function registrationFilesPresent(doc: ProductionDoc, reg: Registration): boolean {
-  const shas = [reg.cut_sha, reg.cover_3x4_sha, reg.cover_4x3_sha, reg.srt_sha].filter((s): s is string => Boolean(s));
-  return shas.every((sha) => accepted(doc).some((f) => f.sha256 === sha && f.availability === "present"));
+  const shas = [reg.cut_sha, reg.cover_3x4_sha, reg.cover_4x3_sha].filter((s): s is string => Boolean(s));
+  // 字幕按登记绑的那条看：同 sha 但绑别版成片的字幕不算数
+  const srtOk = !reg.srt_sha || registeredSrt(doc, reg)?.availability === "present";
+  return srtOk && shas.every((sha) => accepted(doc).some((f) => f.sha256 === sha && f.availability === "present"));
 }
 
 function editingMissing(doc: ProductionDoc, cut: Decision | null, cover: Decision | null): { missing: string[]; badges: string[] } {
@@ -190,33 +216,78 @@ function editingMissing(doc: ProductionDoc, cut: Decision | null, cover: Decisio
   const badges: string[] = [];
   if (!newest) missing.push(MISSING.cut);
   else if (!srtFor(doc, (cut && liveFact(doc, "cut", cut.sha256)?.sha256) ?? newest.sha256)) missing.push(MISSING.srt);
-  const has34 = facts.some((f) => f.kind === "cover" && f.ratio === "3:4");
-  const has43 = facts.some((f) => f.kind === "cover" && f.ratio === "4:3");
-  if (!has34) missing.push(MISSING.cover34);
-  if (!has43) missing.push(MISSING.cover43);
-  if (newest && !cut) {
+  // 封面按有效组算（review-inbox §6）：不凭「最新一版缺哪个比例」猜配对
+  const groups = validCoverGroups(doc);
+  const complete = groups.filter((g) => g.complete);
+  const coverAsk = coverRejectNote(doc, complete.at(-1)?.at);
+  if (!complete.length) {
+    const last = groups.at(-1);
+    if (!last?.slots["3:4"].length) missing.push(MISSING.cover34);
+    if (!last?.slots["4:3"].length) missing.push(MISSING.cover43);
+  }
+  // 成片待你审只认 agent 标过「可以审了」的（§7-1）：对账自动收的导出不算
+  const marked = latestMarkedCut(doc);
+  const review = marked?.fact ?? null;
+  // 创始人点了「还要改…」：在 agent 交新版 / 重新标可以审之前，说的是那句话，不再是「成片待你审」（verifier 2a P1）
+  const cutAsk = marked ? cutRejectNote(doc, marked.fact.sha256!, marked.marked_at) : null;
+  if (review && !cut && cutAsk) missing.push(`${relayed(cutReject(doc, marked!.fact.sha256!, marked!.marked_at))}你说还要改：${cutAsk}`);
+  else if (review && !cut) {
     missing.push(MISSING.cutReview);
     // 抽帧检查（spec 2026-09-30 §6）：没结果 / 有未放行的缝 / 没跑成且没整条放行 → 写进还差什么
-    const v = sliverVerdict(doc, newest.sha256!, null);
+    const v = sliverVerdict(doc, review.sha256!, null);
     if (!v.ok && v.missing) missing.push(v.missing);
   }
-  if (has34 && has43 && !cover) missing.push(MISSING.coverPick);
+  if (complete.length && !cover) missing.push(coverAsk ? `${relayed(coverReject(doc, complete.at(-1)?.at))}你说封面还要改：${coverAsk}` : MISSING.coverPick);
   const approvedCut = cut ? liveFact(doc, "cut", cut.sha256) : null;
-  if (approvedCut && newest && newest.sha256 !== approvedCut.sha256 && newest.at > approvedCut.at) badges.push("有新成片待你审");
+  if (approvedCut && review && review.sha256 !== approvedCut.sha256 && review.at > approvedCut.at) badges.push("有新成片待你审");
   return { missing, badges };
 }
 
+const clipNote = (s: string) => (Array.from(s).length > 40 ? `${Array.from(s).slice(0, 40).join("")}…` : s);
+
+/** 这版成片在「可以审了」之后被打回的那句话（之后又标过就不算） */
+const cutReject = (doc: ProductionDoc, sha: string, markedAt: string) => inRound(doc, doc.decisions).filter((d) => d.type === "cut_reject" && d.sha256 === sha && d.at >= markedAt).at(-1);
+const coverReject = (doc: ProductionDoc, newestGroupAt: string | undefined) => inRound(doc, doc.decisions).filter((d) => d.type === "cover_reject" && (!newestGroupAt || d.at >= newestGroupAt)).at(-1);
+
+export function cutRejectNote(doc: ProductionDoc, sha: string, markedAt: string): string | null {
+  const r = cutReject(doc, sha, markedAt);
+  return r ? clipNote(r.note ?? "") : null;
+}
+
+/** 最新一组完整封面之后的打回（之后又交了新的一组就不算） */
+export function coverRejectNote(doc: ProductionDoc, newestGroupAt: string | undefined): string | null {
+  const r = coverReject(doc, newestGroupAt);
+  return r ? clipNote(r.note ?? "") : null;
+}
+
+/** 对话里 agent 转述的「还要改」（source chat，含旧值）：不能说成创始人自己在看板上写的 */
+export const RELAYED = "（对话里转述）";
+const relayed = (d: { source: string } | undefined) => (isChatSource(d?.source) ? RELAYED : "");
+/** 「你说还要改」那一行（可能带「对话里转述」前缀） */
+export const isFounderAsk = (m: string) => m.startsWith("你说") || m.startsWith(`${RELAYED}你说`);
+
 function editingReason(missing: string[]): string {
+  const ask = missing.find(isFounderAsk);
+  if (ask) return `${ask}，等 AI 交新版`;
   if (missing.includes(MISSING.cutReview)) return "有成片待你审";
   if (missing.includes(MISSING.coverPick)) return "有封面待你选";
   return missing.length ? `剪辑中，还差：${missing.join("、")}` : "剪辑中";
 }
 
+/** 对话里定的批准（D1–D4 都标）：看板上标出来，原话在决定记录里 */
+function chatBadges(cut: Decision | null, cover: Decision | null): string[] {
+  return [...(isChatSource(cut?.source) ? ["成片是对话里定的"] : []), ...(isChatSource(cover?.source) ? ["封面是对话里定的"] : [])];
+}
+
 /** 调用方保证：视频平台 + 有效认稿（`scriptApprovalFor`） */
-export function deriveStage(doc: ProductionDoc, body: string, publish: PublishEvidence): Derived {
+export function deriveStage(raw: ProductionDoc, body: string, publish: PublishEvidence): Derived {
+  // 还没按 §6.2 迁移的 doc：内存里按同一条规则迁移（对账写盘后是同一个结果）
+  const pre = validCoverApproval(raw, body);
+  const doc = withCoverGroups(raw, new Set([pre?.cover_3x4_sha, pre?.cover_4x3_sha].filter((x): x is string => Boolean(x))));
   const candidates = candidatesOf(doc);
   const base = { candidates, publishable: false, badges: [] as string[], missing: [] as string[], alerts: [] as string[] };
   const receipts = publishReceipts(doc);
+  const chat = chatBadges(validCutApproval(doc, body), validCoverApproval(doc, body));
   if (publish.verified || receipts.live.length) {
     // 各平台状态已经收进原因句（「抖音、B站 已定时投出」），不再逐条重复成徽章
     const badges = receipts.live.length ? [] : publish.badge ? [publish.badge] : [];
@@ -224,11 +295,12 @@ export function deriveStage(doc: ProductionDoc, body: string, publish: PublishEv
     // 本轮没有登记记录就发出去了（agent 直接发）：发出去的成片没人核过
     // 其他平台已投出时，被驳回平台的原因照样上卡（E35）
     const alerts = [...(inRound(doc, doc.registrations).length ? [] : [UNREGISTERED_PUBLISH]), ...receiptNotes(receipts).alerts, ...gateAlerts(receipts.live)];
-    badges.push(...overrideBadges(receipts.live));
+    badges.push(...overrideBadges(receipts.live), ...chat);
     return { ...base, stage: "已发布", rule: "D1", badges, alerts, publishable: false, evidence, reason: publish.verified && !receipts.live.length && publish.badge ? publish.badge : publishedReason(receipts.live) };
   }
   const notes = receiptNotes(receipts);
-  base.badges = notes.badges;
+  if (receipts.rejected.length && !receipts.pending.length) return allRejected(base, receipts.rejected, chat);
+  base.badges = [...notes.badges, ...chat];
   base.alerts = [...notes.alerts, ...overwrittenAlerts(doc)];
   const cut = validCutApproval(doc, body), cover = validCoverApproval(doc, body);
   const reg = matchingRegistration(doc, body, cut, cover);
@@ -249,17 +321,30 @@ export function deriveStage(doc: ProductionDoc, body: string, publish: PublishEv
     const sliverAlerts = missing.filter((m) => m.startsWith("抽帧缝") || m.startsWith("抽帧检查没跑成"));
     return { ...base, stage: "剪辑中", rule: "D4", missing, alerts: [...base.alerts, ...sliverAlerts], badges: [...base.badges, ...badges], evidence: facts.slice(0, 5).map((f) => `事实 ${f.id}（${f.kind}）`), reason: editingReason(missing) };
   }
-  const suspect = candidates.some((c) => c.kind === "aroll");
-  return { ...base, stage: "待录制", rule: "D5", missing: [MISSING.aroll], badges: [...base.badges, ...(suspect ? ["发现疑似 A-roll"] : [])], evidence: ["有效认稿，本轮还没有制作事实"],
-    reason: suspect ? "认过稿，发现了疑似 A-roll 等你确认" : "认过稿，还没有原片" };
+  // 1b §3-8：pending_match 显示「正在核对原片」，别的候选才是「发现疑似 A-roll」
+  const checking = candidates.some((c) => c.kind === "aroll" && c.state === "pending_match");
+  const suspect = candidates.some((c) => c.kind === "aroll" && c.state === "candidate");
+  const badges = [...base.badges, ...(checking ? [PENDING_BADGE] : []), ...(suspect ? ["发现疑似 A-roll"] : [])];
+  return { ...base, stage: "待录制", rule: "D5", missing: [MISSING.aroll], badges, evidence: ["有效认稿，本轮还没有制作事实"],
+    reason: suspect ? "认过稿，发现了疑似 A-roll 等你确认" : checking ? "认过稿，正在核对 agent 报来的原片" : "认过稿，还没有原片" };
+}
+
+export const PENDING_BADGE = "正在核对原片";
+export const ALL_REJECTED = "全部被驳回";
+
+/** 本轮投出去的平台全部被驳回（吸收 12）：回待发布，红字写每个平台的原因 */
+function allRejected(base: Pick<Derived, "candidates" | "publishable" | "badges" | "missing" | "alerts">, rejected: Slot[], chat: string[]): Derived {
+  const why = rejected.map((s) => `${label(s.platform)}${s.reason ? `：${s.reason}` : ""}`).join("；");
+  return { ...base, stage: "待发布", rule: "D1R", badges: chat, alerts: [`${ALL_REJECTED}（${why}）`], publishable: false,
+    evidence: rejected.map((s) => `槽 ${s.id}（被驳回）`), reason: `${ALL_REJECTED}，改好重新提交` };
 }
 
 /** 写稿段稿件已有制作事实：仍在写稿中，只挂 badge（§2.1） */
 export function writingBadge(doc: ProductionDoc | null): string | null {
   if (!doc) return null;
   const kinds = new Set(accepted(doc).filter((f) => PRODUCTION_KINDS.has(f.kind)).map((f) => f.kind));
-  if (!kinds.size) return null;
+  if (!kinds.size) return inRound(doc, doc.facts).some((f) => f.kind === "aroll" && f.state === "pending_match") ? PENDING_BADGE : null;
   const aroll = kinds.has("aroll"), other = [...kinds].some((k) => k !== "aroll");
-  const what = aroll && other ? "A-roll / 剪辑产物" : aroll ? "A-roll" : "剪辑产物";
-  return `已有 ${what}，等你认稿`;
+  const what = aroll && other ? "原片 / 剪辑产物" : aroll ? "原片" : "剪辑产物";
+  return `已有${what}，等你认稿`;
 }

@@ -1,4 +1,10 @@
-/** 看板上的卡：选题卡（开始写）、稿件卡（⋯ 往回退）、发布行（我发了 / 撤销）。 */
+/** 看板上的卡：选题卡（开始写）、稿件卡（⋯ 往回退 / 移入回收站）、发布行（我发了 / 撤销）。 */
+import { HandOffButton } from "./HandOffButton";
+import { ExampleTag } from "./ExampleTag";
+import { handoffLine, WRITER_LABEL } from "./hand-off";
+import type { HostId } from "./onboarding/connect-api";
+import { PlatformChips } from "./PlatformChips";
+import { showChips } from "./publish-targets";
 import { Button } from "../components/Button";
 import { useState } from "react";
 import { invoke } from "../transport";
@@ -9,9 +15,9 @@ import { artifactUrl } from "./board-parts";
 import { CodexPublishButton } from "./CodexPublish";
 import { showCodexPublish } from "./codex-publish";
 import { useProjectReview } from "./use-project-review";
-import { markPublished, revokeHandoff, unmarkPublished } from "./board-api";
+import { loadBoard, markPublished, revokeHandoff, unmarkPublished } from "./board-api";
 import {
-  backMoves, itemMeta, platformName, publishHeadline, publishLine, topicSourceLabel,
+  WRITING_REFUSAL, backMoves, canTrash, itemMeta, platformName, publishHeadline, publishLine, topicSourceLabel, cardArollBadges,
   type BackMove, type BoardColumn, type BoardItem, type BoardTopic, type PlatformPublication,
 } from "./board-columns";
 
@@ -45,7 +51,7 @@ async function runRevoke(item: BoardItem, reload: () => Promise<void>): Promise<
   try { toast(revokeText(await revokeHandoff(item.id, item.handoffHash))); } finally { await reload(); }
 }
 
-export function TopicCard(props: DragProps & { topic: BoardTopic; busy: boolean; onStart: () => void; onOpen: () => void; onTrash: () => void }) {
+export function TopicCard(props: DragProps & { topic: BoardTopic; busy: boolean; onStart: (host?: HostId) => void; others?: HostId[]; onOpen: () => void; onTrash: () => void; reload?: () => Promise<void> }) {
   const t = props.topic;
   const meta = [topicSourceLabel(t.source), relativeLabel(t.renewedAt ?? t.createdAt)].join(" · ");
   return <article className="bcard" draggable={!props.busy} aria-busy={props.busy}
@@ -63,14 +69,21 @@ export function TopicCard(props: DragProps & { topic: BoardTopic; busy: boolean;
         </div>
       </details>
     </div>
-    <div className="bcard-meta">{meta}</div>
+    <div className="bcard-meta">{t.example && props.reload && <ExampleTag topicId={t.id} reload={props.reload} />}{t.inSlate && <span className="bcard-slate">本周片单</span>}{meta}</div>
     <div className="bcard-actions">
-      <Button size="sm" className="bcard-start" disabled={props.busy} onClick={props.onStart}>{props.busy ? "正在开始…" : "开始写"}</Button>
+      <Button size="sm" className="bcard-start" disabled={props.busy} onClick={() => props.onStart()}>{props.busy ? "正在开始…" : "开始写"}</Button>
+      {/* 只对这一次换一个 AI 写，不改默认（spec 2026-10-15 §B2） */}
+      {(props.others ?? []).length > 0 && <select className="bcard-other" aria-label="换一个 AI 写" value="" disabled={props.busy}
+        onChange={(e) => { const h = e.target.value as HostId; if (h) props.onStart(h); }}>
+        <option value="">换一个 AI 写</option>
+        {props.others!.map((h) => <option key={h} value={h}>{WRITER_LABEL[h]}</option>)}
+      </select>}
     </div>
   </article>;
 }
 
-export function ItemCard(props: DragProps & { item: BoardItem; wpm: number | null; busy: boolean; onOpen: () => void; onMenu: (open: boolean) => void; reload: () => Promise<void> }) {
+export function ItemCard(props: DragProps & { item: BoardItem; wpm: number | null; busy: boolean; onOpen: () => void; onMenu: (open: boolean) => void; reload: () => Promise<void>;
+  siblings?: BoardItem[]; openOther?: (id: string) => void }) {
   const item = props.item;
   const publishing = item.column === "待发布" || item.column === "已发布";
   const meta = itemMeta(item, props.wpm);
@@ -84,15 +97,31 @@ export function ItemCard(props: DragProps & { item: BoardItem; wpm: number | nul
       <div className="bcard-text">
         <button className="bcard-title" title={item.title} onClick={props.onOpen}>
           {item.status === "draft_ready" && <span className="bcard-score bcard-badge">等你认稿</span>}{item.title || "（无标题）"}</button>
+        {item.example && <ExampleTag topicId={item.topicId} reload={props.reload} />}
+        {cardArollBadges(item).map((b) => <span key={b} className="bcard-score bcard-badge">{b}</span>)}
         {meta && <div className={"bcard-meta" + (item.status === "needs_evidence" ? " bcard-red" : "")}>{meta}</div>}
+        <PickupNudge item={item} reload={props.reload} />
         {(item.blockedReason || item.lastError) && <div className="bcard-meta bcard-red">{item.blockedReason || "生成中断，打开稿件查看"}</div>}
         {(item.alerts ?? []).map((a) => <span key={a} className="bcard-alert">{a}</span>)}
+        {item.noScriptApproval && <span className="bcard-meta">没走认稿就发了</span>}
+        {showChips(item.targets, item.column) && <PlatformChips targets={item.targets!} />}
+        {(props.siblings ?? []).map((s) => <span key={s.id} className="bcard-same">同主题：<button onClick={() => props.openOther?.(s.id)}>{platformName(s.platform ?? "")}{s.title && s.title !== item.title ? `《${s.title}》` : ""}</button></span>)}
       </div>
       <BackMenu item={item} onMenu={props.onMenu} reload={props.reload} />
     </div>
     {publishing && <PublishRows item={item} reload={props.reload} />}
     {(item.status === "publish_ready" || item.status === "editing") && item.platform && VIDEO_PLATFORMS.has(item.platform) && <BoardCodexPublish item={item} />}
   </article>;
+}
+
+/** 交出去 30 分钟还没人接手：「重新交给」同一个，或换一个（认领中 / 已接手不出） */
+function PickupNudge({ item, reload }: { item: BoardItem; reload: () => Promise<void> }) {
+  const line = item.column === "写稿中" && item.status === "drafting" ? handoffLine(item.handoff) : null;
+  if (!line?.stale || !item.handoff) return null;
+  const host = item.handoff.host as HostId;
+  return <div className="bcard-actions">
+    <HandOffButton contentId={item.id} mode="write" primary={WRITER_LABEL[host] ? host : undefined} label={(who) => `重新交给 ${who}`} onDone={() => void reload()} />
+  </div>;
 }
 
 function BoardCodexPublish({ item }: { item: BoardItem }) {
@@ -102,19 +131,49 @@ function BoardCodexPublish({ item }: { item: BoardItem }) {
   return <div className="bcard-actions"><CodexPublishButton contentId={item.id} title={review.title || item.title} status={item.status} review={review} /></div>;
 }
 
+/**
+ * 稿件卡移入回收站（spec 2026-10-04 §1）：点下去先重读看板判「正在写」（不用卡上的旧数据），
+ * 正在写就拒；再确认；软删除后回收站里能恢复。
+ */
+export async function trashItem(item: BoardItem, reload: () => Promise<void>): Promise<void> {
+  const before = await trashable(item, reload);
+  if (!before) return;
+  const yes = await confirmDialog({ title: "移入回收站？", body: `《${before.title || "无标题"}》会从看板上拿掉，回收站里可以恢复。`, confirmLabel: "移入回收站", danger: true });
+  if (!yes) return;
+  // 确认框开着的时候可能开写了 / 进了下一步：再判一次；服务端删除口子上还有同一道判定（board_guard）
+  if (!(await trashable(item, reload))) return;
+  try {
+    const r = await invoke("content:delete", { id: item.id, board_guard: true });
+    toast(r.ok ? "已移入回收站（可恢复）" : r.error ?? "没移成，刷新一下再试");
+  } finally { await reload(); }
+}
+
+/** 重读看板判这条现在能不能弃用；不能就说为什么（并刷新），能就给最新的卡 */
+async function trashable(item: BoardItem, reload: () => Promise<void>): Promise<BoardItem | null> {
+  const fresh = await loadBoard();
+  if (!fresh.ok) { toast(fresh.error); return null; }
+  const now = fresh.data.items.find((i) => i.id === item.id);
+  if (!now) { toast("这条已经不在看板上了"); await reload(); return null; }
+  if (now.writing) { toast(WRITING_REFUSAL); return null; }
+  if (!canTrash(now)) { toast("这条已经进了后面的阶段，不能在看板上弃用"); await reload(); return null; }
+  return now;
+}
+
 function BackMenu(props: { item: BoardItem; onMenu: (open: boolean) => void; reload: () => Promise<void> }) {
   const moves = backMoves(props.item);
+  const trash = canTrash(props.item);
   const [busy, setBusy] = useState(false);
-  if (moves.length === 0) return null;
-  const run = async (move: BackMove, el: HTMLDetailsElement | null) => {
+  if (moves.length === 0 && !trash) return null;
+  const run = async (task: () => Promise<void>, el: HTMLDetailsElement | null) => {
     if (el) el.open = false;
     setBusy(true);
-    try { await confirmBackMove(props.item, move, props.reload); } finally { setBusy(false); }
+    try { await task(); } finally { setBusy(false); }
   };
   return <details className="bcard-menu" onToggle={(e) => props.onMenu(e.currentTarget.open)}>
-    <summary aria-label="改阶段">⋯</summary>
+    <summary aria-label="更多操作">⋯</summary>
     <div className="bcard-menu-list">
-      {moves.map((m) => <button key={m.target} disabled={busy} onClick={(e) => void run(m, e.currentTarget.closest("details"))}>{m.label}…</button>)}
+      {moves.map((m) => <button key={m.target} disabled={busy} onClick={(e) => void run(() => confirmBackMove(props.item, m, props.reload), e.currentTarget.closest("details"))}>{m.label}…</button>)}
+      {trash && <button disabled={busy} onClick={(e) => void run(() => trashItem(props.item, props.reload), e.currentTarget.closest("details"))}>移入回收站</button>}
     </div>
   </details>;
 }
@@ -150,7 +209,7 @@ function PublishRow(props: { item: BoardItem; p: PlatformPublication; reload: ()
     <span className="prow-side">
       {p.campaigns.length > 0 && <span className="prow-camp">{p.campaigns.join("、")}</span>}
       {p.manual && <button className="bcard-link" onClick={() => void undoMark(item, p.platform, props.reload)}>撤销</button>}
-      {!p.submitted && <button className="bcard-link" onClick={() => void askMark(item, p.platform, props.reload)}>我发了</button>}
+      {!p.submitted && <button className="bcard-link" onClick={() => void askMark(item, p.platform, props.reload)}>已经发出去了</button>}
     </span>
   </div>;
 }
@@ -166,7 +225,7 @@ function PublishRows(props: { item: BoardItem; reload: () => Promise<void> }) {
     {listed.map((p) => <PublishRow key={p.platform} item={props.item} p={p} reload={props.reload} />)}
     {unlisted.length > 0 && <details className="prow-more">
       <summary>在别的平台发了？</summary>
-      {unlisted.map((p) => <button key={p} className="bcard-link" onClick={() => void askMark(props.item, p, props.reload)}>{platformName(p)} · 我发了</button>)}
+      {unlisted.map((p) => <button key={p} className="bcard-link" onClick={() => void askMark(props.item, p, props.reload)}>{platformName(p)} · 已经发出去了</button>)}
     </details>}
   </div>;
 }

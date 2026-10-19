@@ -38,3 +38,14 @@ sidecars/**/*.pyc
 # 封面生成产物（每张几 MB，累计上百 MB）与一次性脚本草稿：根锚定，不吞 src 下同名目录
 /output/
 /tmp/
+
+# 一键更新留的旧依赖 / 新旧前端（更新成功后自动删除）
+node_modules.prev-*/
+dist.next/
+dist.prev-*/
+
+# 对话拍板时放进会话文件夹的预览文件（spec 2026-10-06 proactive-chat-review）
+review-preview/
+
+# 对标范文全文：版权，只在本机看，不进仓库
+docs/exemplars-draft/*/bench-*.md

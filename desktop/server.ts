@@ -1,12 +1,25 @@
 import { createRuleApprovalHandler } from "../src/desktop/rule-approval.js";
 import { createPublishPrefsHandler } from "../src/desktop/publish-prefs-route.js";
+import { createPlaybookHandler } from "../src/desktop/playbook-route.js";
 import { acquireWriterLock, releaseWriterLock } from "../src/storage/writer-lock.js";
 import { createProjectReviewHandler } from "../src/desktop/project-review-route.js";
 import { createBoardHandler } from "../src/desktop/board-route.js";
+import { createUpdateHandler } from "../src/desktop/update-route.js";
+import { admitMutation } from "../src/desktop/http-busy-guard.js";
+import { detectInterrupted, protectedStamps } from "../src/modules/update/interrupted.js";
+import { createConnectHandler } from "../src/desktop/connect-route.js";
+import { createLibraryHandler } from "../src/desktop/library-route.js";
+import { sweepOrphanPrev, sweepTrash } from "../src/modules/update/deps-swap.js";
+import { lockHeld } from "../src/modules/update/preflight.js";
+import { asrWarmupCount } from "../src/modules/video/asr.js";
+import { localVersion, programRoot, startUpdateScheduler } from "../src/modules/update/check.js";
+import { activeTurnCount } from "../src/desktop/turn-registry.js";
+import { activeWorkCount, runUnlessUpdating } from "../src/modules/update/active-work.js";
+import { getMachineDir } from "../src/storage/storage-roots.js";
+import { launchedByLauncher, launchVia } from "../src/modules/update/remote.js";
 import { contentFile } from "../src/storage/content-project.js";
-import { acquireLibraryLock } from "../src/storage/library-lock.js";
+import { holdProcessLibraryLock, releaseProcessLibraryLocks } from "../src/storage/library-lock.js";
 import { assertLibraryAvailable } from "../src/storage/storage-roots.js";
-import { syncMyContentView } from "../src/storage/my-content-view.js";
 import { archivePublished } from "../src/storage/nas-archive.js";
 import { backupPublished } from "../src/storage/nas-backup.js";
 import { runExclusive } from "../src/storage/storage-mutex.js";
@@ -31,14 +44,17 @@ import { sanitizePayload } from "../src/desktop/ipc-guard.js";
 import { validatePayload } from "../src/desktop/channel-contracts.js";
 import { activeWorkspaceDataDir } from "../src/desktop/workspace-store.js";
 import { resolveServerToken, resolveSessionSecret } from "../src/desktop/server-token.js";
-import { LocalSessionAuth, LOCAL_SUBJECT } from "../src/desktop/server-auth.js";
+import { MIME, serveApp as serveAppFrom } from "../src/desktop/serve-app.js";
+import { LocalSessionAuth, LOCAL_SUBJECT, SESSION_COOKIE, sessionCookieName } from "../src/desktop/server-auth.js";
 import { lookupHostToken } from "../src/desktop/host-tokens.js";
 import { ApprovalGate } from "../src/desktop/approval-gate.js";
 import { reconcileOrphanDrafts } from "../src/desktop/orphan-reconcile.js";
 import { migratePlaintextClaims } from "../src/storage/claims.js";
 import { recoverArollMoves } from "../src/modules/video/handoff/aroll-move.js";
 import { ensureProductionReady } from "../src/modules/production/service.js";
-import { reconcileAll } from "../src/modules/production/reconcile.js";
+// 原片核对作业的处理器与「重启后 pending_match 重新入队」钩子（1b §3-5）：在首次 ensureProductionReady 之前注册
+import "../src/modules/production/legacy-discovery.js";
+import { startSweepLoop } from "../src/modules/production/sweep.js";
 import { resumeEnable } from "../src/modules/production/enable.js";
 import { pullDeps } from "../src/modules/video/handoff/pull-deps.js";
 import { listWorkspaces } from "../src/desktop/workspace-store.js";
@@ -47,7 +63,7 @@ import { expireStaleTopics } from "../src/desktop/topic-expiry.js";
 import { startInboxRuntime } from "../src/desktop/inbox-runtime.js";
 import { startDigestScheduler, stopDigestScheduler } from "../src/desktop/digest-scheduler.js";
 import { getInboxSettingsRaw } from "../src/desktop/settings-inbox.js";
-import { startResearchRuntime } from "../src/desktop/research-runtime.js";
+import { researchBusyCount, startResearchRuntime } from "../src/desktop/research-runtime.js";
 import { serveResearchAsset } from "../src/desktop/research-asset-route.js";
 import { serveCoverIdentityAsset } from "../src/desktop/cover-identity-asset-route.js";
 import { setVideoService } from "../src/desktop/video-handlers.js";
@@ -59,12 +75,12 @@ import { initEngineHealth, probeAllProviders } from "../src/desktop/engine-healt
 import { createRadarCycle, RADAR_CYCLE_INTERVAL_MS } from "../src/desktop/radar-cycle.js";
 import { startManagedCampaignHost } from "../src/modules/campaign/managed-host.js";
 import { startMetricsPullCycle } from "../src/desktop/metrics-pull-cycle.js";
+import { reconcileDue } from "../src/modules/calibration/reconcile.js";
 import { handleMcpRequest, MCP_PROTOCOL_VERSION, normalizeSession } from "../mcp/server.js";
 import { hostAuthorize } from "../mcp/host-policy.js";
-import { startChiefEditor } from "../src/desktop/chief-editor/boot.js";
-import { serveAgentMcp } from "../src/desktop/chief-editor/mcp-route.js";
 
-const releaseLibraryLock = acquireLibraryLock();
+holdProcessLibraryLock();
+const releaseLibraryLock = releaseProcessLibraryLocks;
 process.once("exit", releaseLibraryLock);
 process.once("SIGTERM", () => { releaseLibraryLock(); process.exit(0); });
 process.once("SIGINT", () => { releaseLibraryLock(); process.exit(0); });
@@ -84,6 +100,8 @@ const AUTH = new LocalSessionAuth(
   (token) => lookupHostToken(token),
   // 会话签名用独立密钥，不用交给自动化客户端的 server-token（否则持 token 者可伪造工作台会话批规则）
   resolveSessionSecret(),
+  // cookie 名带端口（1b §9）：预览服务不再顶掉 4317 的登录
+  sessionCookieName(PORT),
 );
 const APPROVALS = new ApprovalGate();
 // D 期已清场(frontend-v2 契约):React 是唯一前端,/ 与 /v2(书签兼容别名)都服务它
@@ -130,31 +148,9 @@ function setSecurityHeaders(res: http.ServerResponse): void {
 }
 
 // ── 静态资源 ──────────────────────────────────────────────────────────────────
-const MIME: Record<string, string> = {
-  ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-  ".cjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
-  ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
-  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".ico": "image/x-icon",
-};
-/** React 前端静态托管:SPA 回退到 index.html;dist 缺失给出构建指引而非裸 404 */
-async function serveApp(res: http.ServerResponse, rel: string): Promise<void> {
-  const clean = rel.replace(/\.\.+/g, "").replace(/^\/+/, "");
-  let file = path.join(FRONTEND_DIST, clean || "index.html");
-  if (!file.startsWith(FRONTEND_DIST)) { res.writeHead(403).end("forbidden"); return; }
-  try {
-    await fs.access(file);
-  } catch {
-    file = path.join(FRONTEND_DIST, "index.html");
-    try {
-      await fs.access(file);
-    } catch {
-      res.writeHead(503, { "Content-Type": "text/plain; charset=utf-8" })
-        .end("前端未构建：先执行 npm run fe:build 再刷新");
-      return;
-    }
-  }
-  res.writeHead(200, { "Content-Type": MIME[path.extname(file)] || "application/octet-stream" });
-  createReadStream(file).pipe(res);
+// 托管与缓存策略在 src/desktop/serve-app.ts（外壳 no-cache、带哈希的 assets 长缓存）
+function serveApp(res: http.ServerResponse, rel: string): Promise<void> {
+  return serveAppFrom(FRONTEND_DIST, res, rel);
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {
@@ -199,7 +195,45 @@ const uploadRoute = createUploadHandler({
 const projectReview = createProjectReviewHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody });
 const ruleApproval = createRuleApprovalHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody });
 const publishPrefs = createPublishPrefsHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody });
+const playbooks = createPlaybookHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody });
 const board = createBoardHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody });
+// 上次更新被硬生生打断（进程被杀 / 机器重启）：启动时认出来，写一份「上次更新中断」结果给页面（第 12 轮 P1）
+try {
+  // 新起的服务、安装一致：上次虽然断了，现在能用，清掉记录不报（e2e 1002 P2-B）
+  const interrupted = detectInterrupted(programRoot(), getMachineDir(), { trustInstall: true });
+  // 上次删到一半被打断留下的垃圾目录：顺手清掉（第 15 轮 P3）；更新正在跑时不碰
+  // 不再被在途记录引用的旧备份（别的戳）也一并清掉；在途记录没写戳（老版本留下的）就不碰备份（第 16 轮 P2-2）
+  if (!lockHeld(getMachineDir())) {
+    // 在途记录那一戳、自动退回失败结果里那一戳都还是恢复来源，不碰（第 17 轮 P3-1）
+    const keep = protectedStamps(getMachineDir());
+    void (async () => {
+      await sweepTrash(programRoot());
+      if (keep) await sweepOrphanPrev(programRoot(), keep);
+    })().catch((err) => console.error("[update] 清垃圾目录 / 旧备份失败:", err instanceof Error ? err.message : err));
+  }
+  if (interrupted) console.error(`[update] ${interrupted.message}`);
+} catch (err) { console.error("[update] 检查上次更新是否中断失败:", err instanceof Error ? err.message : err); }
+
+// 一键更新（self-update §3）：只有用 npm start（启动器写了 pid 文件、就是本进程）起的服务才能被自动重启
+// 这个进程启动时的版本与时刻（e2e 1002 P2-C）：设置页显示真正在跑的版本，磁盘上的 package.json 可能已被没跑完的更新换掉
+const RUNNING_VERSION = localVersion(programRoot());
+const PROCESS_STARTED_AT = Date.now();
+const updateRoute = createUpdateHandler({
+  authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), readBody,
+  root: programRoot(), machineDir: getMachineDir(), port: PORT,
+  runningVersion: RUNNING_VERSION, processStartedAt: PROCESS_STARTED_AT,
+  // 对话轮 + 后台写稿 / 生图 / 推送等长任务（self-update，Codex 审第 2 轮 P1）
+  // 剪辑与深调研的 runner 在跑也算（第 12 轮 P2：重启后它们要等 10 / 30 分钟才会被捡回，不能被重启打断）
+  inProcessTurns: () => activeTurnCount() + activeWorkCount() + (videoService?.busyCount() ?? 0) + researchBusyCount() + asrWarmupCount(),
+  // 启动器记的是 tsx 的 pid，跑本文件的是 tsx 拉起的另一个 node：比启动器发给这一次启动的标记，不比 pid
+  launcher: async () => ({ running: true, managed: launchedByLauncher(getMachineDir()), via: launchVia() }),
+});
+
+// 一键接入宿主（onboarding-connect §3）：写宿主用户配置，只认同源浏览器会话
+const connectRoute = createConnectHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), readBody });
+// 「资料放哪」（onboarding-connect §7.3）：当场建库；浏览器会话或本机命令行（autocrew init）
+const libraryRoute = createLibraryHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), readBody,
+  onActivated: () => rebindToActiveLibrary() });
 
 const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse) => {
   setSecurityHeaders(res);
@@ -215,9 +249,17 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
       return;
     }
   }
+  // 一键更新（Codex 审第 11 轮 P1）：浏览器的每个写请求在处理完之前都算在跑；更新中直接回 503「正在更新，稍后再试」
+  if (!admitMutation(req, res, p)) return;
   if ((p === "/mcp" || p.startsWith("/api/")) && !["/api/session", "/api/invoke", "/api/events"].includes(p) && authorize(req)) assertLibraryAvailable();
 
   if (p === "/favicon.ico") { res.writeHead(204).end(); return; }
+  // 启动标记（e2e P1-1）：启动器与更新进程凭它确认端口上应答的就是自己起的那一个；不带任何资料，无需登录
+  if (p === "/__autocrew/launch" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": MIME[".json"], "Cache-Control": "no-store" })
+      .end(JSON.stringify({ ok: true, nonce: process.env.AUTOCREW_LAUNCH_NONCE ?? null, via: launchVia() }));
+    return;
+  }
 
   // React 前端:/ 为主,/v2 为书签兼容别名(D 期清场后同一份 dist)
   if (p === "/v2" || p.startsWith("/v2/")) {
@@ -239,8 +281,6 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
   // 2026-09-06 抓包实测：两家客户端都不要 `Mcp-Session-Id`、都容忍 `GET` 的 405，故不加会话/SSE。
   // 本地版沿用现有 Bearer/session 鉴权；商业远程部署可在此前置 OAuth 资源服务器。
   if (p === "/mcp") {
-    // 总编辑本机 agent 的会话令牌：资料库/归属/执行前审批都按服务端绑定走（chief-editor/mcp-route.ts）
-    if (await serveAgentMcp(req, res, readBody)) return;
     // identify 而非 authorize：401 判定与「这是谁」是同一次查表，分两次等于把 token 目录读两遍。
     const identity = AUTH.identify({ authorization: req.headers.authorization, cookie: req.headers.cookie });
     const authMethod = identity?.method;
@@ -269,7 +309,7 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
     try { request = JSON.parse(await readBody(req)); } catch { res.writeHead(400).end("bad json"); return; }
     const mcpDataDir = await activeDataDir();
     const host = identity?.subject ?? LOCAL_SUBJECT;
-    // 按宿主限权（P6 §3.4）：codex 剪辑工位只放行登记与只读查询，其余宿主不受限。
+    // 按宿主限权（P6 §3.4）：命名宿主能力一样，只拒创始人自己的决定（见 mcp/host-policy.ts）。
     // 会话归因（P6 §3.8）：转发器每进程一个 nonce，Codex 直连可带可不带——只做诊断，缺省 unknown
     const response = await handleMcpRequest(request, {
       principal: { subject: host, plan: "local" },
@@ -302,14 +342,17 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
     }
     let parsed: { token?: string };
     try { parsed = JSON.parse(await readBody(req)); } catch { res.writeHead(400).end(JSON.stringify({ ok: false, error: "bad json" })); return; }
-    const issued = AUTH.issueSession(typeof parsed.token === "string" ? parsed.token : "");
-    if (!issued) { res.writeHead(403).end(JSON.stringify({ ok: false, error: "bad token" })); return; }
+    // 地址栏 token 已失效但会话 cookie 有效（刷新了留着旧 token 的地址）→ 不报错（1b §9）
+    const exchanged = AUTH.exchange(typeof parsed.token === "string" ? parsed.token : "", { cookie: req.headers.cookie });
+    if (!exchanged) { res.writeHead(403).end(JSON.stringify({ ok: false, error: "bad token" })); return; }
+    const legacy = (req.headers.cookie ?? "").split(";").some((c) => c.trim().startsWith(`${SESSION_COOKIE}=`)) ? [AUTH.clearLegacyCookieHeader()] : [];
+    const cookies = [...(exchanged.status === "issued" ? [AUTH.cookieHeader(exchanged.sessionId)] : []), ...legacy];
     res.writeHead(200, {
       "Content-Type": MIME[".json"],
       "Cache-Control": "no-store",
-      "Set-Cookie": AUTH.cookieHeader(issued.sessionId),
+      ...(cookies.length ? { "Set-Cookie": cookies } : {}),
     });
-    res.end(JSON.stringify({ ok: true, expiresAt: issued.expiresAt }));
+    res.end(JSON.stringify(exchanged.status === "issued" ? { ok: true, expiresAt: exchanged.expiresAt } : { ok: true, existing: true }));
     return;
   }
 
@@ -393,8 +436,12 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
 
   if (await projectReview(req, res, url)) return;
   if (await board(req, res, url)) return;
+  if (await updateRoute(req, res, url)) return;
+  if (await connectRoute(req, res, url)) return;
+  if (await libraryRoute(req, res, url)) return;
   if (await ruleApproval(req, res, url)) return;
   if (await publishPrefs(req, res, url)) return;
+  if (await playbooks(req, res, url)) return;
 
   // 统一调用端点:{channel, payload} → handler
   if (p === "/api/invoke" && req.method === "POST") {
@@ -420,6 +467,7 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
       if (wsDir) clean._dataDir = wsDir;
     }
     const ctx: IpcHandlerContext = {
+      authMethod,
       requestApproval: (binding) => APPROVALS.issue(binding),
       consumeApproval: (token, binding) => APPROVALS.consume(token, binding),
       // 流式正文（设计 §Phase 3）:与工具进度同一条 SSE 连接,事件名分开——
@@ -468,6 +516,8 @@ let myContentTimer: NodeJS.Timeout | undefined;
 let archiveStartTimer: NodeJS.Timeout | undefined;
 let archiveTimer: NodeJS.Timeout | undefined;
 let videoService: VideoService | null = null;
+/** 每日摘要启动时绑定的工作区目录（null = 每次现取，切库后自动跟上） */
+let digestBoundDir: string | null = null;
 server.on("close", () => {
   stopCampaignHost?.();
   stopMetricsPull?.();
@@ -482,9 +532,6 @@ server.on("close", () => {
   setVideoService(null);
   void running?.shutdown().catch((err) => console.error("[video] 停机失败:", err instanceof Error ? err.message : err));
 });
-
-// 总编辑本机 agent（2026-09-28 spec）：残留轮标中断、清孤儿进程组，再开门
-await startChiefEditor({ port: PORT, approvals: APPROVALS, broadcast: (data) => broadcast("agent", data) });
 
 // 先清孤儿再开门(SESSION-8 §3.1):上次崩溃遗留的「生成中」占位稿在接收任何
 // 新请求前标记为中断——listen 前执行,与本进程的新生成零竞态;失败不阻断启动。
@@ -539,6 +586,7 @@ try {
     });
     for (const o of r?.recovered ?? []) console.log(`  [production] 事务 ${o.id}(${o.content_id}) → ${o.outcome}`);
     for (const c of r?.index.conflicts ?? []) console.error(`  [production] 字节索引冲突:${c}`);
+    for (const e of r?.hookErrors ?? []) console.error(`  [production] 原片核对没能重新排队:${e}`);
     // 上次启用本体做到一半进程退了:按同一份排除清单续跑(开关只在全部投影冻结完成后才写)
     const resumed = r ? await resumeEnable(dir).catch((err) => { console.error(`[production] 续跑启用失败(${dir}):`, err instanceof Error ? err.message : err); return null; }) : null;
     if (resumed) console.log(`  [production] 续跑启用本体:${resumed.ok ? "完成" : `没完成,${resumed.errors.length} 条失败`}`);
@@ -580,6 +628,7 @@ void startInboxRuntime({ onInboxEvent: (e) => broadcast("inbox", e) })
 // 与收件箱「保存即热重启」的口径不一致。没配 token 的 tick 是一次纯内存判断,不碰网络也不写盘。
 void (async () => {
   const dataDir = await activeWorkspaceDataDir();
+  digestBoundDir = dataDir ?? null;
   await startDigestScheduler({ ...(dataDir ? { dataDir } : {}) });
   const configured = Boolean((await getInboxSettingsRaw())?.botToken);
   console.log(`  [digest] 每日选题摘要:${configured ? "已接线(到点自动发)" : "未配 bot,不发"}`);
@@ -610,7 +659,7 @@ try {
   console.error("[engine] 线路健康启动失败:", err instanceof Error ? err.message : err);
 }
 
-try {
+async function startVideoService(): Promise<void> {
   const videoDataDir = await activeDataDir();
   videoService = createVideoService({
     dataDir: videoDataDir,
@@ -618,8 +667,30 @@ try {
     onError: (msg) => console.error(`[video] ${msg}`),
   });
   setVideoService(videoService, videoDataDir);
+}
+try {
+  await startVideoService();
 } catch (err) {
   console.error("[video] 视频服务启动失败:", err instanceof Error ? err.message : err);
+}
+
+/**
+ * 引导里当场建库后（onboarding-connect §7.3）：启动时绑死旧目录的视频服务、线路健康换到新库。
+ * 视频服务正在剪就不换（会打断剪辑），照实回「重启后生效」。每日摘要启动时若绑了具体工作区，也要重启才切。
+ */
+async function rebindToActiveLibrary(): Promise<string[]> {
+  const later: string[] = [];
+  initEngineHealth(await activeDataDir());
+  if (videoService && videoService.busyCount() > 0) later.push("正在剪的视频跑完、重启 AutoCrew 后，剪辑才用新资料库");
+  else {
+    const old = videoService;
+    videoService = null;
+    setVideoService(null);
+    await old?.shutdown();
+    await startVideoService();
+  }
+  if (digestBoundDir) later.push("每日摘要重启 AutoCrew 后才用新资料库");
+  return later;
 }
 
 server.listen(PORT, HOST, () => {
@@ -650,36 +721,18 @@ server.listen(PORT, HOST, () => {
   // 选题雷达:启动跑一轮 + 每 30 分钟一轮(进程内调度,详见 radar-cycle.ts)。
   // 一轮 = TTL 门刷新 → 真刷新了才入库与清理;缓存新鲜就整轮跳过,不烧付费源也不重评。
   const runRadarCycle = createRadarCycle();
+  // 一键更新：更新中跳过这一拍，跑的时候算在跑（决定清单见 src/modules/update/long-running.ts）
   const tickRadar = () =>
-    void runRadarCycle().catch((err) => {
+    void runUnlessUpdating("选题雷达周期", runRadarCycle).catch((err) => {
       console.error("[topic-radar] 雷达周期失败:", err instanceof Error ? err.message : err);
     });
   tickRadar();
   radarTimer = setInterval(tickRadar, RADAR_CYCLE_INTERVAL_MS);
   radarTimer.unref(); // 定时器不该成为进程退不掉的理由(stop 路径另见 server "close")
 
-  // 「我的内容」视图(storage-layout.md 2026-09-27):启动对账一次 + 每 60 秒一次。
-  // 单飞:上一轮没跑完就跳过本 tick;出错只记日志,单条错误由对账自己写进 ⚠️ 同步出错.txt。
-  let myContentRunning = false;
-  const tickMyContent = () => {
-    if (myContentRunning) return;
-    myContentRunning = true;
-    // 先对账再排文件夹(本体 §4):未启用本体时对账只算影子差异、不写
-    void runExclusive(async () => {
-      const r = await reconcileAll(getDataDir()).catch((err) => {
-        console.error("[production] 对账失败:", err instanceof Error ? err.message : err);
-        return null;
-      });
-      if (r?.errors.length) console.error(`[production] 对账有 ${r.errors.length} 条失败:${r.errors[0].title} ${r.errors[0].error}`);
-      return syncMyContentView();
-    })
-      .then((r) => { if (r.errors.length) console.error(`[my-content] 对账有 ${r.errors.length} 处出错:${r.errors[0]}`); })
-      .catch((err) => console.error("[my-content] 对账失败:", err instanceof Error ? err.message : err))
-      .finally(() => { myContentRunning = false; });
-  };
-  tickMyContent();
-  myContentTimer = setInterval(tickMyContent, 60_000);
-  myContentTimer.unref();
+  // 「我的内容」视图 + 安全巡检(手动收件 spec 2026-10-06):启动一次 + 每 30 分钟一次;对话里「同步一下」走同一个单飞入口。
+  // 不再扫收件箱 / 下载 / 导出目录:空闲时不做任何发现工作。
+  myContentTimer = startSweepLoop();
 
   // NAS 备份 + 归档(storage-layout.md「NAS 归档」;docs/specs/2026-09-29-nas-backup-on-publish.md):
   // 启动 2 分钟后一轮,之后每 24 小时一轮。每轮先把到点的已发布稿增量备份到 NAS,再做 7 天腾空间。
@@ -688,13 +741,14 @@ server.listen(PORT, HOST, () => {
   const tickArchive = () => {
     if (archiveRunning) return;
     archiveRunning = true;
-    void runExclusive(async () => {
+    void runUnlessUpdating("NAS 备份与归档", () => runExclusive(async () => {
       const b = await backupPublished();
       if (b.backedUp.length) console.log(`[nas-backup] 备份 ${b.backedUp.length} 条`);
       if (b.errors.length) console.error(`[nas-backup] ${b.errors.length} 处问题:${b.errors[0]}`);
       return archivePublished();
-    })
+    }))
       .then((r) => {
+        if (!r) return;
         if (r.archived.length) console.log(`[nas-archive] 归档 ${r.archived.length} 条`);
         if (r.errors.length) console.error(`[nas-archive] ${r.errors.length} 处问题:${r.errors[0]}`);
       })
@@ -711,7 +765,12 @@ server.listen(PORT, HOST, () => {
   // 三平台自动回流(回流 spec §4.3):启动跑一轮 + 每 30 分钟一轮。真正的节奏由每平台的
   // TTL(12h)与退避状态机决定——tick 只是把"到点了自动抓"补上;三平台默认全关,
   // 人在数据回流页自己开(不替人做碰后台的决定)。
+  // 版本检查（self-update §2）：启动 1 分钟后一次、之后每 24 小时；失败只记进状态（设置页看得见）
+  startUpdateScheduler(programRoot(), getMachineDir());
+
   stopMetricsPull = startMetricsPullCycle({
     resolveDataDir: async () => activeWorkspaceDataDir(),
+    // 回流后给到期预测做数字对账（预测账本规格 §二）：服务内执行、核写入锁，失败记进对账状态
+    afterPull: (dataDir) => reconcileDue(dataDir),
   });
 });

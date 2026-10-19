@@ -9,6 +9,7 @@ import { acquireLibraryLock } from "./library-lock.js";
 import { syncMyContentView, VIEW_DIR, VIEW_MANIFEST, ERROR_FILE } from "./my-content-view.js";
 import { listDiffs } from "../modules/learnings/diff-tracker.js";
 import { writePack, type WritingPackFile } from "../tools/writer-pack.js";
+import { HUMAN_WRITE } from "./first-body-guard.js";
 
 let release: () => void;
 let temp: string, lib: string, data: string, view: string;
@@ -42,7 +43,7 @@ const root = (c: Content) => resolveContentProject(c.id, data)!.project_root;
 const founderDiffs = async (c: Content) => (await listDiffs({ contentId: c.id }, data)).filter((d) => d.changeType === "创始人在「我的内容」里改稿");
 
 async function make(title: string, status: ContentStatus, extra: Partial<Content> = {}): Promise<Content> {
-  const c = await saveContent({ title, body: `${title} 的正文`, platform: "douyin", status: "drafting", tags: [] }, data);
+  const c = await saveContent({ _provenance: HUMAN_WRITE, title, body: `${title} 的正文`, platform: "douyin", status: "drafting", tags: [] }, data);
   return setState(c, { status, createdAt: new Date(2026, 8, 20, 12).toISOString(), ...extra });
 }
 async function setState(c: Content, patch: Partial<Content>): Promise<Content> {
@@ -80,7 +81,7 @@ describe("我的内容 · 改稿回流", () => {
     expect(after.versions?.at(-1)?.note).toBe("创始人在「我的内容」里改稿");
     const diffs = await founderDiffs(c);
     expect(diffs).toHaveLength(1);
-    expect(diffs[0]).toMatchObject({ field: "body", before: "回流 的正文", after: "创始人改过的口播\n", platform: "douyin" });
+    expect(diffs[0]).toMatchObject({ author: "founder", field: "body", before: "回流 的正文", after: "创始人改过的口播\n", platform: "douyin" });
     expect(await fs.readFile(file, "utf8")).toBe("创始人改过的口播\n");
     expect((await fs.stat(file)).mode & 0o777).toBe(0o644);
     expect((await fs.readdir(folder(col, "回流"))).filter((n) => n.includes("我改过的"))).toEqual([]);

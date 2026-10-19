@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { applyPendingStorage, previewStorage, queueStorage, storageStatus } from "./library-manager.js";
-import { getConfigDir, getHostStateDir, LIBRARY_MARKER, readLibraryLocation, resolveDataDir } from "./storage-roots.js";
+import { getConfigDir, getHostStateDir, getWorkspaceCacheDir, LIBRARY_MARKER, readLibraryLocation, resolveDataDir } from "./storage-roots.js";
 import { acquireLibraryLock, WRITER_LOCK } from "./library-lock.js";
 import { addAssets, getAsset, listLibrary, removeAsset, updateAsset } from "./library-store.js";
 import { createWorkspace, listWorkspaces, switchWorkspace } from "../desktop/workspace-store.js";
@@ -11,6 +11,7 @@ import { saveContent, getContent } from "./local-store.js";
 import { loadWechatMpConfig } from "../modules/publish/wechat-config.js";
 import { writeJsonAtomic } from "./json-atomic.js";
 import { loadProjectRoots } from "../modules/video/handoff/roots.js";
+import { HUMAN_WRITE } from "./first-body-guard.js";
 
 let temp: string, local: string, target: string;
 async function put(file: string, value: unknown) {
@@ -32,7 +33,7 @@ describe("portable libraries", () => {
     await put(path.join(local, "publish.json"), { wechatMp: { wechatAppSecret: "fixture-secret" } });
     await put(path.join(local, "server-token"), "fixture-token");
     await put(path.join(local, "unknown-key"), "fixture-private");
-    const original = await saveContent({ title: "test", body: "version one", platform: "wechat_mp", status: "drafting", tags: [] }, local);
+    const original = await saveContent({ _provenance: HUMAN_WRITE, title: "test", body: "version one", platform: "wechat_mp", status: "drafting", tags: [] }, local);
     const media = path.join(temp, "original.mp4"); await put(media, "media bytes");
     const imported = await addAssets([media], null, local);
     const plan = await queueStorage({ action: "migrate", target });
@@ -175,12 +176,12 @@ describe("portable libraries", () => {
 
   it("migrates the current library back to local storage without reverting new work or reformatting immutable files", async () => {
     await put(path.join(local, "publish.json"), { wechatMp: { wechatAppSecret: "fixture-private" } });
-    const c = await saveContent({ title: "Before NAS", body: "original", status: "drafting", tags: [] }, local);
+    const c = await saveContent({ _provenance: HUMAN_WRITE, title: "Before NAS", body: "original", status: "drafting", tags: [] }, local);
     await queueStorage({ action: "migrate", target }); await applyPendingStorage();
     const sourceId = readLibraryLocation()!.id, configDir = getConfigDir();
     const release = acquireLibraryLock();
     const { updateContent } = await import("./local-store.js");
-    await updateContent(c.id, { title: "Written on NAS", body: "latest NAS draft" });
+    await updateContent(c.id, { _provenance: HUMAN_WRITE, title: "Written on NAS", body: "latest NAS draft" });
     const brief = '{\n  "revision": 2,\n  "summary": "exact original bytes"\n}\n';
     const relativeBrief = "workspaces/default/research/briefs/topic-example.v2.json";
     await put(path.join(target, relativeBrief), brief);
@@ -196,5 +197,20 @@ describe("portable libraries", () => {
     expect(await fs.readFile(path.join(target, relativeBrief), "utf8")).toBe(brief);
     expect(await fs.readFile(path.join(target, "workspaces/default/contents", c.id, "meta.json"), "utf8")).toBe(previousMeta);
     await expect(fs.access(path.join(newLocal, "workspaces/default/project-layout.json"))).rejects.toThrow();
+  });
+});
+
+describe("workspace cache dir", () => {
+  it("stays on this machine for the library and with the explicit directory everywhere else", async () => {
+    const fixture = path.join(temp, "fixture");
+    expect(getWorkspaceCacheDir()).toBe(path.join(local, "cache"));
+    expect(getWorkspaceCacheDir(fixture)).toBe(path.join(fixture, "cache")); // no library: fixtures never share the machine cache
+
+    await put(path.join(target, LIBRARY_MARKER), { version: 1, id: "lib-abc123", createdAt: "2026-10-02T00:00:00.000Z" });
+    await put(path.join(local, "storage.json"), { version: 1, id: "lib-abc123", root: target });
+    const machineCache = path.join(local, "libraries", "lib-abc123", "workspaces", "default", "cache");
+    expect(getWorkspaceCacheDir()).toBe(machineCache);
+    expect(getWorkspaceCacheDir(path.join(target, "workspaces", "default"))).toBe(machineCache);
+    expect(getWorkspaceCacheDir(fixture)).toBe(path.join(fixture, "cache"));
   });
 });

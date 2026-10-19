@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { isWithin } from "../../../storage/storage-roots.js";
 import { runProcess } from "../../video/proc.js";
-import { SUPPORTED_SCHEMA, type Fps, type Json, type Snapshot, type SnapshotAsset } from "./snapshot-types.js";
+import { SUPPORTED_SCHEMAS, type Fps, type Json, type Snapshot, type SnapshotAsset } from "./snapshot-types.js";
 
 /** 读不了：reason 给创始人看；transient = 临时读错（权限、文件写到一半），下次触发重试 */
 export type Read<T> = { ok: true; value: T } | { ok: false; reason: string; transient?: true };
@@ -24,6 +24,8 @@ export function setChatcutDeps(patch: ChatcutDeps | null): void { deps = patch ?
 
 export const defaultProjectsRoot = () => path.join(os.homedir(), "Library", "Application Support", "ChatCut", "projects");
 const projectsRoot = () => (deps.projectsRoot ?? defaultProjectsRoot)();
+/** 本机 ChatCut 工程目录（测试注入假的） */
+export const chatcutProjectsRoot = (): string => projectsRoot();
 
 const ffprobeMedia: MediaProbe = async (file) => {
   const r = await runProcess({ command: "ffprobe", args: ["-v", "error", "-select_streams", "v:0", "-print_format", "json", "-show_streams", "-show_format", file], timeoutMs: 30_000 });
@@ -101,7 +103,7 @@ export async function readTimeline(projectId: string, timelineId?: string): Prom
   if (!projectFile) return { ok: false, reason: "ChatCut 工程文件链到了工程目录以外，不读" };
   const project = await readJson(projectFile);
   if (!project.ok) return project.reason === "missing" ? { ok: false, reason: "本机找不到这个 ChatCut 工程（不是 ChatCut 剪的，或本机没装 ChatCut）" } : project;
-  if (project.value.schemaVersion !== SUPPORTED_SCHEMA) return { ok: false, reason: `ChatCut 工程格式版本（${String(project.value.schemaVersion)}）不认识` };
+  if (!SUPPORTED_SCHEMAS.has(project.value.schemaVersion as number)) return { ok: false, reason: `ChatCut 工程格式版本（${String(project.value.schemaVersion)}）不认识` };
   const entries = Array.isArray(project.value.timelines) ? (project.value.timelines as Json[]) : null;
   if (!entries?.length) return { ok: false, reason: "ChatCut 工程里没有时间线" };
   if (!timelineId && entries.length > 1) return { ok: false, reason: `ChatCut 工程里有 ${entries.length} 条时间线，不知道是哪条（报工程时带上 timeline_id）` };

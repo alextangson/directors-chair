@@ -1,4 +1,5 @@
 import { seriesTransaction } from "../storage/series-transaction.js";
+import { historyGuard } from "./history-guard.js";
 import {
   SERIES_REVIEW_RULES, SERIES_STATES, loadSeriesSnapshot, mergeSnapshot, renderSnapshot, seriesReviewSchema, snapshotAdditions, validateSeriesReview,
   type SeriesReview, type SeriesSnapshot,
@@ -123,7 +124,7 @@ export async function hostReviewPack(contentId: string, pack: ReadyPack, reviewe
     system: buildReviewSystemPrompt({
       hasResearch: Boolean(input.researchSlot?.trim()), hasWritingContract: Boolean(input.writingContract?.trim()),
       ...(input.angle ? { angle: input.angle } : {}), canFindEvidence: input.canFindEvidence,
-      needsHumanNumbers: input.needsHumanNumbers,
+      needsHumanNumbers: input.needsHumanNumbers, spoken: Boolean(input.spoken),
     }).replaceAll("submit_review", "autocrew_review_desk submit") + "\n\n本轮由当前宿主执行，不会另起后台模型。若你也是写作者，必须明确这是自审，不能声称独立审阅。提交issues，服务端按blocker计算结论，无需自行填verdict。受众点评是待验证的编辑判断，不是观众实验或爆款预测。",
     user: buildReviewUserMessage(input).replaceAll("submit_review", "autocrew_review_desk submit") + seriesReviewBlock(rec) +
       `\n\n【受众点评依据】\n本次任务明确受众优先：${basis.writingContract || "未提供"}\n已确认账号画像：${basis.profileSummary || "未设置；不要编造画像"}\n` +
@@ -277,6 +278,8 @@ export async function executeReviewDesk(params: Record<string, unknown>): Promis
   const publicArgs = Object.fromEntries(Object.entries(params).filter(([key]) => !key.startsWith("_")));
   if (!Value.Check(reviewDeskSchema, publicArgs)) return fail("审稿台参数不符合工具契约");
   const contentId = String(params.content_id);
+  const history = await historyGuard(contentId, dataDir);
+  if (history) return history;
   const reviewerHost = typeof params._host === "string" && params._host.trim() ? params._host : DEFAULT_HOST;
   // submit 改审稿结论、推进稿件状态，过令牌门（门在 submitReview 里）；pack 只读不设卡。
   // 令牌只进回执不进写作包：存下来的审稿结果会被重放给别人

@@ -11,19 +11,21 @@ description: |
 
 这条视频的事实只在 AutoCrew 的 content 上。你说出口的每个状态——过审、已交接、剪完、可发布——都要来自本会话里某次工具回执；Codex 的回话、用户转述、你的推断只是线索，拿 `autocrew_content get` 核过才算。稿件处在 `editing` 时归剪辑工位，写作线的工具（`autocrew_writer`、`autocrew_review_desk`、`autocrew_editorial feedback`）不碰它，要改稿先撤回。一个会话只服务一条视频的一个平台（PRD-v4 §4.3：同一上下文连写两个平台会串稿），第二个平台另开会话。模型活全用本会话自己的额度：不选 `execution:"engine"` / `review:"engine"`，不调 `autocrew_generate`。
 
-会话本身不存状态，压缩或重开后从 `autocrew_content get` 接上：还没稿、或审稿还没 accepted → 第 2 步；`draft_ready` / `approved` 且已 accepted → 第 3 步；`editing` → 第 5 步；`publish_ready` → 第 6 步。
+会话本身不存状态，压缩或重开后从 `autocrew_content get` 接上（抖音口播：`approved` 且带 `draftFinal` 即创始人已定稿 → 第 3 步；其余用 `autocrew_draft start{content_id}` 回到写稿）：还没稿、或审稿还没 accepted → 第 2 步；`draft_ready` / `approved` 且已 accepted → 第 3 步；`editing` → 第 5 步；`publish_ready` → 第 6 步。
 
 令牌以最近一次回执为准：`pack` 发的 `claim_token` 一直带到 `handoff`（交接后认领转给 Codex，这枚作废）；撤回、`video_kit` 的回执会给新的，之后改用新的。
 
 ## 1. 开工
 
 - 从晨报来：晨报已给出 `topic_id` 和标题。裸请求：`autocrew_topic {action:"list"}` 找现成选题，没有再 `create`；用户点名一篇已有稿就按上面接上。
+- 抖音口播新稿：直接按 `write-script` 技能走（`autocrew_draft`，立意在它的第 3 步定），不开选题会，下面第 2 步的写手 / 审稿台流程不适用；它的第 6 步创始人在工作台点「定了」就进第 3 步，出处清单已写好，交接时不用再提交 citations。
+- 其他平台的新稿（这条选题还没有真稿）先开选题会：照 `topic-meeting` 技能并行调研、出 3–4 张立意卡，由创始人用原话定（`select_angle` 带 `founder_words`），定了再进第 2 步。不要替他选，也不要绕过；开写入口回 `needs_founder_angle` 就是会还没开完，回 `angle_gate_read_failed` 就把原始错误告诉用户，停下。
 - 平台（只能一个：`xiaohongshu` / `douyin` / `wechat_video` / `bilibili`）和目标口播时长没说就一次问清；其余照对话原话进 `requirements`。
 - 会话标题：选题定下时、`select_angle` 成功后、收稿时标题变了，调桌面工具 `mcp__ccd_session_mgmt__set_session_title{session_id:"self", title}`。这是尽力而为：工具不在（终端 `claude`、Codex、dsh）或用户自己改过标题就跳过，不重试，交付时提一句。
 
-## 2. 写作线
+## 2. 写作线（非抖音口播）
 
-研究、选角、动笔、自审照 `write-script` 技能走（技能列表里没有就读 `../write-script/SKILL.md`），这里只补差异。下面几处若回执还是旧形状，按 `next_action` 走。
+研究、选角、动笔、自审按 MCP 写作守则 autocrew://writing-guide 走，这里只补差异。下面几处若回执还是旧形状，按 `next_action` 走。
 
 - `select_angle` 回 `ready_to_write` 时，`next_action` 已带好 `autocrew_writer pack` 参数，直接领包，不再二次 `prepare`。
 - `pack` 回执里的 `project_root` 是后续唯一项目根；读取 `rules_path` 指向的项目 AGENTS.md。调研、文稿通过服务提交，不直接改导出稿和状态。纯图文同样建项目。
@@ -68,15 +70,25 @@ EOF
 
 封面（gate4）由 Codex 按 [cover-generator](../cover-generator/SKILL.md) 做：只出带本人真实身份的 3:4 + 4:3 一对，走 Codex 订阅内置生图。用户在这个会话里说「做封面」时，你没有那个生图工具——先读 cover-generator 和 identity-lock.md，再派 Codex（装了 Codex 插件就用 `codex-companion task --background --write --cwd <内容项目根>`，否则给用户第 4 步手动那句），交代 paired_draft 模式、定稿路径和本期可用的钩子。不要自己调 `autocrew_cover_review` 出图：那是按次计费的 API，只在用户明说要付费通道时用，而且不出 16:9。
 
+Codex 交来封面或成片（它说做完了、或你看到这条稿有了新的封面组 / 成片版本）时，立刻调 `autocrew_review_inbox {action:"list", content_id, preview_dir:<本会话工作目录>}`，把返回的事摆给用户：`brief` 原样转述，`preview.files` 的路径写成 markdown 链接，`preview.opened` / `problems` 照说；不止一件按编号列。用户回「用」/「还要改：……」后按工具说明 decide。
+
 撤回只凭用户一句话：由当前持有认领的会话携带有效令牌调 `autocrew_video {action:"revoke", content_id, claim_token}`。状态回 `draft_ready`，这一代永久作废；之后改稿、重录、重交都是新一代。
 
 ## 6. 发布包与发布
 
-1. `autocrew_pre_publish {action:"video_kit", content_id, platform, kit:{post_title, caption, cover_text, hashtags?}}`：发布标题、简介、封面大字由你按当前定稿重拟，字数上限以工具说明为准；逐字段报错就改了重交。回 `video_not_done` 就是成片还没登记（谁口头说「已登记」都不算），回到第 5 步等，不出发布包。把这份 kit 摆给用户，他要改就重交。
-2. `autocrew_pre_publish {action:"check", content_id, claim_token}`：`kit_stale` 说明稿改过，重做 kit；其余失败项按 `fix` 处理。
-3. 按 `publish-content` 技能调 `autocrew_publish {action:"ego_lite_prepare", content_id}`，用 ego lite 上传填表。最后那一下发布永远由用户点。
+1. 标题先走方法库：调 `autocrew_pre_publish {action:"title_methods", platform}` 读方法库，按定稿写 3 个四平台通用候选（分属 3 个不同类，各标方法 id 和一句理由）摆给用户挑；都不满意就再出 3 个，或用户自己写（方法记「自拟」）；挑定后按各平台字数和语气改成该平台的 `post_title`（改几个字仍记原方法 id，每个平台各记各的）。稿子太短太空撑不起有张力的标题就直说，不硬凑；标题里的数字、权威、时限、他人反应必须在定稿或证据台账里找得到。回执里有 `title_trial_reminder` 就告诉用户可以出试用期报告；方法留、删、改只能走 `autocrew_insights calib_bump{target:"title_library", op:"propose"}`（写全新库组成）。中期（4 条）只出「判断」不改库；终版（8 条）过了排序门和跨模型审计才是「已验证」，用户点头后再 `op:"apply", confirm:true` 落库。单条爆款只记观察，「样本 1 条，不下结论」照实告诉用户。
+   然后 `autocrew_pre_publish {action:"video_kit", content_id, platform, kit:{post_title, caption, cover_text, hashtags?, title_candidates, title_method}}`：简介、封面大字由你按当前定稿重拟，字数上限以工具说明为准；逐字段报错就改了重交，`warnings` 里的标题数字提示要核对但不挡交包。回 `video_not_done` 就是成片还没登记（谁口头说「已登记」都不算），回到第 5 步等，不出发布包。把这份 kit 摆给用户，他要改就重交。
+2. 盲预测（判断要对账）：`video_kit` 回执里的 `calibration` 就是提示。先问创始人有没有看过这条的任何数据；已发布满 3 天或看过数据就不做盲预测（只能记 `reconstructed:true`，不进校准池）。
+   - 你先独立逐维自评（9 维 0–5，rubric 见 `calib_status`），**再** `autocrew_insights {action:"calib_blind", calib:{content_id, self_scores, seen_data?}}`；盲评通道只看稿子和评分表。回 `blind_failed` 照实告诉创始人，重试或经他同意 `skip_blind:true`（会被晨报持续提醒）。
+   - `needs_decision` 里每一维摆给创始人选「信盲评 / 信主通道 / 自己给分」，然后 `calib_predict`（已发布的再带一次 `seen_data:false`；落盘时满 3 天会自动记成 reconstructed）交 bucket + 5 档概率（合计 100，冷启动更平）+ 中枢 + 一句理由、推理因素、每档反事实、关键校准假设。预测落盘后不可改，要重做只能 `redo_of`。
+3. `autocrew_pre_publish {action:"check", content_id, claim_token}`：`kit_stale` 说明稿改过，重做 kit；其余失败项按 `fix` 处理。
+4. 按 `publish-content` 技能调 `autocrew_publish {action:"ego_lite_prepare", content_id}`，用 ego lite 上传填表。最后那一下发布永远由用户点。
 
-## 7. 失败态
+## 7. 发布后复盘（T+3）
+
+发布满 3 天（晨报「N 条预测等复盘」）回到这个会话：`autocrew_insights {action:"calib_retro", calib:{content_id, hypothesis_conclusion, verified_factors, observations}}`。数据只取回流；回 `no_data` 就请创始人开回流或手填 `manual_metrics`，不编。不到 3 天别复盘（创始人坚持才 `force_early:true`，升级时降权）；D+7 用 `reading:"d7"` 追加读数；回执里提示可以升级或该清算时，转告创始人，升级走 `calib_bump`，不自己改评分表。
+
+## 8. 失败态
 
 - 主线路 / 中转挂了：与这条路无关，主路不调后台引擎。哪一步要你配 engine，就是走偏了，退回宿主路径。
 - `claim_held`：另一个会话握着这篇（回执给出持有者）。告诉用户并问这条视频归哪个会话；产品只在持有会话 10 分钟没写入后才接受 `takeover:true`，在那之前只能等它 release，不要反复试。持有者是 codex 说明正在剪，不是争抢。

@@ -12,6 +12,7 @@ import { inheritCreativeTask, createCreativeTask, creativeTaskHash, creativeTask
  * 组装 + humanizeZh 只做一次（审稿 spec §2.1：审稿必须看到终稿形态），
  * 审稿产出直接进转正——同一段文本不许算两遍。
  */
+import { beginWork } from "../update/active-work.js";
 import {
   ENGINE_UNCONFIGURED,
   hostOf,
@@ -51,6 +52,7 @@ import {
   type ResearchSnapshot,
 } from "./input-budget.js";
 import { reviewAndConverge } from "./script-review.js";
+import { isSpokenTrackPack } from "./script-review-rules.js";
 import type { ReviewDeps, ReviewMeta, ReviewOutcome } from "./script-review.js";
 import { transitionStatus } from "../../storage/local-store.js";
 import { scanText } from "../filter/sensitive-words.js";
@@ -88,6 +90,8 @@ import { getContent, getDataDir, getTopic, saveContent, updateContent } from "..
 import type { Content, Topic } from "../../storage/local-store.js";
 import { rulesForPlatform } from "../profile/creator-profile.js";
 import { selectEditorialExperiment, renderEditorialExperiment, type EditorialExperiment } from "../retro/editorial-experiments.js";
+import { modelWrite, type WriteRequest } from "../../storage/first-body-guard.js";
+import { admitWritingJob, founderDirectionFor } from "../research/angle-gate.js";
 
 export type { ScriptRequest };
 
@@ -202,7 +206,33 @@ export const RESEARCHING_TITLE_PREFIX = "［调研中］";
  * 占位稿先行（防呆 P1）:分钟级长任务先落盘——中途死不许蒸发,刷新/断连不影响它的存在。
  * 宿主写稿（`autocrew_writer pack`）用**同一个**函数建占位稿：稿件的出生形态不许分叉。
  */
+/** 没带方向、而创始人最近一次是自定角度：按他那句写（所有生成入口共用，不靠各调用方记得注入） */
+async function withFounderDirection(req: ScriptRequest, dataDir?: string): Promise<ScriptRequest> {
+  if (req.direction?.trim()) return req;
+  const own = await founderDirectionFor(req.topicId, dataDir);
+  return own ? { ...req, direction: own } : req;
+}
+
+/**
+ * 落正文时的写作请求：没带方向就是按卡写——带上备料那一刻冻结的卡（id + 指纹 + 简报版本），
+ * 卡口要求它与创始人最新选的那张一致；没有卡身份就拒（不能「匹配任何卡」）。
+ */
+function finalWriteRequest(req: ScriptRequest, attribution: Attribution): WriteRequest {
+  const base = scriptWriteRequest(req);
+  if (base.direction) return base;
+  const used = attribution.usedAngle;
+  return { ...base, cardRequired: true, ...(used ? { card: { id: used.id, hash: used.hash, briefRevision: attribution.usedBriefRevision } } : {}) };
+}
+
+/** 生成请求 → 选题会卡口要对照的写作请求 */
+export function scriptWriteRequest(req: ScriptRequest): WriteRequest {
+  const direction = req.direction?.trim() || undefined;
+  return { ...(direction ? { direction } : {}), skip: req.researchMode === "skip" || Boolean(req.angleSkipReason?.trim()) || Boolean(req.researchReason?.trim()) };
+}
+
 export async function createPlaceholder(req: ScriptRequest, dataDir?: string): Promise<string> {
+  // 生成任务的唯一准入：同步生成与后台生成都从这里建占位稿（请求也要对上创始人最新的决定）
+  await admitWritingJob({ topicId: req.topicId, request: scriptWriteRequest(req) }, dataDir);
   const placeholder = await saveContent(
     {
       title: `${GENERATING_TITLE_PREFIX}${req.topic.slice(0, 40)}`,
@@ -858,7 +888,7 @@ function reviewDraft(
   written: WriterRun,
   // 审稿要跑模型，所以这里的 config 是**必填**——`GenerationInputs.config` 可缺席，
   // 调用方（内部写手）已经在入口处硬性检查过（P5 §1.6）
-  inputs: Pick<GenerationInputs, "profile" | "snapshot" | "angle" | "ledger" | "writingContract"> & { config: EngineConfig },
+  inputs: Pick<GenerationInputs, "pack" | "profile" | "snapshot" | "angle" | "ledger" | "writingContract"> & { config: EngineConfig },
   prompts: { system: string; user: string },
   gate: QualityGateSpec | undefined,
   platform: ScriptRequest["platform"],
@@ -884,6 +914,7 @@ function reviewDraft(
       canFindEvidence: Boolean(evidenceTool),
       // 硬门放行但要人工过目的模糊量词（§4.5 判据三 advisory）：审稿人替创始人先点一遍名
       needsHumanNumbers: written.needsHumanNumbers,
+      spoken: isSpokenTrackPack(inputs.pack.id),
     },
     inputs.config,
     {
@@ -1003,7 +1034,7 @@ async function writeAndFinalize(args: {
 
   const reviewed = await reviewDraft(
     written,
-    { config, profile, snapshot: inputs.snapshot, ...(angle ? { angle } : {}), ledger: inputs.ledger, writingContract: inputs.writingContract },
+    { config, pack: inputs.pack, profile, snapshot: inputs.snapshot, ...(angle ? { angle } : {}), ledger: inputs.ledger, writingContract: inputs.writingContract },
     prompts,
     gate,
     req.platform,
@@ -1095,6 +1126,7 @@ export async function generateScript(
   dataDir?: string,
   deps?: GenerationDeps,
 ): Promise<GeneratedScript> {
+  req = await withFounderDirection(req, dataDir);
   const placeholderId = await createPlaceholder(req, dataDir);
   return runGeneration(placeholderId, req, dataDir, deps);
 }
@@ -1137,10 +1169,13 @@ function runInBackground(
   workLabel: string,
   dataDir?: string,
   deps?: BackgroundDeps,
+  /** 入口在第一个 await 之前就登记的忙碌计数（Codex 审第 5 轮 P2）：后台跑完才释放 */
+  endWork: () => void = () => {},
 ): StartedGeneration {
   const runId = `run-bg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const emit = (e: BackgroundGenEvent) => { try { deps?.onEvent?.(e); } catch { /* 观测层吞错 */ } };
 
+  // 一键更新的忙碌计数（self-update）：后台写稿跑完之前，更新不会重启服务
   const completion = (async () => {
     emit({ role: "writer", kind: "work", label: workLabel, contentId, runId });
     try {
@@ -1158,7 +1193,7 @@ function runInBackground(
       const msg = await writeFailureText(err, dataDir);
       emit({ role: "writer", kind: "run_failed", label: `编剧写稿中断：${msg.slice(0, 80)}`, contentId, runId });
     }
-  })();
+  })().finally(endWork);
   return { contentId, runId, completion };
 }
 
@@ -1172,8 +1207,12 @@ export function startGenerateScript(
   dataDir?: string,
   deps?: BackgroundDeps,
 ): Promise<StartedGeneration> {
-  return createPlaceholder(req, dataDir).then((contentId) =>
-    runInBackground(contentId, req, `编剧开写《${req.topic.slice(0, 24)}》`, dataDir, deps),
+  // 第一个 await 之前就拿到忙碌登记：查锁与登记是同一步，中间不留更新钻进来的缝（Codex 审第 5 轮 P2）
+  const work = beginWork("后台写稿");
+  if (!work.ok) return Promise.reject(new Error(work.error));
+  return withFounderDirection(req, dataDir).then((r) => { req = r; return createPlaceholder(req, dataDir); }).then(
+    (contentId) => runInBackground(contentId, req, `编剧开写《${req.topic.slice(0, 24)}》`, dataDir, deps, work.end),
+    (err) => { work.end(); throw err; },
   );
 }
 
@@ -1197,6 +1236,24 @@ export async function retryGenerateScript(
    */
   override?: Partial<ScriptRequest>,
 ): Promise<StartedGeneration> {
+  await admitWritingJob({ contentId }, dataDir);
+  const work = beginWork("后台重写");
+  if (!work.ok) throw new Error(work.error);
+  try {
+    return await prepareRetry(contentId, dataDir, deps, override, work.end);
+  } catch (err) {
+    work.end();
+    throw err;
+  }
+}
+
+async function prepareRetry(
+  contentId: string,
+  dataDir: string | undefined,
+  deps: BackgroundDeps | undefined,
+  override: Partial<ScriptRequest> | undefined,
+  endWork: () => void,
+): Promise<StartedGeneration> {
   const content = await getContent(contentId, dataDir);
   if (!content) throw new Error(`稿件不存在（${contentId}）`);
   // 「缺证据」和「写崩了」是同一类可重写态（P1 §4.4）：两者都是**没写成**的稿，
@@ -1206,7 +1263,9 @@ export async function retryGenerateScript(
     throw new Error("这稿没有中断记录,不能重写——要改稿请直接说怎么改");
   }
 
-  const req: ScriptRequest = { ...rebuildRequest(content), ...override };
+  const req: ScriptRequest = await withFounderDirection({ ...rebuildRequest(content), ...override }, dataDir);
+  // 合并后的请求（含旧稿上继承来的 direction / 跳过参数）开跑前再对一次创始人最新的决定
+  await admitWritingJob({ contentId, request: scriptWriteRequest(req) }, dataDir);
   await updateContent(
     contentId,
     {
@@ -1223,7 +1282,7 @@ export async function retryGenerateScript(
     const back = await transitionStatus(contentId, "drafting", {}, dataDir);
     if (!back.ok) throw new Error(`稿件退回写作中失败（${contentId}）：${back.error ?? "状态未推进"}`);
   }
-  return runInBackground(contentId, req, `编剧重写《${req.topic.slice(0, 24)}》`, dataDir, deps);
+  return runInBackground(contentId, req, `编剧重写《${req.topic.slice(0, 24)}》`, dataDir, deps, endWork);
 }
 
 /** 转正与拦下两条路共用的一份上下文 */
@@ -1295,6 +1354,7 @@ async function finalizeBlocked(args: FinalizeCommon & { written: WriterRun }): P
     {
       title: written.payload.title,
       body: humanizedText,
+      _provenance: modelWrite("engine", finalWriteRequest(req, args.attribution)),
       hashtags: written.payload.hashtags.map((t) => t.trim()).filter(Boolean),
       // genRequest **不清**：这稿还要重写，重写的依据就是它
       lastError: null,
@@ -1361,6 +1421,7 @@ async function finalizeScript(args: FinalizeArgs): Promise<GeneratedScript> {
     {
       title,
       body: humanizedText,
+      _provenance: modelWrite("engine", finalWriteRequest(req, args.attribution)),
       // 生产计时的「稿成」节点:转正这一刻就是稿成:起点是占位稿的 createdAt(开写)
       draftReadyAt: new Date().toISOString(),
       hashtags: cleanHashtags,

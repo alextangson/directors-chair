@@ -30,7 +30,10 @@ import { scoutSchema, executeScout, SCOUT_DESCRIPTION } from "./src/tools/scout.
 import { reviewDeskSchema, executeReviewDesk, REVIEW_DESK_DESCRIPTION } from "./src/tools/host-review.js";
 import { writerSchema, executeWriter, WRITER_DESCRIPTION } from "./src/tools/writer.js";
 import { deskSchema, executeDesk, DESK_DESCRIPTION } from "./src/tools/desk.js";
+import { reviewInboxSchema, executeReviewInbox, REVIEW_INBOX_DESCRIPTION } from "./src/tools/review-inbox.js";
 import { videoSchema, executeVideo, VIDEO_DESCRIPTION } from "./src/tools/video.js";
+import { draftSchema, executeDraft, DRAFT_DESCRIPTION } from "./src/tools/draft.js";
+import { playbookSchema, executePlaybook, PLAYBOOK_DESCRIPTION } from "./src/tools/playbook.js";
 import { executeInit } from "./src/tools/init.js";
 import { getProStatus, saveProKey } from "./src/modules/pro/gate.js";
 import { verifyKey } from "./src/modules/pro/api-client.js";
@@ -40,6 +43,7 @@ import { ToolRunner } from "./src/runtime/tool-runner.js";
 import { EventBus } from "./src/runtime/events.js";
 import { HookManager } from "./src/runtime/hooks.js";
 import { reviseDraft } from "./src/modules/writing/draft-revision.js";
+import { aiContentWriteRefusal } from "./src/modules/research/angle-gate.js";
 
 // --- Tool Registry ---
 
@@ -85,6 +89,10 @@ export function registerAutocrewCapabilities(runner: ToolRunner): void {
   });
 
   runner.register({ name: "autocrew_scout", label: "AutoCrew Scout", description: SCOUT_DESCRIPTION, parameters: scoutSchema, execute: executeScout });
+  // 灵感 → A-roll 薄路径（2026-10-04）：抖音口播新稿走它，旧的 workflow / writer 线留给其他平台
+  runner.register({ name: "autocrew_draft", label: "AutoCrew Draft", description: DRAFT_DESCRIPTION, parameters: draftSchema, execute: executeDraft });
+  // 体裁手册（2026-10-13）：写稿按立意选的那本写；改动走提案 → 等你拍板
+  runner.register({ name: "autocrew_playbook", label: "AutoCrew Playbook", description: PLAYBOOK_DESCRIPTION, parameters: playbookSchema, execute: executePlaybook });
   runner.register({ name: "autocrew_review_desk", label: "AutoCrew Review Desk", description: REVIEW_DESK_DESCRIPTION, parameters: reviewDeskSchema, execute: executeReviewDesk });
 
   runner.register({
@@ -102,6 +110,9 @@ export function registerAutocrewCapabilities(runner: ToolRunner): void {
     parameters: deskSchema,
     execute: (params) => executeDesk(params),
   });
+
+  // 对话里拍板（spec 2026-10-06 chat-approval）：批准由服务端弹系统窗、创始人点了才算
+  runner.register({ name: "autocrew_review_inbox", label: "AutoCrew Review Inbox", description: REVIEW_INBOX_DESCRIPTION, parameters: reviewInboxSchema, execute: executeReviewInbox });
 
   runner.register({
     name: "autocrew_video",
@@ -198,8 +209,10 @@ export function registerAutocrewCapabilities(runner: ToolRunner): void {
     label: "AutoCrew Pre-Publish",
     description:
       "Pre-publish gate. check: 6 checks before allowing publish (video platforms read the saved video kit, not the script). " +
-      "video_kit{content_id, platform, kit:{post_title, caption, cover_text, hashtags?}}: the host writes the video publish kit; " +
-      "validated and saved, no model call. Editing the draft afterwards makes the kit stale (check returns kit_stale).",
+      "video_kit{content_id, platform, kit:{post_title, caption, cover_text, hashtags?, title_candidates, title_method}}: the host writes the video publish kit; " +
+      "validated and saved, no model call. Editing the draft afterwards makes the kit stale (check returns kit_stale). " +
+      "title_methods{platform?}: the publish-title method library (read it before drafting titles: 3 platform-agnostic candidates from 3 different categories, " +
+      "founder picks or writes their own = \"自拟\", then adapt per platform) plus per-method trial stats.",
     parameters: prePublishSchema,
     execute: executePrePublishTool,
   });
@@ -274,6 +287,9 @@ export function registerAutocrewCapabilities(runner: ToolRunner): void {
           content_id: contentId, draft_hash: inspected.draft_hash, feedback: instruction,
           next_action: { tool: "autocrew_editorial", params: { action: "feedback", content_id: contentId, draft_hash: inspected.draft_hash, feedback: instruction, scope: "draft" }, message: "以本次用户反馈的稳定event_id及user_confirmed:true记录原话，再按反馈回执重领原稿writer包；局部修改传selection，保留未修改部分。" } };
       }
+      // 选题会闸口：后台改写一张占位稿 = 在给它的选题开第一篇；真稿的修订放行
+      const refused = await aiContentWriteRefusal(contentId, params._dataDir as string | undefined);
+      if (refused) return refused;
       const result = await reviseDraft(contentId, instruction, params._dataDir as string | undefined);
       return {
         ok: true,
