@@ -1,6 +1,6 @@
 # 英文版制作做法（前台步骤）
 
-全媒体 spec §3.3 的标准做法，2026-10-23 demo 验证、创始人认可。**这一步在前台会话里做，不派后台 Codex**：ChatCut 的付费生成只有 ChatCut 窗口开着、有人确认时才放行（不开窗口会被自动拒），后台 Codex（审批策略 never）跑不了；一个 ChatCut 项目同一时间只接一个 MCP 客户端。开工前确认创始人在、能点确认；每次付费生成前先报价。
+全媒体 spec §3.3 的标准做法，2026-10-23 demo 验证、创始人认可。**这一步由创始人开的前台 Codex 会话做（Claude 只写脚本和发布文案），不派后台 Codex**：ChatCut 的付费生成只有 ChatCut 窗口开着、有人确认时才放行（不开窗口会被自动拒），后台 Codex（审批策略 never）跑不了；一个 ChatCut 项目同一时间只接一个 MCP 客户端。开工前确认创始人在、能点确认；每次付费生成前先报价。
 
 动 ChatCut 前按仓库 CLAUDE.md 拿锁（`mkdir ~/.cache/autocrew-yt/chatcut.lock`），这一段做完或要问创始人前放锁；写操作带明确的轨道 / item ID。
 
