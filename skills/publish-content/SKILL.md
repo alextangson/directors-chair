@@ -64,6 +64,7 @@ python3 <本技能目录>/scripts/preflight.py /绝对路径/06-publish/publish-
 - 一次失败后检查状态；同一路径不盲试。一次有依据的替代仍失败，就保留现场和精确阻碍。
 - 已核对且未变的字段不反复抓整页。截图留给封面裁切、无语义控件和结果证据。
 - 简单模型执行已确定发布包；内容修改、陌生页面结构、未知提交结果进入异常处理，不自行猜测。
+- 由 Claude 后台派来（任务里带创始人同意发布的原话）时，那句原话就是本次授权；你没法和创始人对话，所以契约要求在最终点击前告诉创始人、而原话没覆盖的事（活动计划、check 过期、缺批准、账号对不上），一律停在最终点击前，把要说明的内容和已完成的平台写进交回报告，不点击、不猜。
 - 保留 published、submitted、reviewing、scheduled 的区别；AutoCrew 登记结果单独记录。
 - 批准 / 登记类拦截（approval_missing、registration_missing、registration_pending、registered_file_changed、cut_registered、cover_registered）不能破例，也不要向用户提「登记例外」：缺批准就调 `autocrew_review_inbox list` 请用户在对话里定，登记没提交按 check 给的原因补齐，封面不是登记那对就重新选封面。不伪造注册。
 - 完成后按 ego Skill 收尾。审核等待或系统登记缺陷不等于发布失败，准确报告剩余项。

@@ -18,4 +18,11 @@
 
 产品仍支持其他用户把资料库直接放 NAS；其正本以 storage 配置和项目绑定为准。未迁移的历史 v1 包仅用于原流程兼容；必须通过迁移清单切换，不能直接改旧包或沿用已撤销凭据。
 
-Codex 白名单只有 autocrew_video match/confirm/handoff（必须带 confirmation_id）/register/status/revoke/report、autocrew_asset add、autocrew_content get、autocrew_desk inbox/claim/release 和 autocrew_status。共用文件夹不扩大写稿、审稿或外部发布权限。
+Codex 白名单：autocrew_video match/confirm/handoff（必须带 confirmation_id）/register/status/revoke/report、autocrew_asset add、autocrew_content get、autocrew_desk inbox/claim/release 和 autocrew_status。
+
+Claude 只写文案，出图、制作、发布由 Claude 派给 Codex（模型分配见 video-session 开头分工表）。被派到这些活时，白名单另加对应工具，只限任务里点名的 content_id：
+- 出图：`autocrew_content` 的 wechat_article `generate_images` / `attach_web_image` / `set_cover`、en_edition `set_thumbnail`。
+- 英文版成片（前台）：`autocrew_content` 的 en_edition `status` / `dub` / `set_placements` / `captions`、`record`、`mark_ready`，照[英文版制作做法](en-edition-recipe.md)。
+- 发布：`autocrew_publish`（`check` / `activities` / `activity_record` / `ego_lite_prepare` / `wechat_mp_draft`；不用 `confirm_published`）、`autocrew_content record kind:publish`、wechat_article 的发布类 op（`push_draft` / `begin_editor` / `final_check` / `mark_editor_done` / `record_*` / `publish_status`）、en_edition `final_check`，照 publish-content 技能；任务里创始人的原话是本次发布授权。
+
+写稿、审稿、改标题和文案、替创始人批准（`autocrew_writer`、`autocrew_review_desk`、`autocrew_editorial`、`autocrew_review_inbox decide`、`set_script` / `set_titles` / `choose_title` / `video_kit`）始终不归 Codex；共用文件夹不扩大这些权限。
