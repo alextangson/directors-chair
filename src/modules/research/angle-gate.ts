@@ -137,6 +137,7 @@ export async function recordFounderAngle(topic: Topic, direction: string, founde
   // 只认最新一次决定：自定角度取代之前选的卡
   return updateTopic(topic.id, {
     selectedAngle: undefined,
+    topicMeetingRequestedAt: undefined, // 立意定了 = 选题会开完，摘要里记下的「待开」随之清掉
     founderAngle: { direction: direction.trim(), founderWords: founderWords.trim(), chosenAt: new Date().toISOString(), topicHash: topicHashOf(topic.title, topic.description ?? "") },
   }, dataDir);
 }

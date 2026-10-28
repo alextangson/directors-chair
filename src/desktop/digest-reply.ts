@@ -7,22 +7,19 @@
  *    true 的那一刻，poller 就不再 appendItem（seam 在 `telegram-poller.handleUpdate`）。
  * 2. **回复永远对最新一份清单生效**，那份不是今天的就在回复里带上它的日期——
  *    不说日期，用户会以为自己点的是今天的第 3 条。
- * 3. **拒绝要说原话**：搜索没配就把 `SEARCH_NOT_CONFIGURED` 那句人话发回去，不起 job、
- *    不假装已排队（「点了没反应」是最坏的失败形态）。
+ * 3. **只记不跑**：引擎调研已下线，回序号只给选题打「待开选题会」标记，回执让人到
+ *    Claude 会话里开选题会；选题找不到就照实说，不假装记下了。
  */
 import { sendTelegramReceipt } from "../modules/inbox/telegram-api.js";
 import {
   interpretDigestReply,
-  jobStatusReply,
+  meetingQueuedReply,
   outOfRangeReply,
   staleDigestPrefix,
-  startedReply,
   DIGEST_SKIP_REPLY,
   type DigestReply,
 } from "../modules/inbox/daily-digest.js";
-import { getJob } from "../modules/research/research-job-store.js";
-import { getDataDir } from "../storage/local-store.js";
-import { triggerDeepResearch } from "./research-runtime.js";
+import { getDataDir, getTopic, updateTopic } from "../storage/local-store.js";
 import type { InboxSettings } from "./settings-inbox.js";
 import { digestDataDir } from "./digest-scheduler.js";
 import { loadDigestState, localDateKey, patchDigestState } from "./digest-state.js";
@@ -37,12 +34,10 @@ export interface DigestReplyDeps {
   /** 状态与选题的落点；缺省跟调度器同一个工作区（回复必须读它写的那份清单） */
   dataDir?: string;
   reply?: (chatId: number, text: string) => Promise<boolean>;
-  trigger?: typeof triggerDeepResearch;
-  getJobImpl?: typeof getJob;
   now?: () => number;
 }
 
-/** 记下「这个序号已经起过调研」——同一个数字再回一次就是查进度，不是再起一轮 */
+/** 记下「这个序号回过了」——同一个数字再回一次不重复记 */
 async function markPicked(n: number, dataDir: string | undefined): Promise<void> {
   const state = await loadDigestState(dataDir);
   if (!state.lastDigest) return;
@@ -57,14 +52,15 @@ async function pickText(
   dataDir: string | undefined,
 ): Promise<string> {
   const { item } = action;
-  if (action.repeat) {
-    const job = await (deps.getJobImpl ?? getJob)(item.topicId, getDataDir(dataDir));
-    return jobStatusReply(item.title, job?.status, job?.failReason);
-  }
-  const res = await (deps.trigger ?? triggerDeepResearch)(item.topicId, dataDir);
-  if (!res.accepted) return res.reason; // 搜索未配 / 研究进行中 / 投递失败：原话回给 Telegram
+  const at = new Date((deps.now ?? Date.now)()).toISOString();
+  const dir = getDataDir(dataDir);
+  const existing = await getTopic(item.topicId, dir);
+  const topic = existing && !existing.deletedAt
+    ? await updateTopic(item.topicId, { topicMeetingRequestedAt: at, renewedAt: at }, dir)
+    : null;
+  if (!topic) return `《${item.title}》这条选题已经不在灵感库里了（可能被删了），没法记下`;
   await markPicked(action.n, dataDir);
-  return startedReply(item.title);
+  return meetingQueuedReply(item.title, item.topicId);
 }
 
 async function replyText(

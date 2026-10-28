@@ -46,8 +46,6 @@ import { deleteExampleTopic } from "../tools/topic-create.js";
  *   engine:recheck     { force? }                          (复探过时的失败 / 「重新检查」；回最新视图)
  *   hosts:list         {}                                  (只读；命名令牌清单，永不含 token 值)
  *   hosts:revoke       { host }                            (删掉 tokens/<host>.token，下一次调用 401)
- *   settings:search_get {}
- *   settings:search_set { provider, api_key, base_url? }
  *   settings:publish_get {}
  *   settings:publish_set { image_api_key?, image_base_url?, image_model?, theme?, author? }
  *   style:update_rule  { rule_id, revision, rule?, disabled? }（不能批准生效）
@@ -137,8 +135,6 @@ import { listConversations, getConversation, deleteConversation } from "../stora
 import {
   getEngineSettings,
   setEngineSettings,
-  getSearchSettings,
-  setSearchSettings,
   getPublishSettings,
   setPublishSettings,
   openEngineConfigFile,
@@ -158,7 +154,6 @@ import {
 import { ledgerHandler } from "./ledger-handler.js";
 import { openConsoleHandler } from "./ego-open-console.js";
 import { emitEngineEvent, readRecentEvents } from "./event-hub.js";
-import { makeEnsureBrief } from "./write-research-gate.js";
 import { claimJob, releaseJob, holdJobUntilSettled, GENERATE_JOB_KEY } from "./job-claims.js";
 import { appendAction } from "./recent-actions.js";
 import { CHANNEL_EVENT_MAP } from "./event-map.js";
@@ -206,8 +201,6 @@ import {
 } from "./video-handlers.js";
 import { patternsListHandler, patternsUpdateHandler, patternsDeleteHandler } from "./pattern-handlers.js";
 import {
-  researchDeepDiveHandler,
-  researchRegenerateAnglesHandler,
   researchStatusHandler,
   researchBriefGetHandler,
   researchListAssetsHandler,
@@ -582,8 +575,6 @@ async function generateBackgroundHandler(payload: Record<string, unknown>): Prom
       dataDir,
       {
         onEvent: (e) => void emitEngineEvent(e, dataDir).catch(() => {}),
-        // 带 topicId 开写且这选题没跑过调研 → 先补一轮再写（闸口故障只降级，不阻断）
-        ensureBriefImpl: makeEnsureBrief(dataDir),
       },
     );
     return { ok: true, pending: true, contentId: started.contentId, runId: started.runId };
@@ -615,7 +606,6 @@ async function generateRetryHandler(payload: Record<string, unknown>): Promise<R
   try {
     const started = await retryGenerateScript(contentId, dataDir, {
       onEvent: (e) => void emitEngineEvent(e, dataDir).catch(() => {}),
-      ensureBriefImpl: makeEnsureBrief(dataDir),
     });
     holdJobUntilSettled(key, started.completion); // claim 持有到后台 settle
     held = true;
@@ -1332,8 +1322,6 @@ export function buildIpcHandlers(deps?: Partial<Record<IpcChannel, IpcHandler>>)
       // W7：WorkBuddy 的 mcp.json 条目不替人删，只提示可一并删除
       return r.ok && p.host === WORKBUDDY_HOST ? { ...r, message: `${String(r.message)}。WorkBuddy 配置里的 autocrew 条目还在：在「设置 · 宿主」点断开会一并删掉` } : r;
     },
-    "settings:search_get": getSearchSettings,
-    "settings:search_set": setSearchSettings,
     "settings:publish_get": getPublishSettings,
     "settings:publish_set": setPublishSettings,
     "style:update_rule": styleUpdateRuleHandler,
@@ -1451,8 +1439,6 @@ export function buildIpcHandlers(deps?: Partial<Record<IpcChannel, IpcHandler>>)
     "patterns:list": patternsListHandler,
     "patterns:update": patternsUpdateHandler,
     "patterns:delete": patternsDeleteHandler,
-    "research:deep_dive": researchDeepDiveHandler,
-    "research:regenerate_angles": researchRegenerateAnglesHandler,
     "research:status": researchStatusHandler,
     "research:brief_get": researchBriefGetHandler,
     "research:list_assets": researchListAssetsHandler,
@@ -1680,7 +1666,7 @@ async function topicSelectAngleHandler(payload: Record<string, unknown>, ctx?: I
     // 唯一「当前有效简报」入口（P1 §3.0）：认 job.briefRevision 指针，不认磁盘最大版——
     // 磁盘上可能躺着一份重跑失败、从未被采纳的 v(N+1)
     const snap = await resolveEffectiveBrief(topicId, getDataDir(dataDir));
-    if (!snap) return { ok: false, error: "这条选题还没有可用简报——先跑一轮深调研" };
+    if (!snap) return { ok: false, error: "这条选题还没有可用简报——先交给 AI 开选题会" };
     if (snap.revision !== revision) {
       return { ok: false, error: `角度候选已更新（当前 v${snap.revision}，你手上是 v${revision}）——刷新后重选` };
     }

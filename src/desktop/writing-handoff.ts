@@ -5,18 +5,20 @@
  * - WorkBuddy：不打开，指令进剪贴板，粘到 WorkBuddy 里发出去。
  * 打不开（不是 macOS / 没装）照实回原因，由前端退回剪贴板。指令对任何接了 AutoCrew MCP 的 agent 都看得懂。
  * 交出去写（write）的时刻记在稿上（writingHandoff），看板据此说「已交给 X，等它接手」。
+ * 交出去调研（research）对的是选题：指令就是「给《标题》开选题会」，触发宿主的选题会技能。
  */
 import { activeClaim } from "../storage/claims.js";
 import { getEngineSettings } from "./settings-engine.js";
-import { getContent, updateContent } from "../storage/local-store.js";
-import { isContentId } from "../storage/entity-id.js";
+import { getContent, getTopic, updateContent } from "../storage/local-store.js";
+import { isContentId, isTopicId } from "../storage/entity-id.js";
 import { claudeLink, openLink, PROGRAM_DIR, type OpenDeps } from "./board-actions.js";
 import { defaultHostEnv } from "./host-connect/env.js";
 import { pickWriter, type WriterPick } from "./host-connect/writing-host.js";
 import type { ConnectHost } from "./host-connect/detect.js";
 import { holderLabel } from "../modules/production/handoff-view.js";
+import { topicMeetingPrompt } from "../modules/inbox/daily-digest.js";
 
-export type HandOffMode = "write" | "look";
+export type HandOffMode = "write" | "look" | "research";
 export interface HandOffDeps extends OpenDeps {
   writer?: (override?: string | null) => WriterPick;
   /** 测试注入：内置引擎（总编辑）配好了没有 */
@@ -71,8 +73,24 @@ const WRITING = new Set(["topic_saved", "drafting", "draft_ready", "reviewing", 
 
 export type HandOffResult = ({ ok: true; content_id: string } & Delivery) | Exclude<WriterPick, { ok: true }> | { ok: false; code: string; error: string; holder?: string };
 
+export type ResearchHandOffResult = ({ ok: true; topic_id: string } & Delivery) | Exclude<WriterPick, { ok: true }> | { ok: false; code: string; error: string };
+
+/**
+ * 选题「交给 X 调研」：调研要联网搜索，只有本机 AI（Claude / Codex / WorkBuddy）做得了——
+ * 总编辑没有搜索，所以这里**不退到总编辑**：一个都没接就是 no_writer（前端说「先接一个 AI」）。
+ */
+export async function handOffResearch(topicId: string, host: string | null | undefined, dataDir: string, deps: HandOffDeps = {}): Promise<ResearchHandOffResult> {
+  if (!isTopicId(topicId)) return { ok: false, code: "bad_request", error: "参数不对" };
+  const t = await getTopic(topicId, dataDir);
+  if (!t || t.deletedAt) return { ok: false, code: "not_found", error: "找不到这条选题" };
+  const pick = host === "chief" ? { ok: false as const, code: "no_writer" as const, error: "总编辑不做调研：先接一个 AI" } : pickFor(deps, host);
+  if (!pick.ok) return pick;
+  const d = await deliver(pick.host, pick.label, topicMeetingPrompt(t.title, t.id), deps);
+  return { ok: true, topic_id: t.id, ...d };
+}
+
 /** 已有稿件「交给 X 写 / 看」：写只在写稿阶段；别的会话正认领着就照实说谁在写，不抢 */
-export async function handOff(contentId: string, input: { host?: string | null; mode: HandOffMode }, dataDir: string, deps: HandOffDeps = {}): Promise<HandOffResult> {
+export async function handOff(contentId: string, input: { host?: string | null; mode: "write" | "look" }, dataDir: string, deps: HandOffDeps = {}): Promise<HandOffResult> {
   if (!isContentId(contentId) || (input.mode !== "write" && input.mode !== "look")) return { ok: false, code: "bad_request", error: "参数不对" };
   const c = await getContent(contentId, dataDir);
   if (!c || c.deletedAt) return { ok: false, code: "not_found", error: "找不到这条稿" };

@@ -41,8 +41,10 @@ describe("planCampaignTeam", () => {
   it("creates a dependency graph and explicit approval boundaries", () => {
     const { tasks } = planCampaignTeam(campaign);
     const strategy = tasks.find((task) => task.id.endsWith("growth-strategy"))!;
-    expect(strategy.dependsOn).toHaveLength(2);
-    expect(tasks.filter((task) => task.status === "ready")).toHaveLength(2);
+    // 市场调研要联网搜索，后台引擎已不做：策略只等业务审计，开局只有审计一项就绪
+    expect(strategy.dependsOn).toEqual([tasks.find((task) => task.id.endsWith("business-audit"))!.id]);
+    expect(tasks.some((task) => task.id.endsWith("market-research"))).toBe(false);
+    expect(tasks.filter((task) => task.status === "ready")).toHaveLength(1);
     expect(tasks.find((task) => task.id.endsWith("paid-ads-execute"))?.requiredApproval).toBe("paid_spend");
     expect(tasks.find((task) => task.id.endsWith("xiaohongshu-execute"))?.requiredApproval).toBe("external_publish");
     expect(tasks.find((task) => task.id.endsWith("xiaohongshu-plan"))?.requiredApproval).toBeUndefined();

@@ -29,7 +29,7 @@ it("没设剪映导出目录：项目外的成片候选被拒，并说清去哪�
   const exported = await writePng(path.join(exportDir, "成片.png"), "cut");
   const r = await reportAbs(v, exported, "final-cut-candidate");
   expect(r).toMatchObject({ ok: false, code: "jianying_dir_unset" });
-  expect(String(r.error)).toMatch(/设置 → 模型 → 剪映导出目录/);
+  expect(String(r.error)).toMatch(/设置 → 本机 → 剪映导出目录/);
 });
 
 it("设了之后：候选以绝对路径入索引并绑定项目与代次；别的角色、别的目录、符号链接段都拒", async () => {

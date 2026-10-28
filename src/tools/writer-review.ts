@@ -431,7 +431,6 @@ function versionNote(pack: ReadyPack, review: ReviewMeta): string {
   const marks = [
     ...(pack.context.wroteWithoutBrief ? ["未带调研简报"] : []),
     ...(pack.context.wroteWithoutAngle ? ["未经角度点选"] : []),
-    ...(pack.context.evidenceNote ? [pack.context.evidenceNote] : []),
   ];
   const judged =
     review.status === "skipped" ? "未经AI审稿" : review.status === "failed" ? `审稿残留 ${review.issues.length} 项` : review.source?.kind === "host_self_review" ? "宿主自审未报告阻断项" : review.source ? "另一凭证主体审阅未报告阻断项" : "AI审稿未发现阻断项";

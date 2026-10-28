@@ -47,6 +47,7 @@ import {
 import {
   PERSPECTIVE_NAMES,
   getJob,
+  settleRetiredEngineJob,
   topicHashOf,
   upsertJob,
   type PerspectiveName,
@@ -62,13 +63,12 @@ import {
 } from "./scout-parallel.js";
 
 export const SCOUT_DESCRIPTION =
-  "Host-driven research; all analysis uses the current conversation model, never a configured LLM API. prepare/pack freezes the complete task and returns task_id + role instructions. search is optional; use host search then read_page{url} when no search key is configured. cite accepts only exact quotes from server-fetched pages. claim_offline explicitly records an unverified user_claim with a reason, never a fallback that pretends research succeeded. Parallel: claim{perspective} issues a perspective_token per perspective so sub-agents work concurrently (same perspective twice: perspective_claimed; idle 30 min: timed_out, re-claimable); fail_perspective{reason} records a visible failure to re-run. The 5th route, account data, is built deterministically (account_data re-runs it). synthesize needs all 5; angles = 3-4 cards each with why_may_perform. Every research action after prepare requires topic_id/task_id; the one exception is claim_offline with content_id+pack_id and no task_id (provided/skip writing has no research task): it registers a number derived from the user's material as user_claim user-<n> in that draft's ledger, reason required. A manual_import draft in draft_ready has no pack: cite/claim_offline take content_id alone for it. Changed requirements never silently replace a task: prepare returns task_changed{diff, keep_current} until you confirm with confirm_task_change:true. Another host's in-flight task can be taken over only after 30 idle minutes (else task_owned); the displaced owner's late writes get lease_lost. Up to 4 read_page calls per topic may run concurrently (5th: task_busy + retry_after_seconds); quota is charged before fetching, so a failed fetch still uses its slot. cite/claim_offline can attach evidence to matching content_id/pack_id (plus claim_token when the draft is claimed, same host included, else claim_held); the per-content 12-item lifetime quota survives force reissues. Changed tasks reject old submissions.";
+  "Host-driven research; all analysis uses the current conversation model, never a configured LLM API. prepare/pack freezes the complete task and returns task_id + role instructions. Search the web with your own host search tool, then read_page{url}. cite accepts only exact quotes from server-fetched pages. claim_offline explicitly records an unverified user_claim with a reason, never a fallback that pretends research succeeded. Parallel: claim{perspective} issues a perspective_token per perspective so sub-agents work concurrently (same perspective twice: perspective_claimed; idle 30 min: timed_out, re-claimable); fail_perspective{reason} records a visible failure to re-run. The 5th route, account data, is built deterministically (account_data re-runs it). synthesize needs all 5; angles = 3-4 cards each with why_may_perform. Every research action after prepare requires topic_id/task_id; the one exception is claim_offline with content_id+pack_id and no task_id (provided/skip writing has no research task): it registers a number derived from the user's material as user_claim user-<n> in that draft's ledger, reason required. A manual_import draft in draft_ready has no pack: cite/claim_offline take content_id alone for it. Changed requirements never silently replace a task: prepare returns task_changed{diff, keep_current} until you confirm with confirm_task_change:true. Another host's in-flight task can be taken over only after 30 idle minutes (else task_owned); the displaced owner's late writes get lease_lost. Up to 4 read_page calls per topic may run concurrently (5th: task_busy + retry_after_seconds); quota is charged before fetching, so a failed fetch still uses its slot. cite/claim_offline can attach evidence to matching content_id/pack_id (plus claim_token when the draft is claimed, same host included, else claim_held); the per-content 12-item lifetime quota survives force reissues. Changed tasks reject old submissions.";
 const text = Type.String();
 const actions = [
   "prepare",
   "pack",
   "status",
-  "search",
   "read_page",
   "cite",
   "claim_offline",
@@ -92,7 +92,6 @@ export const scoutSchema = Type.Object(
       Type.Boolean({ description: "prepare：要求与当前任务不同时，确认按新要求新建任务（先向创作者说明 task_changed 的 diff）" }),
     ),
     perspective: Type.Optional(Type.Union(PERSPECTIVE_NAMES.map((v) => Type.Literal(v)))),
-    query: Type.Optional(text),
     url: Type.Optional(text),
     source_id: Type.Optional(text),
     claim: Type.Optional(text),
@@ -105,7 +104,7 @@ export const scoutSchema = Type.Object(
       }),
     ),
     payload: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-    perspective_token: Type.Optional(Type.String({ description: "claim 发的视角令牌；子代理做这个视角的 search/read_page/cite/perspective/fail_perspective 都带上" })),
+    perspective_token: Type.Optional(Type.String({ description: "claim 发的视角令牌；子代理做这个视角的 read_page/cite/perspective/fail_perspective 都带上" })),
     content_id: Type.Optional(text),
     pack_id: Type.Optional(text),
     claim_token: Type.Optional(
@@ -140,7 +139,7 @@ const nonempty = (v: unknown, name: string) => {
   return s;
 };
 /** 带 perspective 参数、受视角令牌约束的动作 */
-const PERSPECTIVE_SCOPED = new Set(["search", "read_page", "perspective", "fail_perspective"]);
+const PERSPECTIVE_SCOPED = new Set(["read_page", "perspective", "fail_perspective"]);
 function perspectiveOf(value: unknown): PerspectiveName {
   if (!(PERSPECTIVE_NAMES as readonly unknown[]).includes(value))
     throw new HostResearchError("invalid_perspective", "perspective 必须是 audience/evidence/counter/benchmark");
@@ -278,13 +277,10 @@ async function assertTopic(task: HostResearchTask, dir: string): Promise<void> {
   if (!topic || topic.deletedAt || topicHashOf(topic.title, topic.description) !== task.topicHash)
     throw new HostResearchError("task_stale", "选题已变化或删除；旧研究结果未采纳，请按最新要求重新 prepare");
 }
+/** 引擎调研已下线：升级前遗留的在途引擎任务再没人跑完，宿主接手前先把它落失败（原因写明） */
 async function guardEngine(topicId: string, dir: string): Promise<void> {
   const job = await getJob(topicId, dir);
-  if (job && ["queued", "running"].includes(job.status) && job.executedBy?.kind !== "host")
-    throw new HostResearchError(
-      "engine_research_in_flight",
-      "后台引擎研究仍在进行，不能接管并伪造其完成；等该轮结束后再准备宿主研究",
-    );
+  if (job) await settleRetiredEngineJob(job, dir);
 }
 async function publish(
   task: HostResearchTask,
@@ -486,7 +482,7 @@ export async function executeScout(
         await save(task);
         const broker = createResearchBroker({ ...deps.brokerDeps, dataDir: dir, snapshot: task.broker });
         return { ...view(task), perspective: name, perspective_token: token, pack: await promptPack(task, broker, name, dir),
-          note: "把 perspective_token 交给做这个视角的子代理：它的 search / read_page / cite / perspective 提交都带上令牌。做不下去就 fail_perspective 写明原因。" };
+          note: "把 perspective_token 交给做这个视角的子代理：它的 read_page / cite / perspective 提交都带上令牌。做不下去就 fail_perspective 写明原因。" };
       }
       // 已被接受的同一份视角提交原样重发（回执丢了的重试）：令牌虽已收回，也按幂等重放回同一结果，不再写任何东西
       if (action === "perspective" && scoped && args.payload && task.submissionHashes[`perspective:${scoped}`] === digest(args.payload))
@@ -516,19 +512,6 @@ export async function executeScout(
         },
       });
       try {
-        if (action === "search") {
-          const result = await broker
-            .forPerspective(perspectiveOf(args.perspective))
-            .search(nonempty(args.query, "query"));
-          await assertTopic(task, dir);
-          task.broker = broker.snapshot();
-          return {
-            ...view(task),
-            result,
-            usage: broker.usage(),
-            note: "搜索结果仅是线索；引用前必须read_page，不要把摘要当作已读原文。",
-          };
-        }
         if (action === "read_page") {
           const source = args.source_id ? broker.getSource(str(args.source_id)) : null;
           const url = str(args.url) || source?.finalUrl || source?.url || "";

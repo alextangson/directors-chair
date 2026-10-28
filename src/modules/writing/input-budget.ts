@@ -185,14 +185,6 @@ export function renderCoreEvidence(items: readonly CoreEvidenceItem[]): string {
   return externalBlock([clampChars(body, CORE_BLOCK_MAX)]);
 }
 
-/**
- * 两段合成优先级 1 的整块：核心证据在前（论点的地基），补证块在后（为本稿现查的）。
- * 两段各自已经封过顶，这里只负责拼——**不再截断**，截断会切断定界符。
- */
-export function joinCoreEvidence(coreBlock: string, targetedBlock: string): string {
-  return [coreBlock, targetedBlock].map((s) => s.trim()).filter(Boolean).join("\n\n");
-}
-
 // ─── 口吻参考块（优先级 5） ──────────────────────────────────────────────────
 
 const VOICE_HEADING = "【口吻参考（只学他怎么说话，不得当案例讲，也不要说成「我做过」）】";

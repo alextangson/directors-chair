@@ -117,7 +117,7 @@ describe("第 2 步与完成页", () => {
     await click("好了，进去看看");
     await passSetup();
     expect(el.textContent).toContain("去 Claude Code 里说「帮我写一条……」就能开工");
-    expect(el.textContent).toContain("深调研、选题雷达、复盘、人设、每日摘要这几样要用你自己的模型钥匙（DeepSeek 最省事）");
+    expect(el.textContent).toContain("选题雷达、复盘、人设、每日摘要这几样要用你自己的模型钥匙（DeepSeek 最省事）");
     expect(el.textContent).not.toContain("在做");
     expect(btn("去设置里填钥匙")).toBeTruthy();
     await click("进入导演椅");

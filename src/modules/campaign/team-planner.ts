@@ -66,7 +66,6 @@ function unique<T>(items: T[]): T[] {
 function rolesForCampaign(campaign: Campaign): CampaignAgentRole[] {
   const roles: CampaignAgentRole[] = [
     "growth_lead",
-    "market_researcher",
     "content_strategist",
     "copywriter",
     "performance_analyst",
@@ -119,19 +118,12 @@ export function planCampaignTeam(campaign: Campaign, now = new Date().toISOStrin
     status: "ready",
     dependsOn: [],
   });
-  const research = seed("market-research", {
-    title: "研究受众、竞品与市场证据",
-    description: "形成受众问题、竞品主张、渠道信号和可引用证据清单。",
-    assigneeRole: "market_researcher",
-    status: "ready",
-    dependsOn: [],
-  });
   const strategy = seed("growth-strategy", {
     title: "制定推广策略与实验假设",
-    description: "基于审计和研究确定定位、信息架构、优先渠道与成功指标。",
+    description: "基于业务审计确定定位、信息架构、优先渠道与成功指标；市场证据缺口标『待验证』。",
     assigneeRole: "growth_lead",
     status: "pending",
-    dependsOn: [audit.id, research.id],
+    dependsOn: [audit.id],
   });
   const messageKit = seed("message-kit", {
     title: "产出核心信息与首轮素材包",
@@ -175,5 +167,5 @@ export function planCampaignTeam(campaign: Campaign, now = new Date().toISOStrin
     dependsOn: [strategy.id],
   });
 
-  return { team, tasks: [audit, research, strategy, messageKit, ...channelTasks, measurement] };
+  return { team, tasks: [audit, strategy, messageKit, ...channelTasks, measurement] };
 }

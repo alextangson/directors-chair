@@ -13,6 +13,8 @@ import {
   referencedProviderIds,
   referrersOf,
   toProviderRows,
+  ROLE_LABEL,
+  ROLE_NOTE,
   type EngineHealthView,
   type HealthProvider,
 } from "./engine-lib";
@@ -105,7 +107,7 @@ describe("assignmentSummary", () => {
 
   it("四个全配同一家 → 不再说「其余」", () => {
     const a = { provider: "newcli", model: "opus" };
-    expect(assignmentSummary({ writer: a, reviewer: a, scout: a, analytics: a })).toBe("写稿、审稿、调研、复盘 → newcli");
+    expect(assignmentSummary({ writer: a, reviewer: a, scout: a, analytics: a })).toBe("写稿、审稿、雷达、复盘 → newcli");
   });
 });
 
@@ -260,7 +262,7 @@ describe("startStaleRecheck：红点挂着就一直打节拍，不靠重渲染",
 });
 
 describe("上次检查与过时判定（顶栏红点只反映现在）", () => {
-  const failed = (at: string) => view({ providers: [provider({ live: { at, ok: false, role: "scout", error: "调研专线 deepseek（api.deepseek.com）连不上：网络不通或域名解析失败。调研已中断。" } })] });
+  const failed = (at: string) => view({ providers: [provider({ live: { at, ok: false, role: "scout", error: "雷达专线 deepseek（api.deepseek.com）连不上：网络不通或域名解析失败。雷达筛选已中断。" } })] });
 
   it("文案带「上次检查：X 前」，且保留「没有备用端点」的提醒", () => {
     const [line] = engineBannerLines(failed("2026-09-05T08:00:00.000Z"), T0);
@@ -277,5 +279,21 @@ describe("上次检查与过时判定（顶栏红点只反映现在）", () => {
   it("复探通了（更新的成功 probe）→ 红点消失", () => {
     const v = view({ providers: [provider({ live: { at: "2026-09-05T08:00:00.000Z", ok: false, role: "scout", error: "连不上" }, probe: { at: "2026-09-05T09:59:00.000Z", ok: true, ms: 200 } })] });
     expect(engineBannerLines(v, T0)).toEqual([]);
+  });
+});
+
+describe("scout 线改名雷达专线（引擎调研下线）", () => {
+  it("标签与说明不再提调研", () => {
+    expect(ROLE_LABEL.scout).toBe("雷达专线");
+    expect(ROLE_NOTE.scout).toBe("雷达筛选、灵感提炼");
+  });
+
+  it("后端报病带「雷达专线」前缀时，横幅里照样剥掉前缀", () => {
+    const [line] = engineBannerLines(
+      view({ providers: [provider({ live: { at: "2026-09-05T09:59:00.000Z", ok: false, role: "scout", error: "雷达专线 deepseek（api.deepseek.com）连不上：网络不通或域名解析失败。雷达筛选已中断。" } })] }),
+      T0,
+    );
+    expect(line.text).not.toContain("雷达专线 deepseek");
+    expect(line.text).toContain("连不上");
   });
 });

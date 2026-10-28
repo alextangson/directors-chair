@@ -455,11 +455,10 @@ function readyPackOf(args: PrepareArgs, base: WritingPackFile, built: WritingCon
       researchSlot: inputs.snapshot.text,
       ...(inputs.angle ? { angleCard: inputs.angle.card } : {}),
       voiceSamples: inputs.profile?.voiceSamples ?? [],
-      canFindEvidence: args.req.modelExecution === "host" || Boolean(inputs.researcher),
+      canFindEvidence: args.req.modelExecution === "host",
       rulesApplied: inputs.profile ? rulesForPlatform(inputs.profile, platform).length : 0,
       wroteWithoutBrief: !inputs.attribution.usedBriefHash,
       wroteWithoutAngle: inputs.wroteWithoutAngle,
-      ...(inputs.evidenceNote ? { evidenceNote: inputs.evidenceNote } : {}),
     },
   };
 }

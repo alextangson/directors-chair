@@ -3,7 +3,6 @@
  * 实现与这些类型拆开住，`research-broker.ts` 原样再导出，调用方照旧从那边 import。
  */
 import type { ExternalPage, FetchExternalOptions } from "../inbox/fetch-external.js";
-import type { WebSearchResult } from "./search-provider.js";
 
 export interface BrokerQuotas {
   searchPerPerspective: number;
@@ -54,13 +53,6 @@ export interface BrokerSearchHit {
   publishedAt?: string;
 }
 
-export interface BrokerSearchResponse {
-  query: string;
-  results: BrokerSearchHit[];
-  /** true = 命中缓存（未计本路配额） */
-  cached: boolean;
-}
-
 export interface BrokerPageResponse {
   sourceId: string;
   /** 请求的 URL */
@@ -100,7 +92,6 @@ export interface PageTicket {
 
 export interface PerspectiveBroker {
   readonly name: string;
-  search(query: string): Promise<BrokerSearchResponse>;
   readPage(url: string): Promise<BrokerPageResponse>;
 }
 
@@ -127,11 +118,6 @@ export interface ResearchBroker {
   /** 第三段：把抓回的页登记进来源/素材/正文字节/缓存；同页已入账就复用那一份 */
   admitPage(ticket: PageTicket, page: ExternalPage): BrokerPageResponse;
 }
-
-export type BrokerSearchImpl = (
-  query: string,
-  opts: { count: number; dataDir?: string },
-) => Promise<WebSearchResult[]>;
 
 export type BrokerFetchImpl = (url: string, opts: FetchExternalOptions) => Promise<ExternalPage>;
 
@@ -163,13 +149,10 @@ export interface ResearchBrokerDeps {
   snapshot?: ResearchBrokerSnapshot;
   /** Host research persists charged quota before network access; failures abort the request. */
   beforeNetwork?: (snapshot: ResearchBrokerSnapshot) => Promise<void>;
-  searchImpl?: BrokerSearchImpl;
   fetchImpl?: BrokerFetchImpl;
   quotas?: Partial<BrokerQuotas>;
   now?: () => number;
   dataDir?: string;
-  /** 搜索缓存键的命名空间：换 provider 即换缓存空间（spec §3 的 (provider, query) 口径） */
-  provider?: string;
   /**
    * 出网活动的可见出口。**只在扣额成功后**发——缓存命中与被配额拒掉的调用都不发，
    * 所以事件量天然被配额封顶（每 job ≤14 搜 + ≤20 读）。回调抛错由 broker 吞掉。

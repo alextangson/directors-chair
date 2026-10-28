@@ -8,7 +8,6 @@ import { executeReview } from "../src/tools/review.js";
 import * as engineConfig from "../src/engine/config.js";
 import * as engineLoop from "../src/engine/loop.js";
 import * as pages from "../src/modules/inbox/fetch-external.js";
-import * as search from "../src/modules/research/search-provider.js";
 import { getJob, PERSPECTIVE_NAMES } from "../src/modules/research/research-job-store.js";
 import { reviewInFlight } from "../src/tools/writer-review.js";
 import * as styleDistiller from "../src/modules/learnings/style-distiller.js";
@@ -180,7 +179,6 @@ describe("Claude MCP writing journey without external model calls", () => {
     const engineLoad = vi.spyOn(engineConfig, "loadEngineConfig");
     const optionalEngineLoad = vi.spyOn(engineConfig, "loadEngineConfigIfConfigured");
     const runLoop = vi.spyOn(engineLoop, "runLoop").mockRejectedValue(new Error("backend models are forbidden in this journey"));
-    const searchWeb = vi.spyOn(search, "searchWeb").mockRejectedValue(new Error("paid search is not part of this journey"));
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("real network requests are forbidden in this journey"));
     const pageFetch = vi.spyOn(pages, "fetchExternalPage").mockResolvedValue({
       finalUrl: GARDEN_URL, title: "社区菜园记录", text: GARDEN_QUOTE, imageCandidates: [],
@@ -266,7 +264,6 @@ describe("Claude MCP writing journey without external model calls", () => {
     expect(roundTrips).toBeLessThanOrEqual(25); // 含两次故意的查验（假引文、submit_status），真实首稿更少
     expect(pageFetch).toHaveBeenCalledTimes(1);
     expect(pageFetch).toHaveBeenCalledWith(GARDEN_URL, { collectImages: true });
-    expect(searchWeb).not.toHaveBeenCalled();
     expect(engineLoad).not.toHaveBeenCalled();
     expect(optionalEngineLoad).not.toHaveBeenCalled();
     expect(runLoop).not.toHaveBeenCalled();

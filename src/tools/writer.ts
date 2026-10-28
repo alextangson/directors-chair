@@ -28,14 +28,6 @@ import { withTokenInNextAction } from "./claim-grant.js";
 import { executeScout } from "./scout.js";
 import { Type, type Static } from "@sinclair/typebox";
 
-import { loadEngineConfig } from "../engine/config.js";
-import { restoreEvidenceLedger } from "../modules/research/evidence-ledger.js";
-import { searchAvailable, SEARCH_NOT_CONFIGURED } from "../modules/research/search-provider.js";
-import {
-  createTargetedResearcher,
-  runFindEvidence,
-  HOST_FIND_EVIDENCE_DEADLINE_MS,
-} from "../modules/research/targeted-research.js";
 import { CLIPBOARD_PLATFORMS } from "../modules/publish/clipboard-publisher.js";
 import { claimGrant, ensureClaim, gateClaimWrite, type WriteGate } from "../storage/claims.js";
 import { getContent, getDataDir } from "../storage/local-store.js";
@@ -69,7 +61,7 @@ export const writerSchema = Type.Object({
   gap: Type.Optional(gapSchema),
   id: Type.Optional(Type.String({ description: "technique：手法卡 id" })),
   version: Type.Optional(Type.Integer({ minimum: 1, description: "technique：手法卡版本" })),
-  execution: Type.Optional(Type.Union([Type.Literal("host"), Type.Literal("engine")], { description: "默认host：备料与补证不调用后台模型。仅用户明确要求后台补证时选择engine；后台API单独计费。" })),
+  execution: Type.Optional(Type.Union([Type.Literal("host"), Type.Literal("engine")], { description: "pack：默认host，备料不调用后台模型；engine 仅用户明确要求后台写稿时选择（后台API单独计费）。补证只走宿主。" })),
   topic_id: Type.Optional(Type.String({ description: "pack：新稿必填选题 id；改已有稿传 content_id 时可省略，沿用原选题，导入稿自动关联修订选题" })),
   platform: Type.Optional(
     Type.String({ description: `pack：目标平台，已有稿可省略以沿用已记录平台。有效值：${CLIPBOARD_PLATFORMS.join(" | ")}` }),
@@ -140,7 +132,7 @@ export const WRITER_DESCRIPTION = [
   "导演椅写作包：由当前宿主模型动笔。新需求先 autocrew_workflow prepare，确认研究与立意状态；这里不会替代完整调研。",
   "1) pack{topic_id, platform, direction?, requirements?, research?, research_mode?, force?}：领包。创作者本次规划与修改反馈完整放进 requirements，只有明确改变立意才放 direction；research 只装原文与出处。材料会进研究槽并记进证据台账；不放进来的材料，正文里引用它的数字会被硬门当作查无出处打回。宿主模式通常直接回 {status:'ready', content_id, pack_id, pack_md, synchronous:true}，超 15 秒才回 'preparing'——仅组装本地材料，不读取模型API配置或自动补证。默认无有效调研或未定立意会被拒，按 next_action 继续。新题必须先开选题会、由创始人用原话定立意（否则 needs_founder_angle）；自带材料用 research_mode=provided。候选有推荐理由但最终由创始人选。相同请求复用已备包；未重提的要求与材料会继承。新要求与旧包不同会返回 pack_request_changed，此时带完整更新与 force:true 重领（旧 pack_id 当场作废），不能继续照旧包写。",
   "2) pack_status{content_id}：pack 回 preparing 时才用，隔 poll_after_seconds 至多查 3 次，再查回 pack_stalled 就按 next_action 重领。ready 时带 pack_md——那就是你要照着写的全部材料（岗位规则、立意卡、研究槽、证据台账）。status='failed' 时看 error，别写，按 next_action 用 pack{force:true} 重来。",
-  "3) find_evidence{content_id, pack_id, need}：默认返回宿主补证任务和citation_target；由你查找，scout read_page/cite核验入账，不启动后台模型。provided/skip 模式没有研究任务，返回 scout claim_offline 登记入口（不需 task_id），推算出的数登记成 user_claim。只有用户明确指定execution=engine才走旧后台补证（搜索与模型单独额度）。",
+  "3) find_evidence{content_id, pack_id, need}：默认返回宿主补证任务和citation_target；由你查找，scout read_page/cite核验入账，不启动后台模型。provided/skip 模式没有研究任务，返回 scout claim_offline 登记入口（不需 task_id），推算出的数登记成 user_claim。",
   "4) submit{content_id, pack_id, attempt, title, body, outline, technique_ids?, hook?, cta?, hashtags?, review?, revision_of?, revision_note?}：交稿。新写作包（pack_md 里有系列快照）必须附 outline（中心思想、信息点、骨架、说过的东西），technique_ids 只能用本包目录里的卡，可为空；回执里的 length_hint 只是提示，不打回。**先看返回体的 status**：repair=按条改、blocked=硬门拦下、awaiting_host_review=稿已落盘，审稿任务就在 review_pack 里，审完按 next_action 调 review_desk submit；reviewing仅显式engine审稿。每交一次 attempt 加一；同号同内容重发返回上次结果，同号换内容报 attempt_conflict。稿件已 draft_ready 时宿主要再改：带 revision_of=当前 draft_hash 直接交（不必重领包），创作者有新意见时仍走 editorial feedback。",
   "5) submit_status{content_id, attempt?}：读取审稿状态。awaiting_host_review时由你调用review_desk pack/submit，不循环等待后台；自审必须如实标记。reviewing=还在审，继续等，**别重交同一稿**（上一稿在审时交下一个 attempt 会被拒）；review_required=按问题修订后重交；accepted=呈现草稿供作者确认；accepted_with_issues/accepted_unreviewed=保存了但质量未通过或未验证，必须披露缺口与下一步。不能把 saved 当作作者满意。",
   "6) gap{content_id, pack_id, gap:{available, missing, questions}}：补证、深挖原因、请创始人补料之后仍撑不满篇幅时交缺口记录，不交凑出来的稿；稿保持写稿中。补了材料后带 force:true 重新 pack。technique{content_id?, id, version}：只读，取手法卡全文（示意案例不是事实材料）。",
@@ -150,10 +142,7 @@ export const WRITER_DESCRIPTION = [
 
 export type WriterResult = Record<string, unknown>;
 
-export interface WriterDeps extends PackDeps, SubmitDeps {
-  /** 单次补证墙钟，缺省 45 秒（宿主那条路的上限）。测试用它把 45 秒缩成几毫秒 */
-  findDeadlineMs?: number;
-}
+export type WriterDeps = PackDeps & SubmitDeps;
 
 function fail(error: string): WriterResult {
   return { ok: false, error };
@@ -194,14 +183,10 @@ function evidenceWithoutResearchTask(pack: ReadyPack, p: { contentId: string; pa
   };
 }
 
-/**
- * 补证（§5.2）：读包 → 恢复台账 → 查 → 原子写回。
- * 配额与 id 都从快照续——不续就是每次调用重置 3 次额度，等于没有上限。
- */
+/** 补证（§5.2）：只走宿主——返回 scout 研究任务与 citation_target，由宿主查找并 cite 入账。 */
 async function doFindEvidence(
-  params: { contentId: string; packId: string; need: string; execution?: "host" | "engine"; host: string },
+  params: { contentId: string; packId: string; need: string; host: string },
   dataDir: string,
-  deps: WriterDeps,
 ): Promise<WriterResult> {
   const content = await getContent(params.contentId, dataDir);
   if (!content) return fail(`稿件不存在：${params.contentId}`);
@@ -211,44 +196,15 @@ async function doFindEvidence(
   // 备料没落地就没有账本可续：这时候查证等于给一份还不存在的包记账
   if (!isReadyPack(pack)) return fail(packNotReadyError(pack));
   if (!params.need) return fail("need 必填：一句话说清你缺什么证据");
-  if (params.execution !== "engine") {
-    const mode = pack.context.req.researchMode;
-    if (mode === "provided" || mode === "skip") return evidenceWithoutResearchTask(pack, params);
-    const prepared = await executeScout({ action: "prepare", topic_id: pack.context.req.topicId, platform: pack.context.platform, requirements: pack.context.req.requirements, direction: pack.context.req.direction, _host: params.host, _dataDir: dataDir });
-    if (prepared.ok === false) return prepared;
-    return { ok: true, status: "awaiting_host_evidence", executed_by: { kind: "host", host: params.host }, model_api_calls: 0,
-      task_id: prepared.task_id, need: params.need, content_id: params.contentId, pack_id: params.packId,
-      next_action: { tool: "autocrew_scout", params: { action: "pack", topic_id: pack.context.req.topicId, task_id: prepared.task_id } },
-      citation_target: { content_id: params.contentId, pack_id: params.packId },
-      note: "由当前宿主查找来源，用scout read_page读取、cite逐字核验。cite带citation_target即可把新证据加入本稿；由已有材料推算出的数改用claim_offline带citation_target登记（不需task_id）。不调用后台补证模型。第三方search服务有独立额度，可用宿主搜索后直接read_page URL。" };
-  }
-  if (!(await searchAvailable(dataDir).catch(() => false))) return fail(SEARCH_NOT_CONFIGURED);
-
-  const ledger = restoreEvidenceLedger(pack.ledger, pack.ledgerBudget);
-  const config = await loadEngineConfig(dataDir);
-  const researcher = createTargetedResearcher({
-    dataDir,
-    config,
-    ledger,
-    ...(deps.runLoopImpl ? { runLoopImpl: deps.runLoopImpl } : {}),
-  });
-  // 宿主这条路的墙钟是 45 秒（MCP 宿主 60 秒就掐工具调用）；内部写手仍走 researcher 的默认 3 分钟
-  const found = await runFindEvidence(researcher, params.need, {
-    deadlineMs: deps.findDeadlineMs ?? HOST_FIND_EVIDENCE_DEADLINE_MS,
-  });
-  // 配额与新条目一起写回：查过了但没记账，等于下一次调用把额度还给宿主
-  const snapshot = ledger.snapshot();
-  pack.ledger = snapshot;
-  pack.ledgerBudget = { max: snapshot.budget.max, used: snapshot.budget.used };
-  await writePack(params.contentId, pack, dataDir);
-
-  return {
-    ok: true,
-    status: found.status,
-    evidence: found.text,
-    item_ids: found.itemIds,
-    find_evidence_left: found.left,
-  };
+  const mode = pack.context.req.researchMode;
+  if (mode === "provided" || mode === "skip") return evidenceWithoutResearchTask(pack, params);
+  const prepared = await executeScout({ action: "prepare", topic_id: pack.context.req.topicId, platform: pack.context.platform, requirements: pack.context.req.requirements, direction: pack.context.req.direction, _host: params.host, _dataDir: dataDir });
+  if (prepared.ok === false) return prepared;
+  return { ok: true, status: "awaiting_host_evidence", executed_by: { kind: "host", host: params.host }, model_api_calls: 0,
+    task_id: prepared.task_id, need: params.need, content_id: params.contentId, pack_id: params.packId,
+    next_action: { tool: "autocrew_scout", params: { action: "pack", topic_id: pack.context.req.topicId, task_id: prepared.task_id } },
+    citation_target: { content_id: params.contentId, pack_id: params.packId },
+    note: "由当前宿主查找来源，用scout read_page读取、cite逐字核验。cite带citation_target即可把新证据加入本稿；由已有材料推算出的数改用claim_offline带citation_target登记（不需task_id）。用宿主自己的搜索找到 URL 后直接 read_page。" };
 }
 
 // ─── Entry ────────────────────────────────────────────────────────────────────
@@ -338,10 +294,9 @@ export async function executeWriter(
         if (!contentId || !packId) return fail("content_id 与 pack_id 必填（都在 pack 的返回里）");
         const gate = await gateWrite(contentId, params, host, dataDir);
         if ("denied" in gate) return gate.denied;
-        const find = () => doFindEvidence({ contentId, packId, need: str(params.need), execution: params.execution === "engine" ? "engine" : "host", host }, dataDir, deps);
         // Host handoff acquires the topic lease; never hold the writer lock while
         // doing so because scout citation attachment takes topic then writer locks.
-        const found = params.execution === "engine" ? await serializeWriterCall(contentId, find) : await find();
+        const found = await doFindEvidence({ contentId, packId, need: str(params.need), host }, dataDir);
         return withTokenInNextAction({ ...found, ...gate.grant });
       }
       case "technique": {

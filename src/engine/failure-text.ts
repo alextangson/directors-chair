@@ -26,7 +26,7 @@ const ROLE_LABEL: Record<FailureRole, string> = {
 const ROLE_ACTION: Record<FailureRole, string> = {
   writer: "写稿",
   reviewer: "审稿",
-  scout: "调研",
+  scout: "雷达筛选",
   analytics: "复盘",
   main: "本次调用",
   chat: "本次对话",

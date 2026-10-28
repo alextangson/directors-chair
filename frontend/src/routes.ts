@@ -13,7 +13,7 @@ export type Route =
   | { view: "playbooks" }
   | { view: "campaigns" }
   | { view: "inbox" }
-  | { view: "settings"; tab?: "platforms" | "models" | "integrations" | "data" };
+  | { view: "settings"; tab?: "platforms" | "models" | "local" | "integrations" | "data" };
 
 const PAGES = new Set(["board", "pipeline", "calibration", "report", "library", "logs", "playbooks", "campaigns", "inbox"]);
 const PANELS = new Set(["cover", "images", "video"]);
@@ -46,7 +46,7 @@ export function parseRouteHash(hash: string): Route {
   }
   if (path === "settings") {
     const tab = query.get("tab");
-    return { view: "settings", ...(tab === "platforms" || tab === "models" || tab === "integrations" || tab === "data" ? { tab } : {}) };
+    return { view: "settings", ...(tab === "platforms" || tab === "models" || tab === "local" || tab === "integrations" || tab === "data" ? { tab } : {}) };
   }
   // 旧的看板卡片深链：卡片面板已去掉，直接打开稿件页（spec 2026-10-04 §2）
   if (path === "board" && query.get("card")) return { view: "editor", id: query.get("card")! };

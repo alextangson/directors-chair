@@ -25,7 +25,7 @@ import { describeEngineFailure, isEngineFailure } from "../../engine/failure-tex
 import { cleanErrorMessage } from "../../desktop/error-clean.js";
 import type { EngineConfig } from "../../engine/config.js";
 import { runLoop } from "../../engine/loop.js";
-import type { LoopFallbackInfo, LoopResult, LoopTool } from "../../engine/loop.js";
+import type { LoopFallbackInfo, LoopResult } from "../../engine/loop.js";
 import { getPack, getPackForPlatform } from "../packs/index.js";
 import type { QualityGateSpec } from "../packs/pack-schema.js";
 import { loadProfile } from "../profile/creator-profile.js";
@@ -45,7 +45,6 @@ import {
 import type { CaptureBlock, Captured, SubmitGateDeps, SubmitPayload } from "./script-payload.js";
 import {
   assembleResearchInput,
-  joinCoreEvidence,
   renderCoreEvidence,
   renderVoiceReference,
   ANCHOR_BUDGET,
@@ -77,14 +76,6 @@ import {
   type OwnMaterialChunk,
   type OwnMaterialRef,
 } from "../research/own-material.js";
-import {
-  buildFindEvidenceTool,
-  createTargetedResearcher,
-  renderTargetedEvidence,
-  researchNeeds,
-  type TargetedResearcher,
-} from "../research/targeted-research.js";
-import { searchAvailable } from "../research/search-provider.js";
 import { topicHashOf } from "../research/research-job-store.js";
 import { getContent, getDataDir, getTopic, saveContent, updateContent } from "../../storage/local-store.js";
 import type { Content, Topic } from "../../storage/local-store.js";
@@ -108,11 +99,6 @@ export interface GeneratedScript {
   /** 本稿注入的个人写作规则数（声音内核+当前平台包——IA v4.2 §B5「越用越像你」可感知） */
   rulesApplied: number;
   /**
-   * 这稿是在**没有调研简报**的情况下写出来的（调研闸口跑不了/失败/等超时）。
-   * 只对带 topicId 的选题写作有意义：带上了简报、或压根不是从选题开写，都是 false。
-   */
-  wroteWithoutBrief: boolean;
-  /**
    * 这条选题**有**角度候选卡，但这稿绕过了点选（角度卡 spec §1.6）。
    * 没有候选卡、或用了手写 direction 都是 false——那两种情况下没有闸口可绕。
    */
@@ -131,17 +117,6 @@ export interface GeneratedScript {
   tokensUsed: number;
 }
 
-/**
- * 开写前「补一轮深调研」的结果（适配器在 desktop 层实现，见 write-research-gate）。
- * 五态里三态都是降级——降级必须带人话 note，写稿侧照写但要留痕。
- */
-export type EnsureBriefOutcome =
-  | { state: "already" }
-  | { state: "ready" }
-  | { state: "unavailable"; note: string }
-  | { state: "failed"; note: string }
-  | { state: "timeout" };
-
 /** 生成管线的注入口：loop 替身（测试用）+ 非致命故障的可见出口 */
 export interface GenerationDeps {
   runLoopImpl?: typeof runLoop;
@@ -150,16 +125,6 @@ export interface GenerationDeps {
    * 静默降级会让「简报怎么没生效」查无可查。
    */
   onWarn?: (message: string) => void;
-  /**
-   * 写作入口的调研闸口：带 topicId 开写且该选题还没有简报时，先补一轮深调研再写。
-   * 不注入 = 老行为（有简报就注入，没有就裸写），桌面 IPC 与 chat-router 两条入口注入。
-   * MCP 同步入口（src/tools）**故意不接**：外部 agent 自己有 deep_research 工具与判断力，
-   * 这层不该替它决定「该不该先调研」，更不该让它在一个同步调用里干等十几分钟。
-   *
-   * `onWaiting`：闸口**确定要等**（触发被接受、开始轮询前）时回调一次，写作侧借此把
-   * 占位稿标题改成「调研中」。已有简报/跑不了时不调——那两条路径根本没有等待。
-   */
-  ensureBriefImpl?: (topicId: string, onWaiting?: () => Promise<void>) => Promise<EnsureBriefOutcome>;
   /**
    * 整稿墙钟（P1 §4.4，缺省 15 分钟）。生产不传；测试与运维压缩它来验「到点即中断」。
    * 到点不是「等久一点」，是这一轮作废——占位稿标〔生成中断〕，重试从头再来一次。
@@ -195,8 +160,8 @@ export const GENERATION_WALL_CLOCK_MS = 35 * 60_000;
 export const GENERATING_TITLE_PREFIX = "［生成中］";
 export const INTERRUPTED_TITLE_PREFIX = "［生成中断］";
 /**
- * 开写前等深调研简报的中间态（最长十几分钟）。占位稿在这段时间里说实话:
- * 「调研中」不是「生成中」——不然人看到的是一张十分钟不动的卡,和卡死没有区别。
+ * 旧版「开写前等深调研简报」留下的占位稿前缀（引擎调研已下线，不再新写）。
+ * 盘上可能还有这种稿，识别它们仍要靠这个字面量。
  * **消费方必须同步**:orphan-reconcile 的孤儿判定、Editor.tsx 的剥前缀正则,
  * 漏一处就是启动扫不到的尸体稿 / 重写时把前缀当选题带进去。
  */
@@ -448,63 +413,6 @@ function seedLedger(
   return ledger;
 }
 
-/** 补证阶段的产物：写手的查证工具从这个 researcher 上挂，降级留痕进版本注记 */
-interface EvidencePhase {
-  researcher?: TargetedResearcher;
-  /** 降级人话（未补证 / 补证失败）；正常路径缺席 */
-  note?: string;
-}
-
-/**
- * 定向补证（§4.2 调用点）。只有**选中的 v3 卡**才补：手写 direction 是创始人自己定的角度、
- * 明说跳过点选的没有卡、v2 卡没有 `evidenceNeeds`——三种情况下没有「这个主张缺什么证据」
- * 这个问题可问，跑一轮搜索只是烧钱。
- *
- * 搜索没配 → warn + 跳过 + 版本注记「未补证」（§5）。补证失败**永不抛**：少一块材料照写，
- * 写手会在增补证据块里看到「没找到」，那比让它以为材料齐全安全。
- */
-async function runEvidencePhase(args: {
-  req: ScriptRequest;
-  angle?: ResolvedAngle;
-  config?: EngineConfig;
-  ledger: EvidenceLedger;
-  dataDir?: string;
-  warn: (message: string) => void;
-  runLoopImpl?: typeof runLoop;
-}): Promise<EvidencePhase> {
-  const { req, config, ledger, dataDir, warn } = args;
-  const card = activeV3(args.angle);
-  const wantsLookup =
-    !!card && card.evidenceNeeds.length > 0 && !req.direction?.trim() && !req.angleSkipReason?.trim();
-
-  // 补证要跑模型（targeted-research 的 runLoop）。没配引擎就跟「搜索没配」同一条降级路：
-  // warn + 跳过 + 版本注记，绝不静默（P5 §1.6）。宿主自己查到的料走 pack 的 research 槽。
-  if (!config) {
-    if (wantsLookup) warn("引擎未配置：本稿跳过定向补证，写手只能用现有材料（版本注记标「未补证」）");
-    return wantsLookup ? { note: "未补证" } : {};
-  }
-
-  const canSearch = await searchAvailable(dataDir).catch(() => false);
-  if (!canSearch) {
-    if (wantsLookup) warn("搜索未配置：本稿跳过定向补证，写手只能用现有材料（版本注记标「未补证」）");
-    return wantsLookup ? { note: "未补证" } : {};
-  }
-  const researcher = createTargetedResearcher({
-    dataDir: getDataDir(dataDir),
-    config,
-    ledger,
-    ...(args.runLoopImpl ? { runLoopImpl: args.runLoopImpl } : {}),
-  });
-  if (!wantsLookup) return { researcher };
-  try {
-    await researchNeeds(researcher, card.evidenceNeeds);
-  } catch (err) {
-    warn(`定向补证失败（不阻断写稿）：${err instanceof Error ? err.message : String(err)}`);
-    return { researcher, note: "补证失败" };
-  }
-  return { researcher };
-}
-
 export interface GenerationInputs {
   /**
    * 引擎配置。**未配置时缺席**（P5 §1.6）——宿主写稿全程不调模型，不该被它挡住。
@@ -528,10 +436,6 @@ export interface GenerationInputs {
   attribution: Attribution;
   /** 一稿一本账：写手与修订轮共享同一个实例（含 find_evidence 的次数额度） */
   ledger: EvidenceLedger;
-  /** 有它才给写手挂 find_evidence（搜索没配时就是没有） */
-  researcher?: TargetedResearcher;
-  /** 补证降级的人话，进版本注记 */
-  evidenceNote?: string;
 }
 
 /**
@@ -542,7 +446,6 @@ export interface GenerationInputs {
 async function composeResearchSlot(
   req: ScriptRequest,
   picked: ResolvedResearch,
-  ledger: EvidenceLedger,
   ownMaterial: OwnMaterial,
   warn: (message: string) => void,
   dataDir?: string,
@@ -550,8 +453,7 @@ async function composeResearchSlot(
   const card = activeV3(picked.angle);
   const coreIds = card?.coreEvidenceIds ?? [];
   const evidence = picked.brief?.snapshot.brief.evidence ?? [];
-  const coreEvidence = joinCoreEvidence(
-    renderCoreEvidence(
+  const coreEvidence = renderCoreEvidence(
       coreIds
         .map((id) => ({ id, item: evidenceByRef(evidence, id) }))
         .filter((e): e is { id: string; item: NonNullable<typeof e.item> } => e.item !== null)
@@ -562,8 +464,6 @@ async function composeResearchSlot(
           ...(item.source ? { source: item.source } : {}),
           ...(item.sourceUrl ? { sourceUrl: item.sourceUrl } : {}),
         })),
-    ),
-    renderTargetedEvidence(ledger),
   );
   const brief = picked.brief
     ? buildBriefBlock(picked.brief.snapshot.brief, {
@@ -593,7 +493,6 @@ async function gatherInputs(
   req: ScriptRequest,
   dataDir: string | undefined,
   warn: (message: string) => void,
-  deps?: GenerationDeps,
 ): Promise<GenerationInputs> {
   const [config, pack, profile, contrastPairs, patterns, picked] = await Promise.all([
     // 没配引擎也要能备料（P5 §1.6）：配坏了仍然照抛，只有「压根没配」返回 undefined
@@ -614,16 +513,7 @@ async function gatherInputs(
   req = inheritCreativeTask(req, creativeTask);
   const ownMaterial = await gatherOwnMaterial(req, picked.topic, dataDir, warn);
   const ledger = seedLedger(req, picked, ownMaterial);
-  const phase: EvidencePhase = req.modelExecution === "host" ? {} : await runEvidencePhase({
-    req,
-    ...(picked.angle ? { angle: picked.angle } : {}),
-    config,
-    ledger,
-    dataDir,
-    warn,
-    ...(deps?.runLoopImpl ? { runLoopImpl: deps.runLoopImpl } : {}),
-  });
-  const snapshot = await composeResearchSlot(req, picked, ledger, ownMaterial, warn, dataDir);
+  const snapshot = await composeResearchSlot(req, picked, ownMaterial, warn, dataDir);
   const { anchor, rest } = splitOwnMaterial(ownMaterial, picked.angle);
   const injectedChunks = [...(anchor ? [anchor] : []), ...rest];
   const lookupIds = ledger.lookups().flatMap((l) => l.itemIds);
@@ -646,8 +536,6 @@ async function gatherInputs(
     ...(picked.angle ? { angle: picked.angle } : {}),
     wroteWithoutAngle: picked.hasCards && !picked.angle && !req.direction?.trim(),
     ledger,
-    ...(phase.researcher ? { researcher: phase.researcher } : {}),
-    ...(phase.note ? { evidenceNote: phase.note } : {}),
     attribution: {
       usedPatternIds: patterns.map((card) => card.id),
       ...(picked.brief
@@ -696,7 +584,7 @@ export async function buildWritingContext(
   deps?: GenerationDeps,
 ): Promise<WritingContext> {
   const experiment = await selectEditorialExperiment(req, dataDir);
-  const inputs = await gatherInputs(req, dataDir, warn, deps);
+  const inputs = await gatherInputs(req, dataDir, warn);
   // 跳过角度是**用户的显式动作**（§1.6 不许模型猜布尔），所以它的原话要落 run-log 可回溯
   if (req.angleSkipReason?.trim()) warn(`用户明说跳过角度点选：${req.angleSkipReason.trim()}`);
   else if (inputs.wroteWithoutAngle) warn(`未经角度点选开写：这条选题有角度候选卡但没选（${req.topicId}）`);
@@ -758,69 +646,6 @@ function contentAttribution(attribution: Attribution, ledger: EvidenceLedger): P
   };
 }
 
-/**
- * 占位稿改哨兵前缀。标题是观感不是正确性：写失败只 warn,绝不阻断写作。
- * 顺带给版本注记写人话——updateContent 逢标题变化必记一版,不写注记就是两条「第 N 版」谜语。
- */
-async function retitlePlaceholder(
-  placeholderId: string,
-  phase: "researching" | "writing",
-  req: ScriptRequest,
-  warn: (message: string) => void,
-  dataDir?: string,
-): Promise<void> {
-  const researching = phase === "researching";
-  const prefix = researching ? RESEARCHING_TITLE_PREFIX : GENERATING_TITLE_PREFIX;
-  try {
-    await updateContent(
-      placeholderId,
-      {
-        title: `${prefix}${req.topic.slice(0, 40)}`,
-        _versionNote: researching ? "开写前先补一轮深调研" : "调研落定,开始写稿",
-      },
-      dataDir,
-    );
-  } catch (err) {
-    warn(`占位稿标题更新失败（${placeholderId}）：${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-/**
- * 开写前补调研（写作入口自动补深调研）。返回 true = 这稿没等到简报，得留痕。
- *
- * 用户自己带了 research 材料时**不强等**：他手里已经有料，为一轮分钟级的调研让他排队，
- * 是拿他的时间换一个他没要的东西。
- *
- * 真等起来时占位稿标题走一个来回：［调研中］→（闸口返回）→［生成中］。改回来这一步不能省，
- * 后面就是写稿阶段了，标题停在「调研中」既骗人，也让中断/孤儿回收的哨兵停在错的那一个。
- */
-async function ensureBriefBeforeWriting(
-  req: ScriptRequest,
-  deps: GenerationDeps | undefined,
-  warn: (message: string) => void,
-  placeholderId: string,
-  dataDir?: string,
-): Promise<boolean> {
-  if (!req.topicId || !deps?.ensureBriefImpl || req.research?.trim()) return false;
-  let waited = false;
-  const onWaiting = async (): Promise<void> => {
-    waited = true;
-    await retitlePlaceholder(placeholderId, "researching", req, warn, dataDir);
-  };
-  let outcome: EnsureBriefOutcome;
-  try {
-    outcome = await deps.ensureBriefImpl(req.topicId, onWaiting);
-  } catch (err) {
-    // 契约上闸口永不抛;执行层不赌上游守约——闸口自己炸了也只是「没简报」,稿子照写
-    outcome = { state: "unavailable", note: err instanceof Error ? err.message : String(err) };
-  }
-  if (waited) await retitlePlaceholder(placeholderId, "writing", req, warn, dataDir);
-  if (outcome.state === "already" || outcome.state === "ready") return false;
-  const detail = outcome.state === "timeout" ? "调研没在限时内跑完（可能还在跑）" : outcome.note;
-  warn(`未带调研简报开写：${detail}`);
-  return true;
-}
-
 interface WriterRun {
   payload: SubmitPayload;
   gateFailures: GateFailure[];
@@ -858,7 +683,7 @@ async function runWriterLoop(
   config: EngineConfig,
   attribution: Attribution,
   loopFn: typeof runLoop,
-  tools: { ledger: EvidenceLedger; evidenceTool?: LoopTool },
+  tools: { ledger: EvidenceLedger },
   runId?: string,
 ): Promise<WriterRun> {
   const writer = resolveEngineRoute(config, "writer", config.strongModel);
@@ -867,11 +692,7 @@ async function runWriterLoop(
     model: writer.model,
     systemPrompt: prompts.system,
     userMessage: prompts.user,
-    tools: [
-      buildSubmitTool(captured, gate, submitDepsFor(tools.ledger)),
-      // 搜索没配就没有这把工具——写手会在提示里看到「没有证据不要编」，而不是一个永远失败的工具
-      ...(tools.evidenceTool ? [tools.evidenceTool] : []),
-    ],
+    tools: [buildSubmitTool(captured, gate, submitDepsFor(tools.ledger))],
     maxTurns: writerTurnBudget(gate, tools.ledger),
     maxTotalTokens: WRITER_MAX_TOKENS,
     // 归因进 run-log 元数据(§3.5 卡 / 深调研 §6 简报 / P1 §4.4 角度与语料):没用到的字段不出现
@@ -905,8 +726,6 @@ function reviewDraft(
   gate: QualityGateSpec | undefined,
   platform: ScriptRequest["platform"],
   deps: ReviewDeps,
-  /** 写手手上那**一个** find_evidence 实例：额度在账本上共享，写手用掉的修订就没有了 */
-  evidenceTool?: LoopTool,
 ): Promise<ReviewOutcome> {
   return reviewAndConverge(
     {
@@ -923,7 +742,7 @@ function reviewDraft(
       voiceSamples: inputs.profile?.voiceSamples ?? [],
       ...(gate ? { gate } : {}),
       platform,
-      canFindEvidence: Boolean(evidenceTool),
+      canFindEvidence: false,
       // 硬门放行但要人工过目的模糊量词（§4.5 判据三 advisory）：审稿人替创始人先点一遍名
       needsHumanNumbers: written.needsHumanNumbers,
       spoken: isSpokenTrackPack(inputs.pack.id),
@@ -931,9 +750,8 @@ function reviewDraft(
     inputs.config,
     {
       ...deps,
-      // 修订轮 = 同一本账、同一把 submit_script、同一个 find_evidence 实例（§3.3 / §4.4）
+      // 修订轮 = 同一本账、同一把 submit_script（§3.3 / §4.4）
       submitDeps: submitDepsFor(inputs.ledger),
-      ...(evidenceTool ? { evidenceTool } : {}),
       maxWriterTurns: writerTurnBudget(gate, inputs.ledger),
     },
   );
@@ -948,12 +766,9 @@ async function runGeneration(
   runId?: string,
 ): Promise<GeneratedScript> {
   const warn = deps?.onWarn ?? ((message: string) => console.warn(`[generate-script] ${message}`));
-  // 调研闸口必须跑在材料收集**之前**:简报是本轮刚跑出来的,gatherInputs 才读得到指针
-  const wroteWithoutBrief = await ensureBriefBeforeWriting(req, deps, warn, placeholderId, dataDir);
-
   try {
     return await withWallClock(
-      () => writeAndFinalize({ placeholderId, req, wroteWithoutBrief, warn, dataDir, deps, runId }),
+      () => writeAndFinalize({ placeholderId, req, warn, dataDir, deps, runId }),
       deps?.wallClockMs ?? GENERATION_WALL_CLOCK_MS,
     );
   } catch (err) {
@@ -986,13 +801,12 @@ async function withWallClock<T>(work: () => Promise<T>, ms: number): Promise<T> 
 async function writeAndFinalize(args: {
   placeholderId: string;
   req: ScriptRequest;
-  wroteWithoutBrief: boolean;
   warn: (message: string) => void;
   dataDir?: string;
   deps?: GenerationDeps;
   runId?: string;
 }): Promise<GeneratedScript> {
-  const { placeholderId, req, wroteWithoutBrief, warn, dataDir, deps, runId } = args;
+  const { placeholderId, req, warn, dataDir, deps, runId } = args;
   // 材料收集(知识库检索也在执行体统一做——MCP 工具/桌面 IPC/chat-router 三条入口一次覆盖)。
   // 宿主写稿走的是**同一个** buildWritingContext（§5.4 门禁输入一致）
   const { inputs, prompts, gate } = await buildWritingContext(req, dataDir, warn, deps);
@@ -1005,14 +819,13 @@ async function writeAndFinalize(args: {
   await persistAttribution(placeholderId, attribution, inputs.ledger, warn, dataDir);
   await updateContent(placeholderId, { writingContract: inputs.writingContract }, dataDir);
 
-  const evidenceTool = inputs.researcher ? buildFindEvidenceTool(inputs.researcher) : undefined;
   const written = await runWriterLoop(
     prompts,
     gate,
     config,
     attribution,
     deps?.runLoopImpl ?? runLoop,
-    { ledger: inputs.ledger, ...(evidenceTool ? { evidenceTool } : {}) },
+    { ledger: inputs.ledger },
     runId,
   );
   // 兜底留痕（§4.3）：写手这轮切过备用就当场落盘——后面还有审稿与转正，
@@ -1028,9 +841,7 @@ async function writeAndFinalize(args: {
     rulesApplied,
     attribution,
     ledger: inputs.ledger,
-    wroteWithoutBrief,
     wroteWithoutAngle,
-    ...(inputs.evidenceNote ? { evidenceNote: inputs.evidenceNote } : {}),
     placeholderId,
     ...(dataDir ? { dataDir } : {}),
     // 这稿是产品内部写手写的（P3 §5.3）：宿主稿写 {kind:"host"}，稿卡据此出「谁写的」徽章
@@ -1055,7 +866,6 @@ async function writeAndFinalize(args: {
       ...(runId ? { runId } : {}),
       onWarn: warn,
     },
-    evidenceTool,
   );
 
   return finalizeScript({
@@ -1192,13 +1002,12 @@ function runInBackground(
     emit({ role: "writer", kind: "work", label: workLabel, contentId, runId });
     try {
       const result = await runGeneration(contentId, req, dataDir, deps, runId);
-      // 「没材料写的」「没过 AI 审稿的」都要在工作日志上自己说出来——
+      // 「没过 AI 审稿的」要在工作日志上自己说出来——
       // 人看到标签才知道这稿该多挑一点（审稿 §2.5：run_done 追加审稿结论）
-      const brand = result.wroteWithoutBrief ? "（未带简报）" : "";
       // 硬门拦下的稿不是「写完待审改」——说成写完了，人就不会去补材料（§4.4）
       const label = result.needsEvidence
-        ? `《${result.title.slice(0, 24)}》被数字硬门拦下:有 ${result.unverifiedNumbers.length} 个数字没有出处,稿件标「缺证据」${brand}`
-        : `《${result.title.slice(0, 24)}》写完,待审改${brand}${reviewBrand(result.review)}`;
+        ? `《${result.title.slice(0, 24)}》被数字硬门拦下:有 ${result.unverifiedNumbers.length} 个数字没有出处,稿件标「缺证据」`
+        : `《${result.title.slice(0, 24)}》写完,待审改${reviewBrand(result.review)}`;
       emit({ role: "system", kind: "run_done", label, contentId, runId });
     } catch (err) {
       // 工作日志上那一行也说人话（§4.2）：「编剧写稿中断：502 {…fetch failed}」帮不了任何人
@@ -1303,10 +1112,7 @@ interface FinalizeCommon {
   rulesApplied: number;
   attribution: Attribution;
   ledger: EvidenceLedger;
-  wroteWithoutBrief: boolean;
   wroteWithoutAngle: boolean;
-  /** 补证降级（未补证 / 补证失败）：进版本注记 */
-  evidenceNote?: string;
   placeholderId: string;
   dataDir?: string;
   /** 谁写的（P3 §5.3）：内部路径恒为 `{kind:"engine"}` */
@@ -1327,18 +1133,13 @@ interface FinalizeArgs extends FinalizeCommon {
 
 /**
  * 版本注记：稿件历史里唯一的人话留痕。四件事要在同一句里说清楚——
- * 这稿有没有材料垫底、有没有经过角度点选、补证有没有跑成、审稿有没有让它改过。
- * 别互相覆盖，也别堆成四串括号。
+ * 这稿有没有经过角度点选、审稿有没有让它改过。别互相覆盖，也别堆成两串括号。
  */
 function versionNote(
   review: ReviewMeta,
-  marks: { wroteWithoutBrief: boolean; wroteWithoutAngle: boolean; evidenceNote?: string },
+  marks: { wroteWithoutAngle: boolean },
 ): string {
-  const notes = [
-    ...(marks.wroteWithoutBrief ? ["未带调研简报"] : []),
-    ...(marks.wroteWithoutAngle ? ["未经角度点选"] : []),
-    ...(marks.evidenceNote ? [marks.evidenceNote] : []),
-  ];
+  const notes = marks.wroteWithoutAngle ? ["未经角度点选"] : [];
   if (review.rounds > 0) return `AI 审稿修订（${review.fixed} 项${notes.length ? `，${notes.join("、")}` : ""}）`;
   return notes.length ? `AI 完成初稿（${notes.join("、")}）` : "AI 完成初稿";
 }
@@ -1393,7 +1194,6 @@ async function finalizeBlocked(args: FinalizeCommon & { written: WriterRun }): P
     violations: scanResult.hits.map((h) => h.word),
     gateFailures: written.gateFailures.map((f) => f.detail),
     rulesApplied: args.rulesApplied,
-    wroteWithoutBrief: args.wroteWithoutBrief,
     wroteWithoutAngle: args.wroteWithoutAngle,
     review,
     needsEvidence: true,
@@ -1416,7 +1216,7 @@ function blockedNumbersOf(written: WriterRun): string[] {
 
 /** 后处理：违禁词扫描 → 占位稿转正（draft_ready，同现有写作流）。 */
 async function finalizeScript(args: FinalizeArgs): Promise<GeneratedScript> {
-  const { payload, humanizedText, review, req, attribution, wroteWithoutBrief, wroteWithoutAngle, placeholderId, dataDir } =
+  const { payload, humanizedText, review, req, attribution, wroteWithoutAngle, placeholderId, dataDir } =
     args;
   const { title, hashtags } = payload;
   const needsHuman = args.needsHumanNumbers;
@@ -1450,7 +1250,7 @@ async function finalizeScript(args: FinalizeArgs): Promise<GeneratedScript> {
       writtenBy: args.writtenBy,
       // 审稿结论落稿件元数据(审稿 §2.5):稿卡徽章读的就是它,降级路径同样要留下
       review,
-      _versionNote: versionNote(review, { wroteWithoutBrief, wroteWithoutAngle, ...(args.evidenceNote ? { evidenceNote: args.evidenceNote } : {}) }),
+      _versionNote: versionNote(review, { wroteWithoutAngle }),
     },
     dataDir,
   );
@@ -1472,7 +1272,6 @@ async function finalizeScript(args: FinalizeArgs): Promise<GeneratedScript> {
     violations,
     gateFailures: args.gateFailures.map((f) => f.detail),
     rulesApplied: args.rulesApplied,
-    wroteWithoutBrief,
     wroteWithoutAngle,
     review,
     needsEvidence: false,

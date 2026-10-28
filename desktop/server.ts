@@ -63,7 +63,7 @@ import { expireStaleTopics } from "../src/desktop/topic-expiry.js";
 import { startInboxRuntime } from "../src/desktop/inbox-runtime.js";
 import { startDigestScheduler, stopDigestScheduler } from "../src/desktop/digest-scheduler.js";
 import { getInboxSettingsRaw } from "../src/desktop/settings-inbox.js";
-import { researchBusyCount, startResearchRuntime } from "../src/desktop/research-runtime.js";
+import { failRetiredEngineJobs } from "../src/modules/research/research-job-store.js";
 import { serveResearchAsset } from "../src/desktop/research-asset-route.js";
 import { serveCoverIdentityAsset } from "../src/desktop/cover-identity-asset-route.js";
 import { setVideoService } from "../src/desktop/video-handlers.js";
@@ -224,7 +224,7 @@ const updateRoute = createUpdateHandler({
   runningVersion: RUNNING_VERSION, processStartedAt: PROCESS_STARTED_AT,
   // 对话轮 + 后台写稿 / 生图 / 推送等长任务（self-update，Codex 审第 2 轮 P1）
   // 剪辑与深调研的 runner 在跑也算（第 12 轮 P2：重启后它们要等 10 / 30 分钟才会被捡回，不能被重启打断）
-  inProcessTurns: () => activeTurnCount() + activeWorkCount() + (videoService?.busyCount() ?? 0) + researchBusyCount() + asrWarmupCount(),
+  inProcessTurns: () => activeTurnCount() + activeWorkCount() + (videoService?.busyCount() ?? 0) + asrWarmupCount(),
   // 启动器记的是 tsx 的 pid，跑本文件的是 tsx 拉起的另一个 node：比启动器发给这一次启动的标记，不比 pid
   launcher: async () => ({ running: true, managed: launchedByLauncher(getMachineDir()), via: launchVia() }),
 });
@@ -634,16 +634,12 @@ void (async () => {
   console.log(`  [digest] 每日选题摘要:${configured ? "已接线(到点自动发)" : "未配 bot,不发"}`);
 })().catch((err) => console.error("[digest] 摘要调度启动失败:", err instanceof Error ? err.message : err));
 
-// 深调研(deep-research spec §2):串行 runner 是进程内单例,启动回收中断的 job 并重排。
-// onResearchEvent 同时接 job 级落定与视角级进度 → SSE `research` 流,选题卡据此刷新。
-// onChatFollowupEvent → SSE `chat_followup`:简报落盘后总编辑回派活那段会话报了一轮,
-// 右栏据此重载（正看着那段）或提示（在别处）——不然回报落在盘上没人看见,等于没回。
-void startResearchRuntime({
-  onResearchEvent: (e) => broadcast("research", e),
-  onChatFollowupEvent: (e) => broadcast("chat_followup", { conversationId: e.conversationId, topicId: e.topicId }),
-})
-  .then((s) => console.log(`  [research] 深调研 runner:${s.state}${s.reclaimed ? ` —— 回收 ${s.reclaimed} 条中断任务` : ""}`))
-  .catch((err) => console.error("[research] 深调研启动失败:", err instanceof Error ? err.message : err));
+// 引擎调研已下线(2026-10-28):升级前排着/跑着的引擎调研任务再没人跑完,启动时一次落失败并写明原因
+// (research:status 读到漏网的也会当场落)。失败只打日志,不阻断启动。
+void activeDataDir()
+  .then((dir) => failRetiredEngineJobs(dir))
+  .then((n) => { if (n > 0) console.log(`  [research] ${n} 条旧引擎调研任务已标失败(引擎调研已下线)`); })
+  .catch((err) => console.error("[research] 旧引擎调研任务收尾失败:", err instanceof Error ? err.message : err));
 // 视频生产线(spec §8.3 SSE 四件套之一):状态每次落盘 → broadcast `video:updated`,
 // 订阅方收到后重拉 video:status。启动回收(心跳过期的 running 重排)在 service 内部,
 // 这里只管建与停。服务跟随**启动时**的工作区——切工作区后要重启(handler 会照实拒绝)。

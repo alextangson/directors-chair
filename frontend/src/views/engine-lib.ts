@@ -70,7 +70,7 @@ export type RoleKey = (typeof ROLE_KEYS)[number];
 export const ROLE_LABEL: Record<RoleKey, string> = {
   writer: "写稿专线",
   reviewer: "审稿专线",
-  scout: "调研专线",
+  scout: "雷达专线",
   analytics: "复盘专线",
 };
 
@@ -78,7 +78,7 @@ export const ROLE_LABEL: Record<RoleKey, string> = {
 export const ROLE_SHORT: Record<RoleKey, string> = {
   writer: "写稿",
   reviewer: "审稿",
-  scout: "调研",
+  scout: "雷达",
   analytics: "复盘",
 };
 
@@ -86,14 +86,14 @@ export const ROLE_SHORT: Record<RoleKey, string> = {
 export const ROLE_ACTION: Record<RoleKey, string> = {
   writer: "写稿",
   reviewer: "审稿",
-  scout: "深调研",
+  scout: "雷达筛选",
   analytics: "复盘",
 };
 
 export const ROLE_NOTE: Record<RoleKey, string> = {
   writer: "生成初稿、改稿、平台适配",
   reviewer: "AI 审稿、去 AI 味复核",
-  scout: "雷达筛选、灵感提炼、深调研",
+  scout: "雷达筛选、灵感提炼",
   analytics: "复盘报告、campaign 重排",
 };
 
@@ -265,7 +265,7 @@ export function hasStaleFailure(lines: BannerLine[], now: number): boolean {
  * 顶栏横幅（spec §4.3）：任一**被引用**的端点最近状态为坏就出一行，恢复即消失。
  * 未配置引擎时不出——那是首次开机卡的活，不是横幅的活。
  */
-const ROLE_PREFIX_RE = /^(端点|主端点|写稿专线|审稿专线|调研专线|复盘专线)\s+/;
+const ROLE_PREFIX_RE = /^(端点|主端点|写稿专线|审稿专线|雷达专线|复盘专线)\s+/;
 const OUTCOME_TAIL_RE = /[^。]*已中断。\s*$/;
 
 /** 「主端点 dead（host）连不上：…。这次没有备用端点，写稿已中断。」→「dead（host）连不上：…。」 */

@@ -33,7 +33,7 @@ export const ASR_SIDECAR_DIR = path.join(REPO_ROOT, "sidecars", "asr");
 export const ASR_SIDECAR_SCRIPT = path.join(ASR_SIDECAR_DIR, "asr.py");
 
 const INSTALL_UV = "未装 uv（ASR sidecar 的运行器）。装法：brew install uv，装好后重试";
-export const ASR_WARMUP_WHERE = "导演椅设置 →「模型」页 →「语音转写模型」里的「预热 ASR 模型」";
+export const ASR_WARMUP_WHERE = "导演椅设置 →「本机」页 →「语音转写模型」里的「预热 ASR 模型」";
 const NEED_WARMUP = `ASR 模型还没下载（约 1GB）。到 ${ASR_WARMUP_WHERE} 点一次，下完再重试`;
 
 export type AsrStatusValue = "absent" | "warming" | "ready" | "failed";

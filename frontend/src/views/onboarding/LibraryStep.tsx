@@ -76,7 +76,7 @@ export function LibraryStep(props: { onNext: () => void }) {
       {result?.status === "needs_legacy_choice" && <LegacyChoice drafts={result.drafts} {...(result.files ? { files: result.files } : {})} busy={busy} onPick={(c) => void run(c)} />}
       {done && <p className="ob-ok">{done}</p>}
       {error && <p className="ob-fail">没建成：{error}</p>}
-      {!done && <p className="ob-hint">以后也能在 设置 → 模型 → 用户资料库 里建；不建就先存在本机的旧位置。</p>}
+      {!done && <p className="ob-hint">以后也能在 设置 → 本机 → 用户资料库 里建；不建就先存在本机的旧位置。</p>}
       <div className="ob-actions">
         {done
           ? <button className="primary" onClick={props.onNext}>下一步</button>

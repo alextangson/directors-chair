@@ -108,13 +108,6 @@ describe("campaign store", () => {
     const auditArtifact = afterAudit!.artifacts[0];
     expect(await readCampaignArtifact(created.id, auditArtifact.id, dataDir)).toContain("审计证据");
 
-    const research = await claimCampaignTask(created.id, dataDir);
-    await completeCampaignTask(
-      created.id,
-      research!.run.id,
-      { title: "市场研究", markdown: "市场证据。".repeat(80), kind: "research" },
-      dataDir,
-    );
     const strategy = await claimCampaignTask(created.id, dataDir);
     expect(strategy?.task.id).toContain("growth-strategy");
     await failCampaignTask(created.id, strategy!.run.id, "模型暂时不可用", dataDir);

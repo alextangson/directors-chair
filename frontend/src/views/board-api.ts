@@ -40,9 +40,9 @@ export interface Delivery { host: string; label: string; prompt: string; opened:
 export interface StartReply extends Partial<Delivery> { created: boolean; content_id: string; needs_angle?: boolean; code?: string }
 export const startWriting = (topicId: string, host?: string | null) => post<StartReply>("/api/board/start-writing", { topic_id: topicId, ...(host ? { host } : {}) });
 
-/** 已有稿件「交给 X 写 / 看」：host 不给 = 默认写稿 AI */
-export const handOffContent = (contentId: string, mode: "write" | "look", host?: string | null) =>
-  post<Delivery & { content_id: string }>("/api/board/hand-off", { content_id: contentId, mode, ...(host ? { host } : {}) });
+/** 已有稿件「交给 X 写 / 看」、选题「交给 X 调研」（id 是 topic id）：host 不给 = 默认写稿 AI */
+export const handOffContent = (id: string, mode: "write" | "look" | "research", host?: string | null) =>
+  post<Delivery>("/api/board/hand-off", { ...(mode === "research" ? { topic_id: id } : { content_id: id }), mode, ...(host ? { host } : {}) });
 
 /** round：带上就由服务端核对是不是这一轮（重开 / 重拍过 = 拒） */
 export const markPublished = (contentId: string, platform: string, url?: string, round?: number) =>

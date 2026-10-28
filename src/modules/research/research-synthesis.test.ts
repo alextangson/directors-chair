@@ -1,7 +1,7 @@
 /**
  * research-synthesis.test.ts — 综合子运行（深调研 §5）。
  *
- * 引擎打桩、broker 是真 broker（假 search/fetch 喂料）。断言集中在确定性层：
+ * 引擎打桩、broker 是真 broker（假 fetch 喂料）。断言集中在确定性层：
  * id→URL 解析、去重、gaps 合成、张力允许为空、伪造证据被打回。
  */
 import { describe, it, expect } from "vitest";
@@ -30,7 +30,6 @@ const IMAGE_URL = "https://example.com/chart.png";
 
 function makeBroker(over: Partial<ResearchBrokerDeps> = {}): ResearchBroker {
   return createResearchBroker({
-    searchImpl: async () => [{ title: "2026 开发者调查", url: PAGE_URL, snippet: "每天使用比例过半" }],
     fetchImpl: async (url) => ({
       finalUrl: url,
       text: PAGE_TEXT,
@@ -41,12 +40,12 @@ function makeBroker(over: Partial<ResearchBrokerDeps> = {}): ResearchBroker {
   });
 }
 
-/** 先真的走一遍出网，注册表里才有 s1/p1/a1 可供综合引用 */
+/** 先真的走一遍出网，注册表里才有 p1/p2/a1 可供综合引用 */
 async function primed(over: Partial<ResearchBrokerDeps> = {}): Promise<ResearchBroker> {
   const broker = makeBroker(over);
   const handle = broker.forPerspective("evidence");
-  await handle.search("AI 编程助手 使用率");
   await handle.readPage(PAGE_URL);
+  await handle.readPage(`${PAGE_URL}/second`);
   return broker;
 }
 
@@ -55,7 +54,7 @@ function perspective(over: Partial<PerspectiveOutput> = {}): PerspectiveOutput {
     name: "evidence",
     insights: [
       { text: "每天使用的人已过半", sourceIds: ["p1"] },
-      { text: "维护成本是真账单", sourceIds: ["s1"] },
+      { text: "维护成本是真账单", sourceIds: ["p2"] },
     ],
     evidence: [{ claim: "使用率过半", sourceId: "p1", quote: REAL_QUOTE }],
     assetPicks: [{ assetId: "a1", caption: "使用率图" }],
@@ -277,7 +276,7 @@ describe("伪造与降级", () => {
   });
 
   it("配额耗尽在 gaps 点名（§9.4）", async () => {
-    const broker = await primed({ quotas: { searchPerJob: 1, searchPerPerspective: 1 } });
+    const broker = await primed({ quotas: { readPagePerJob: 2 } });
     const cap = newCapture();
     const res = await synth([briefArgs()], cap, { broker });
     if (res.status !== "succeeded") throw new Error("应当成功");

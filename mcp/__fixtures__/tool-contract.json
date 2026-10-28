@@ -552,7 +552,6 @@
        "prepare",
        "pack",
        "status",
-       "search",
        "read_page",
        "cite",
        "claim_offline",
@@ -609,9 +608,6 @@
       "type": "string"
      },
      "platform": {
-      "type": "string"
-     },
-     "query": {
       "type": "string"
      },
      "quote": {
@@ -3596,7 +3592,6 @@
        "prepare",
        "pack",
        "status",
-       "search",
        "read_page",
        "cite",
        "claim_offline",
@@ -3653,9 +3648,6 @@
       "type": "string"
      },
      "platform": {
-      "type": "string"
-     },
-     "query": {
       "type": "string"
      },
      "quote": {

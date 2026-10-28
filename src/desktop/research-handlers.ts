@@ -1,13 +1,12 @@
 /**
- * 深调研 IPC handlers（deep-research spec §8 + P1 spec §4.6）：
- * `research:deep_dive / regenerate_angles / status / brief_get / list_assets / import_asset`。
+ * 调研读口 IPC handlers（deep-research spec §8 + P1 spec §4.6）：
+ * `research:status / brief_get / list_assets / import_asset`。调研本身交给宿主 AI（选题会），
+ * 引擎调研已下线——这里只读台账与简报。
  *
- * 四条纪律：
- * 1. **投递即返回**：deep_dive 只把任务落进台账，绝不等四视角跑完（分钟级）。
- *    进度经 SSE `research` 流推回来，前端按 topicId 重读 status。
- * 2. **拒绝是拒绝，不是空成功**：搜索 key 未配 / 选题不存在 / 运行时没起来，
- *    一律 `{ok:false, error:人话}`——「点了没反应」是最坏的失败形态。
- *    （key 门在投递口 `triggerDeepResearch` 里，chat 工具与按钮共用同一句指引。）
+ * 纪律：
+ * 1. **拒绝是拒绝，不是空成功**：选题不存在一律 `{ok:false, error:人话}`。
+ * 2. **旧引擎在途任务读时落失败**：升级前排着/跑着的引擎任务再没人跑完，status 读到就落
+ *    failed + 「引擎调研已下线，请交给 AI 调研」，不让卡片永远停在「调研中」。
  * 3. **「当前有效简报」只认 job.briefRevision 指针**（§2 重跑读语义）：重跑失败不回退指针，
  *    旧简报继续可读；brief_get 显式传 revision 时才绕开指针（回溯用）。
  * 4. **过期标注现算**：简报存的是生成时的 topicHash，与**当前**选题文本现算的 hash 比对——
@@ -33,16 +32,14 @@ import {
   getArticleImageReview,
   type ArticleImageReview,
 } from "../modules/publish/article-images.js";
-import { getJob, topicHashOf } from "../modules/research/research-job-store.js";
+import { getJob, settleRetiredEngineJob, topicHashOf } from "../modules/research/research-job-store.js";
 import { resolveEffectiveBrief } from "../modules/research/brief-snapshot.js";
-import { searchAvailable } from "../modules/research/search-provider.js";
 import { emitEngineEvent } from "./event-hub.js";
-import { triggerDeepResearch, triggerRegenerateAngles } from "./research-runtime.js";
 
 type Payload = Record<string, unknown>;
 type Reply = Record<string, unknown>;
 
-const NO_BRIEF = "这条选题还没有可用简报——先点「深调研」跑一轮（四视角至少两路成功才会产简报）";
+const NO_BRIEF = "这条选题还没有可用简报——先点「交给 AI 调研」，在 Claude / Codex 里开选题会";
 
 /** 简报元信息：选题卡只要这三样，全文走 brief_get */
 export interface BriefMeta {
@@ -95,63 +92,7 @@ async function currentBrief(topicId: string, dataDir: string): Promise<ResearchB
 }
 
 /**
- * 投递一次深调研。透传 `TriggerResult`：
- * - `accepted:false` → `{ok:false, error:reason}`（key 未配、选题不存在/在回收站、
- *   运行时未起、**这条选题正在研究中**）
- * - `deduped:true` → 捡回了一条租约已过期的在册任务（跑它的进程死了），没有新开一轮
- */
-export async function researchDeepDiveHandler(payload: Payload): Promise<Reply> {
-  const bad = badPayload(payload);
-  if (bad) return bad;
-  const topicId = requireTopicId(payload);
-  if (!topicId) return { ok: false, error: "topic_id 必填" };
-  try {
-    const res = await triggerDeepResearch(topicId, researchDataDir(payload));
-    if (!res.accepted) return { ok: false, error: res.reason };
-    return {
-      ok: true,
-      data: {
-        job: res.job,
-        deduped: res.deduped,
-        note: res.deduped
-          ? "上一轮中断在半路，已把它捡回来重跑"
-          : "已排队——四视角并行侦察，进度在选题卡上实时更新",
-      },
-    };
-  } catch (err) {
-    return fail(err);
-  }
-}
-
-/**
- * 重新立意（P1 spec §3.5/§4.6）：在当前生效简报上只重跑立意 pass，落一版只换角度卡的新简报。
- * 回执形状与 deep_dive 一致（同一条投递语义，前端一套处理）；不出网，所以没有搜索 key 门。
- */
-export async function researchRegenerateAnglesHandler(payload: Payload): Promise<Reply> {
-  const bad = badPayload(payload);
-  if (bad) return bad;
-  const topicId = requireTopicId(payload);
-  if (!topicId) return { ok: false, error: "topic_id 必填" };
-  try {
-    const res = await triggerRegenerateAngles(topicId, researchDataDir(payload));
-    if (!res.accepted) return { ok: false, error: res.reason };
-    return {
-      ok: true,
-      data: {
-        job: res.job,
-        deduped: res.deduped,
-        note: res.deduped
-          ? "上一轮中断在半路，已把它捡回来重跑"
-          : "已排队——只重跑立意，出新角度卡后会落一版新简报（事实不变）",
-      },
-    };
-  } catch (err) {
-    return fail(err);
-  }
-}
-
-/**
- * 选题卡的状态读口：job 全量 + 搜索配置态（按钮禁用用）+ 当前有效简报元信息。
+ * 选题卡的状态读口：job 全量 + 当前有效简报元信息。
  * 选题不存在 → 拒（卡片本来就不该在，静默空态会让人以为「还没调研过」）。
  */
 export async function researchStatusHandler(payload: Payload): Promise<Reply> {
@@ -163,13 +104,13 @@ export async function researchStatusHandler(payload: Payload): Promise<Reply> {
     const dataDir = researchDataDir(payload);
     const topic = await getTopic(topicId, dataDir);
     if (!topic) return { ok: false, error: `选题不存在：${topicId}` };
-    const job = await getJob(topicId, dataDir);
+    const stored = await getJob(topicId, dataDir);
+    const job = stored ? await settleRetiredEngineJob(stored, dataDir) : null;
     const brief = await currentBrief(topicId, dataDir);
     return {
       ok: true,
       data: {
         job,
-        searchConfigured: await searchAvailable(dataDir),
         currentBrief: brief ? briefMeta(brief, topic) : null,
       },
     };
@@ -199,7 +140,7 @@ export async function researchBriefGetHandler(payload: Payload): Promise<Reply> 
     const revision = explicitRevision(payload) ?? job?.briefRevision;
     if (revision === undefined || revision === null) return { ok: false, error: NO_BRIEF };
     const brief = await loadBrief(topicId, revision, dataDir, warn);
-    if (!brief) return { ok: false, error: `简报 v${revision} 读不到（文件缺失或已损坏）——重跑一轮深调研` };
+    if (!brief) return { ok: false, error: `简报 v${revision} 读不到（文件缺失或已损坏）——交给 AI 重新调研一轮` };
     const topic = await getTopic(topicId, dataDir);
     return { ok: true, data: { brief, ...(topic ? briefMeta(brief, topic) : {}) } };
   } catch (err) {
@@ -340,7 +281,7 @@ async function importAssetToSlot(
   const file = await getResearchAssetFile(asset.assetId, dataDir);
   if (!file) return { ok: false, error: `研究素材文件不存在：${asset.assetId}` };
   const bytes = await fs.readFile(file).catch(() => null);
-  if (!bytes) return { ok: false, error: "研究素材文件读不到（可能已被删除），请重跑深调研" };
+  if (!bytes) return { ok: false, error: "研究素材文件读不到（可能已被删除），请交给 AI 重新调研" };
 
   const updated = await attachUploadedArticleImage(contentId, slot, bytes, dataDir, {
     origin: "research",
@@ -348,7 +289,7 @@ async function importAssetToSlot(
   });
   await markResearchAssetImported(asset.assetId, dataDir);
   void emitEngineEvent(
-    { role: "publisher", kind: "work", label: `配图 ${slot + 1} 已换成深调研素材（来源需自查授权）`, contentId },
+    { role: "publisher", kind: "work", label: `配图 ${slot + 1} 已换成调研素材（来源需自查授权）`, contentId },
     dataDir,
   ).catch(() => {});
   return { ok: true, data: { review: updated, index: slot, deduped: false } };

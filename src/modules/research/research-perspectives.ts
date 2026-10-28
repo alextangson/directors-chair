@@ -1,7 +1,7 @@
 import { renderCreativeTask } from "../writing/creative-task.js";
 /**
  * 视角子运行（深调研 spec §4）：一个视角 = 一次 runLoop，工具带 = broker 背书的
- * `search`/`read_page`（对标视角另挂只读 `list_patterns`）+ 收束工具 `submit_perspective`。
+ * `read_page`（对标视角另挂只读 `list_patterns`）+ 收束工具 `submit_perspective`。
  *
  * 四条纪律：
  * 1. **出网只走 broker**：配额、缓存、来源登记、素材候选都在它那儿；`BrokerQuotaError`
@@ -34,7 +34,6 @@ import { PERSONA_KEYS, type PersonaKey } from "./personas.js";
 import {
   buildListPatternsTool,
   buildReadPageTool,
-  buildSearchTool,
   type RunState,
 } from "./research-tools.js";
 import {
@@ -171,7 +170,7 @@ export function buildSystemPrompt(name: PerspectiveName): string {
     `你是这位创作者内容团队里的调研员，本轮只负责一个视角：**${book.label}**。`,
     ...book.mission,
     "",
-    "检索纪律：search 拿候选（返回 s 开头的来源 id），read_page 打开页面（返回 p 开头的来源 id）。",
+    "检索纪律：用你自己的搜索找网址，read_page 打开页面（返回 p 开头的来源 id）。",
     "证据只能引用 p 开头的来源——搜索摘要不算原文。配额有限，工具会明确告诉你还能不能用；",
     "配额用尽就用手上的材料收束，不要反复重试。",
     "",
@@ -220,7 +219,7 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** 工具带：出网两把 + 对标视角的只读拆解卡；实现与消毒纪律在 research-tools.ts */
+/** 工具带：读页 + 对标视角的只读拆解卡；实现与消毒纪律在 research-tools.ts */
 function buildToolBelt(
   input: RunPerspectiveInput,
   state: RunState,
@@ -228,7 +227,6 @@ function buildToolBelt(
 ): LoopTool[] {
   const handle = input.broker.forPerspective(input.name);
   return [
-    buildSearchTool(handle, state),
     buildReadPageTool(handle, state),
     ...(input.name === "benchmark"
       ? [
@@ -273,7 +271,7 @@ function readInsights(raw: unknown, broker: ResearchBroker, drops: Drops) {
     const unknownIds = sourceIds.filter((id) => !broker.getSource(id));
     if (unknownIds.length) {
       drops.problems.push(
-        `insights[${i}] 引用了未登记的来源 id：${unknownIds.join("、")}——只能用 search / read_page 返回过的 id`,
+        `insights[${i}] 引用了未登记的来源 id：${unknownIds.join("、")}——只能用 read_page 返回过的 id`,
       );
       continue;
     }

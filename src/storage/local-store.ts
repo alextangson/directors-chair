@@ -102,6 +102,8 @@ export interface Topic {
   starWords?: string;
   /** 从回收站捞回来的时间：捞回 = 显式想要，不再自动老化 */
   restoredAt?: string;
+  /** 「待开选题会」：创始人在每日摘要里回了这条的序号，等他到 Claude / Codex 会话里开选题会 */
+  topicMeetingRequestedAt?: string;
 }
 
 /**

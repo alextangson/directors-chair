@@ -15,9 +15,13 @@ vi.mock("../ui", () => ({
   confirmDialog: async (spec: { title: string; body: string; confirmLabel?: string }) => { dialogs.push(spec); return confirmAnswer; },
 }));
 const handOffs: Array<[string, string, string | null | undefined]> = [];
+/** 测试可把交出去卡在半路（验双击）：gate 不为 null 时 handOffContent 等它放行 */
+let gate: Promise<void> | null = null;
 vi.mock("./board-api", () => ({
   handOffContent: async (id: string, mode: string, host?: string | null) => {
     handOffs.push([id, mode, host]);
+    if (gate) await gate;
+    if (conn.writers.length === 0) return { ok: false, error: "先接一个 AI", body: { code: "no_writer" } };
     return { ok: true, data: { content_id: id, host: host ?? "codex", label: host === "workbuddy" ? "WorkBuddy" : "Codex", prompt: "开工指令", opened: host !== "workbuddy", paste: true } };
   },
 }));
@@ -33,7 +37,7 @@ const { itemMeta } = await import("./board-columns");
 const D = (over: Record<string, unknown> = {}) => ({ host: "codex", label: "Codex", prompt: "开工指令", opened: true, paste: true, ...over });
 let clip: string[] = [];
 beforeEach(() => {
-  dialogs.length = 0; toasts.length = 0; handOffs.length = 0; confirmAnswer = true; clip = [];
+  dialogs.length = 0; toasts.length = 0; handOffs.length = 0; confirmAnswer = true; clip = []; gate = null;
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (t: string) => { clip.push(t); } } });
   window.location.hash = "";
   conn.writers = ["codex", "workbuddy"]; conn.writingHost = "codex"; conn.engine = false;
@@ -144,5 +148,45 @@ describe("顶栏按钮", () => {
     await act(async () => root.render(createElement(HandOffButton, { contentId: "content-1-a", mode: "write" })));
     await tick();
     expect(el.querySelector("button")?.textContent).toBe("交给总编辑写");
+  });
+
+  it("选题调研：「交给 Codex 调研」，交的是选题 id，指令进剪贴板后一句「开选题会」", async () => {
+    await act(async () => root.render(createElement(HandOffButton, { topicId: "topic-1-a", mode: "research" })));
+    await tick();
+    expect(el.querySelector("button")?.textContent).toBe("交给 Codex 调研");
+    expect([...el.querySelectorAll("option")].map((o) => o.textContent)).toEqual(["换一个", "交给 WorkBuddy 调研"]);
+    await act(async () => { el.querySelector("button")!.click(); });
+    await tick();
+    expect(handOffs).toEqual([["topic-1-a", "research", null]]);
+    expect(toasts).toEqual(["Codex 已打开，粘贴发送"]);
+  });
+
+  it("调研时一个本机 AI 都没接（配了钥匙也一样）：按钮照样能点，点了说「先接一个 AI」，不说交给总编辑", async () => {
+    conn.writers = []; conn.writingHost = null; conn.engine = true;
+    await act(async () => root.render(createElement(HandOffButton, { topicId: "topic-1-a", mode: "research" })));
+    await tick();
+    const btn = el.querySelector("button")!;
+    expect(btn.textContent).toBe("交给 AI 调研");
+    expect(btn.disabled).toBe(false);
+    await act(async () => { btn.click(); });
+    await tick();
+    expect(dialogs[0]).toMatchObject({ title: "先接一个 AI" });
+    expect(dialogs[0].body).toContain("调研要一个接上了导演椅的 AI");
+    expect(toasts).toEqual([]);
+  });
+
+  it("双击只交一次：交出去的路上按钮禁用、写「正在交…」", async () => {
+    let release!: () => void;
+    gate = new Promise<void>((r) => { release = r; });
+    await act(async () => root.render(createElement(HandOffButton, { topicId: "topic-1-a", mode: "research" })));
+    await tick();
+    const btn = el.querySelector("button")!;
+    await act(async () => { btn.click(); });
+    expect(btn.disabled).toBe(true);
+    expect(btn.textContent).toBe("正在交…");
+    await act(async () => { btn.click(); });
+    release();
+    await tick();
+    expect(handOffs).toHaveLength(1);
   });
 });
