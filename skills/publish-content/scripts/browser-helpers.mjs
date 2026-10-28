@@ -55,3 +55,25 @@ export async function waitTopics(page, config, expectedTags, timeout = 10000) {
     return tags.every(t => got.includes(norm(t)));
   }, {config, tags: expectedTags}, {timeout});
 }
+
+// 视频号的 #话题按钮负责触发平台自己的话题识别，不直接构造标签节点。
+// 只用于空话题、正文已填且触发按钮已在当前页面确认的编辑器。
+export async function appendTriggeredTopics(page, config, caption, tags, trigger, timeout = 10000) {
+  if (!config.topicSelector || !trigger || !Array.isArray(tags) ||
+      tags.some(t => typeof t !== 'string' || !t.trim() || /\s/.test(t))) {
+    throw new Error('Expected a topic selector, observed trigger, and nonempty topic names');
+  }
+  const names = tags.map(topicName);
+  if (names.some(t => !t) || new Set(names).size !== names.length) throw new Error('Invalid or duplicate topics');
+  assertReadback(await readEditor(page, config), {caption, tags: []});
+  await focusEnd(page, config);
+  for (const [i, name] of names.entries()) {
+    await page.click(trigger);
+    await page.keyboard.type(name);
+    await page.keyboard.press('Space');
+    await waitTopics(page, config, names.slice(0, i + 1), timeout);
+  }
+  const result = await readEditor(page, config);
+  assertReadback(result, {caption, tags: names});
+  return result;
+}

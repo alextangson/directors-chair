@@ -31,6 +31,16 @@ const readback = await h.readEditor(page, {...config, topicSelector: ".tiptap-to
 h.assertReadback(readback, {caption, tags});
 ```
 
+视频号当前页面已确认 `.input-editor`、`wujie-app` open shadow root、`.hl.topic` 和「#话题」按钮时，可一次处理话题并验证：
+
+```js
+const config = {selector: ".input-editor", rootSelector: "wujie-app", topicSelector: ".hl.topic"};
+// 仅用于正文已填、尚无话题的编辑器；按钮必须先由当前页面观察确认。
+await h.appendTriggeredTopics(page, config, caption, tags, 'text="#话题"');
+```
+
+每个话题转换成原生节点后才继续；失败立刻停止并读现场，不自动重试。它不点击提交。
+
 模块的原生 topicSelector 从平台手册起步，在当前页面确认。抖音用编辑器内的 `[contenteditable=false]`；视频号用 `.hl.topic`；小红书用 `.tiptap-topic`。
 B站标签位于编辑器外，不用 readEditor 的 topicSelector；单独读实际标签列表并调用 assertReadback。
 所有助手没有点击发布功能。模型仍负责 AI 声明、活动、排期、封面视觉核验和用户授权。
@@ -46,7 +56,8 @@ B站标签位于编辑器外，不用 readEditor 的 topicSelector；单独读�
 
 ## 验证与耗时记录
 
-每平台记录开始、上传完成、表单完成、提交、回执时间；另计失败动作和用户介入次数。
+每平台记录实际观察到的开始、上传完成、表单完成、提交、回执时间；另计失败动作和用户介入次数。
+某时刻没有观察证据就留空，不拿之后打开页面或写记录的时刻代替。若时钟跳变、会话中断或等待人工，报告已知区间与缺口，不把它们算成操作耗时。
 本地检查/模拟 DOM 测试不证明真实网页可用。首次新手册用简单模型演练到“可提交”即可；真实发布必须有该作品的授权。
 普通发布与活动研究分别计时。报告实际耗时，不承诺固定分钟数。
 

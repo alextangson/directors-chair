@@ -4,7 +4,7 @@
 
 入口：https://studio.youtube.com （右上「创建 → 上传视频」）
 
-发的是英文版那条稿（`en_edition` 派生稿）。英文版不走中文登记：只按**批过的英文发布包**发。先调 `autocrew_publish {action:"ego_lite_prepare", content_id:<英文版>}`（不带 check_ids），回执里每个平台的 `video_path` / `thumbnail_path` / 文案就是要上传和粘贴的东西，记下 `package_hash`；回 `en_package_not_approved` 就停下，请创始人在「等你拍板」里批英文发布包（批过之后改过也会回到那里，原因写在那件里）。YouTube 用 `platform:"youtube"` 那一项：`title`、`description`（已含章节行和标签）、`tags`、`ai_disclosure`、`video_path`、`thumbnail_path`。默认时段：**北京时间 21:00–23:00（美国上午）**，不跟中文时段。
+发的是英文版那条稿（`en_edition` 派生稿）。英文版不走中文登记：只按**批过的英文发布包**发。先调 `autocrew_publish {action:"ego_lite_prepare", content_id:<英文版>}`（不带 check_ids），回执里每个平台的 `video_path` / `thumbnail_path` / 文案就是要上传和粘贴的东西，记下 `package_hash`；回 `en_package_not_approved` 就停下，请创始人在「等你拍板」里批英文发布包（批过之后改过也会回到那里，原因写在那件里）。YouTube 用 `platform:"youtube"` 那一项：`title`、`description`、`tags`、`ai_disclosure`、`video_path`、`thumbnail_path`。21:00–23:00（北京时间）可作候选时段；确切日期、时间、账号及发布必须有适用授权，不从中文排期推算。
 
 | 步骤 | 动作 | 成功条件 / 已知故障 |
 |---|---|---|
