@@ -37,7 +37,9 @@ describe("campaign scheduler", () => {
     const campaign = await getCampaign(campaignId, dataDir);
     expect(campaign?.runs).toHaveLength(2);
     expect(campaign?.artifacts).toHaveLength(2);
-    expect(campaign?.tasks.find((task) => task.id.includes("growth-strategy"))?.status).toBe("ready");
+    // 审计 → 策略（市场调研已不再规划）：两步都跑完，下一环的信息包解锁
+    expect(campaign?.tasks.find((task) => task.id.includes("growth-strategy"))?.status).toBe("completed");
+    expect(campaign?.tasks.find((task) => task.id.includes("message-kit"))?.status).toBe("ready");
   });
 
   it("records failure without fabricating an artifact and can be retried", async () => {

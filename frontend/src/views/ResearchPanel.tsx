@@ -1,7 +1,7 @@
 /**
- * 选题卡的深调研区（deep-research spec §8「选题卡状态机」）:
- * 无 job → 「深调研」按钮(搜索 key 未配则禁用+指引);进行中 → 四视角逐项状态;
- * 有简报 → 「生成于 X · 重跑」(过期加标注、partial 点名缺席视角);失败 → 原因+重试。
+ * 选题卡的调研区（deep-research spec §8「选题卡状态机」）:调研交给本机 AI 开选题会（引擎调研已下线）。
+ * 无 job → 「交给 X 调研」;进行中 → 逐项状态;有简报 → 「生成于 X」+ 看简报 + 角度卡仍可选
+ * (过期加标注、partial 点名缺席视角);失败 → 原因(旧引擎任务 = 「引擎调研已下线，请交给 AI 调研」)。
  *
  * 两个可见性约定:
  * 1. 状态由 SSE `research` 流推着走(job 级落定 + 视角级进度同一个流),本组件只按
@@ -10,12 +10,12 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { invoke, subscribeEvents } from "../transport";
-import { toast } from "../ui";
 import { loadResearchAssets, type ResearchAssetView as AssetView } from "./ResearchAssetPicker";
 import { linkDomain, type AngleCard, type Topic } from "../lib";
 import { angleChoiceState, type AngleGate } from "./angle-choice";
 import { AngleSection } from "./AngleCards";
 import { fallbackTitle } from "./engine-lib";
+import { HandOffButton } from "./HandOffButton";
 
 type JobStatus = "queued" | "running" | "succeeded" | "partial" | "failed";
 type PerspectiveStatus = "pending" | "running" | "succeeded" | "failed";
@@ -49,7 +49,6 @@ interface BriefMeta {
 
 interface StatusData {
   job: ResearchJob | null;
-  searchConfigured: boolean;
   currentBrief: BriefMeta | null;
 }
 
@@ -210,11 +209,8 @@ const isRunning = (job: ResearchJob | null): boolean => job !== null && JOB_RUNN
 /** 状态机的说明区(按钮在 head 里):每一态都必须说人话,没有一条路径是沉默的 */
 function StateLines({ st }: { st: StatusData }) {
   const { job, currentBrief: meta } = st;
-  if (!st.searchConfigured) {
-    return <p className="muted">深调研要联网取证:先去设置页 · 搜索来源配好博查或 Tavily 的 key。</p>;
-  }
   if (job === null) {
-    return <p className="muted">还没调研过。跑一轮:四视角并行侦察 → 带跨视角张力点的简报,写这条选题时自动注入。</p>;
+    return <p className="muted">还没调研过。交给 AI 开选题会:多路调研 → 带跨视角张力点的简报和立意卡,写这条选题时自动注入。</p>;
   }
   if (isRunning(job)) {
     return (
@@ -223,9 +219,7 @@ function StateLines({ st }: { st: StatusData }) {
         <p className="muted mono">
           {job.status === "queued"
             ? "排队中…"
-            : job.kind === "angles"
-              ? "在重新立意,通常一两分钟"
-              : "四视角并行侦察中,通常几分钟"}
+            : "AI 在调研中(进度在它的会话里)"}
         </p>
       </>
     );
@@ -241,9 +235,9 @@ function StateLines({ st }: { st: StatusData }) {
       </>
     );
   }
-  if (!meta) return <p className="inbox-bad">这一轮没留下可读简报——重跑一次。</p>;
+  if (!meta) return <p className="inbox-bad">这一轮没留下可读简报——交给 AI 重新调研一次。</p>;
   if (job.status === "partial") {
-    return <p className="muted">部分视角缺席:{missingLabels(job)} —— 简报照常可用,重跑可能补齐。</p>;
+    return <p className="muted">部分视角缺席:{missingLabels(job)} —— 简报照常可用,重新调研可能补齐。</p>;
   }
   return null;
 }
@@ -301,7 +295,6 @@ export function ResearchPanel(props: {
   const [err, setErr] = useState<string | null>(null);
   const [assets, setAssets] = useState<AssetView[]>([]);
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     const r = await invoke("research:status", { topic_id: topicId });
@@ -340,56 +333,29 @@ export function ResearchPanel(props: {
     onAngleGate?.({ cards: cards.length, state: choice });
   }, [cards.length, choice, onAngleGate]);
 
-  /** 两个投递按钮共用一条路:回执 note 原样 toast,拒绝原样 toast(「研究进行中」也是拒绝) */
-  const post = async (channel: "research:deep_dive" | "research:regenerate_angles", failed: string) => {
-    setBusy(true);
-    try {
-      const r = await invoke(channel, { topic_id: topicId });
-      if (!r.ok) return toast(r.error ?? failed);
-      toast((r as unknown as { data?: { note?: string } }).data?.note ?? "已排队");
-      await load();
-    } finally {
-      setBusy(false);
-    }
-  };
-
   if (err) return <p className="inbox-bad research-panel">{err}</p>;
   if (!st) return <p className="muted research-panel">读取调研状态…</p>;
 
   const meta = st.currentBrief;
   const running = isRunning(st.job);
-  const label = meta ? "重跑深调研" : st.job && !running ? "重试深调研" : "深调研";
 
   return (
     <div className="research-panel">
       <div className="research-head">
-        <strong>深调研</strong>
+        <strong>调研</strong>
         {meta && (
           <span className="muted mono">
             简报 v{meta.revision} · 生成于 {fmtTime(meta.generatedAt)}
           </span>
         )}
-        {meta?.stale && <span className="chip research-stale">基于旧版选题,建议重跑</span>}
+        {meta?.stale && <span className="chip research-stale">基于旧版选题,建议重新调研</span>}
         <span className="row-actions">
           {meta && (
             <button onClick={() => setOpen((v) => !v)}>{open ? "收起简报" : "看简报"}</button>
           )}
-          {/* 重新立意只重跑立意 pass:有简报才有事实可用,在途任务期间一律禁用(投出去也会被拒) */}
-          {meta && (
-            <button
-              disabled={busy || running}
-              onClick={() => void post("research:regenerate_angles", "重新立意派发失败")}
-            >
-              {busy ? "派发中…" : "重新立意"}
-            </button>
-          )}
+          {/* 调研交给本机 AI 开选题会;在途时不再交一遍 */}
           {!running && (
-            <button
-              disabled={busy || !st.searchConfigured}
-              onClick={() => void post("research:deep_dive", "深调研派发失败")}
-            >
-              {busy ? "派发中…" : label}
-            </button>
+            <HandOffButton topicId={topicId} mode="research" onDone={() => void load()} />
           )}
         </span>
       </div>
@@ -401,7 +367,7 @@ export function ResearchPanel(props: {
       {cards.length === 0 && choice === "stale" && (
         <p className="inbox-bad">
           你之前选的角度「{props.topic.selectedAngle?.card.angle}」已过期,当前又没有可选的角度候选——
-          写这条会按「未经角度点选」处理,重跑深调研可以出新候选。
+          写这条会按「未经角度点选」处理,交给 AI 重新调研可以出新候选。
         </p>
       )}
       {brief && cards.length > 0 && (

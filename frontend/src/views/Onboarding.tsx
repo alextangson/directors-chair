@@ -37,7 +37,7 @@ export function DonePage(props: { connected: HostStatus[]; engineReady: boolean;
         : <p className="ob-note">看板上点「开始写」默认交给 {props.writer.label}，在「设置 · 接入更多 · 宿主」里能改。</p>)}
       {!props.engineReady && (
         <p className="ob-note">
-          深调研、选题雷达、复盘、人设、每日摘要这几样要用你自己的模型钥匙（DeepSeek 最省事）。现在可以先跳过，以后在设置里补。{" "}
+          选题雷达、复盘、人设、每日摘要这几样要用你自己的模型钥匙（DeepSeek 最省事）。现在可以先跳过，以后在设置里补。{" "}
           <button className="btn-ghost ob-inline" onClick={props.onOpenSettings}>去设置里填钥匙</button>
         </p>
       )}

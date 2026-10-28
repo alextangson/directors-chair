@@ -17,8 +17,6 @@ import { canonicalizeUrl } from "../inbox/url-canonical.js";
 import { sanitizeExternal } from "./research-prompt-kit.js";
 import { fetchExternalPage } from "../inbox/fetch-external.js";
 import type { ExternalPage } from "../inbox/fetch-external.js";
-import { searchWeb } from "./search-provider.js";
-import type { WebSearchResult } from "./search-provider.js";
 import type {
   AssetCandidate,
   BrokerActivity,
@@ -28,8 +26,6 @@ import type {
   BrokerQuotas,
   BrokerQuotaScope,
   BrokerSearchHit,
-  BrokerSearchImpl,
-  BrokerSearchResponse,
   BrokerUsage,
   PageTicket,
   PerspectiveBroker,
@@ -53,9 +49,6 @@ export const DEFAULT_BROKER_QUOTAS: BrokerQuotas = {
   textBytesPerJob: 300 * 1024,
   assetsPerJob: 40,
 };
-
-/** 单次搜索取几条结果——多了只是喂噪音给模型 */
-const SEARCH_RESULT_COUNT = 6;
 
 /** 配额耗尽。调用方（视角子运行）应捕获并记进 gaps，不是让整条 job 崩掉。 */
 export class BrokerQuotaError extends Error {
@@ -122,11 +115,8 @@ type PageCacheEntry = Omit<BrokerPageResponse, "cached">;
 
 class BrokerCore {
   private readonly quotas: BrokerQuotas;
-  private readonly searchImpl: BrokerSearchImpl;
   private readonly fetchImpl: BrokerFetchImpl;
   private readonly now: () => number;
-  private readonly dataDir?: string;
-  private readonly provider: string;
   private readonly onActivity?: (activity: BrokerActivity) => void;
 
   private readonly perspectives = new Map<string, { search: number; readPage: number }>();
@@ -136,12 +126,10 @@ class BrokerCore {
   private readonly cacheHits = { search: 0, page: 0 };
 
   private readonly searchCache = new Map<string, BrokerSearchHit[]>();
-  private readonly searchInflight = new Map<string, Promise<BrokerSearchHit[]>>();
   private readonly pageCache = new Map<string, PageCacheEntry>();
   private readonly pageInflight = new Map<string, Promise<PageCacheEntry>>();
 
   private readonly sources = new Map<string, SourceEntry>();
-  private readonly searchSourceByUrl = new Map<string, string>();
   private readonly assets = new Map<string, AssetCandidate>();
   private readonly assetByUrl = new Map<string, string>();
   private searchSeq = 0;
@@ -153,11 +141,8 @@ class BrokerCore {
   constructor(deps: ResearchBrokerDeps) {
     this.beforeNetwork = deps.beforeNetwork;
     this.quotas = { ...DEFAULT_BROKER_QUOTAS, ...deps.quotas };
-    this.searchImpl = deps.searchImpl ?? searchWeb;
     this.fetchImpl = deps.fetchImpl ?? fetchExternalPage;
     this.now = deps.now ?? Date.now;
-    this.dataDir = deps.dataDir;
-    this.provider = deps.provider ?? "default";
     this.onActivity = deps.onActivity;
     if (deps.snapshot) {
       const saved = structuredClone(deps.snapshot);
@@ -167,7 +152,6 @@ class BrokerCore {
       for (const [key, value] of saved.pageCache) this.pageCache.set(key, value);
       for (const [key, value] of saved.assets) this.assets.set(key, value);
       for (const [key, value] of saved.perspectives) this.perspectives.set(key, value);
-      for (const [id, entry] of this.sources) if (entry.source.kind === "search_result") this.searchSourceByUrl.set(canonicalizeUrl(entry.source.url), id);
       for (const [id, asset] of this.assets) this.assetByUrl.set(canonicalizeUrl(asset.url), id);
       this.jobSearch = saved.jobSearch; this.jobReadPage = saved.jobReadPage; this.jobTextBytes = saved.jobTextBytes;
       this.searchSeq = saved.searchSeq; this.pageSeq = saved.pageSeq; this.assetSeq = saved.assetSeq;
@@ -200,20 +184,6 @@ class BrokerCore {
     return fresh;
   }
 
-  /** 出网前**先扣额**（reserve）：四路并发时不许两路同时挤过同一个名额 */
-  private chargeSearch(name: string): void {
-    const use = this.use(name);
-    const q = this.quotas;
-    if (use.search >= q.searchPerPerspective) {
-      throw quotaError("perspective", "search", q.searchPerPerspective, use.search, `视角「${name}」的`);
-    }
-    if (this.jobSearch >= q.searchPerJob) {
-      throw quotaError("job", "search", q.searchPerJob, this.jobSearch, "本次调研的");
-    }
-    use.search++;
-    this.jobSearch++;
-  }
-
   private chargeReadPage(name: string): void {
     const use = this.use(name);
     const q = this.quotas;
@@ -228,66 +198,6 @@ class BrokerCore {
     }
     use.readPage++;
     this.jobReadPage++;
-  }
-
-  async search(name: string, query: string): Promise<BrokerSearchResponse> {
-    const q = query.trim();
-    if (!q) throw new Error("搜索词不能为空");
-    const key = `${this.provider}\0${normalizeWhitespace(q).toLowerCase()}`;
-    const cached = this.searchCache.get(key);
-    if (cached) {
-      this.cacheHits.search++;
-      return { query: q, results: cached, cached: true };
-    }
-    const inflight = this.searchInflight.get(key);
-    if (inflight) {
-      this.cacheHits.search++;
-      return { query: q, results: await inflight, cached: true };
-    }
-    this.chargeSearch(name);
-    this.note(name, "search", q);
-    const run = this.runSearch(key, q);
-    this.searchInflight.set(key, run);
-    try {
-      return { query: q, results: await run, cached: false };
-    } finally {
-      this.searchInflight.delete(key);
-    }
-  }
-
-  private async runSearch(key: string, query: string): Promise<BrokerSearchHit[]> {
-    await this.beforeNetwork?.(this.snapshot());
-    const raw = await this.searchImpl(query, { count: SEARCH_RESULT_COUNT, dataDir: this.dataDir });
-    const hits = raw.filter((r) => r.url?.trim()).map((r) => this.registerSearchResult(r));
-    this.searchCache.set(key, hits);
-    return hits;
-  }
-
-  /** 同一 URL 跨查询复用同一个 sourceId——注册表要紧凑，引用要稳定 */
-  private registerSearchResult(result: WebSearchResult): BrokerSearchHit {
-    const key = canonicalizeUrl(result.url);
-    const existing = this.searchSourceByUrl.get(key);
-    const sourceId = existing ?? `s${++this.searchSeq}`;
-    if (!existing) {
-      this.searchSourceByUrl.set(key, sourceId);
-      this.sources.set(sourceId, {
-        source: {
-          sourceId,
-          kind: "search_result",
-          url: result.url,
-          ...(result.title ? { title: result.title } : {}),
-          fetchedAt: this.stamp(),
-        },
-        normalized: "",
-      });
-    }
-    return {
-      sourceId,
-      title: result.title,
-      url: result.url,
-      snippet: result.snippet,
-      ...(result.publishedAt ? { publishedAt: result.publishedAt } : {}),
-    };
   }
 
   async readPage(name: string, url: string): Promise<BrokerPageResponse> {
@@ -477,7 +387,6 @@ export function createResearchBroker(deps: ResearchBrokerDeps = {}): ResearchBro
       core.use(name); // 先登记，usage() 里零动作的视角也要看得见
       return {
         name,
-        search: (query) => core.search(name, query),
         readPage: (url) => core.readPage(name, url),
       };
     },

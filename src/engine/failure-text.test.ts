@@ -60,7 +60,7 @@ describe("describeEngineFailure", () => {
       provider: NEWCLI,
       classified: classifyEngineError(new Error(`400 ${body}`)),
     });
-    expect(text).toContain("调研专线");
+    expect(text).toContain("雷达专线");
     expect(text).toContain("协议");
     expect(text).toMatch(/openai/);
   });
@@ -70,7 +70,7 @@ describe("describeEngineFailure", () => {
       describeEngineFailure({ role, provider: NEWCLI, classified: classifyEngineError(new Error("fetch failed")) });
     expect(of("writer")).toContain("写稿专线");
     expect(of("reviewer")).toContain("审稿专线");
-    expect(of("scout")).toContain("调研专线");
+    expect(of("scout")).toContain("雷达专线");
     expect(of("analytics")).toContain("复盘专线");
   });
 

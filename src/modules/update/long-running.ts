@@ -44,9 +44,8 @@ export const BACKGROUND_TRACKED_CHANNELS: ReadonlySet<string> = new Set([
   "article_images:generate", "article_images:regenerate",
 ]);
 
-/** 交给剪辑 / 深调研 runner 跑的：请求先回，runner 在跑 / 排着的任务数计入忙碌（server.ts 的 inProcessTurns） */
+/** 交给剪辑 runner 跑的：请求先回，runner 在跑 / 排着的任务数计入忙碌（server.ts 的 inProcessTurns） */
 export const RUNNER_TRACKED_CHANNELS: ReadonlySet<string> = new Set([
-  "research:deep_dive", "research:regenerate_angles",
   "video:build_start", "video:rough_cut_rerun", "video:transcribe_rerun", "video:editor_rerun", "video:cut_preview",
   "video:reassemble", "video:retry", "video:asr_warmup",
 ]);
@@ -67,7 +66,7 @@ export const SHORT_CHANNELS: ReadonlySet<string> = new Set([
   "settings:get", "settings:set", "settings:open_config", "engine:health",
   "settings:engine_attach_preset", "settings:offer_set",
   "hosts:list", "hosts:revoke",
-  "settings:search_get", "settings:search_set", "settings:publish_get", "settings:publish_set",
+  "settings:publish_get", "settings:publish_set",
   "persona:save", "cover:get", "settings:cover_get", "settings:cover_set",
   "logs:list", "logs:get_run", "skills:list", "goal:get", "goal:set", "retro:list", "retro:get", "onboarding:status",
   "flywheel:import_csv", "flywheel:record", "flywheel:pull_status", "flywheel:pull_toggle", "flywheel:hypotheses_list", "calibration:ledger",
@@ -101,7 +100,7 @@ export const LONG_RUNNING_TOOL_ACTIONS: Readonly<Record<string, "*" | ReadonlySe
   // 选题与调研：抓源、外网搜索与读页
   autocrew_research: new Set(["discover"]),
   autocrew_topic: new Set(["radar_pool"]),
-  autocrew_scout: new Set(["search", "read_page"]),
+  autocrew_scout: new Set(["read_page"]),
   // 薄路径：verify_quote 抓外网
   autocrew_draft: new Set(["verify_quote"]),
   autocrew_workflow: new Set(["prepare", "research", "write", "draft"]),

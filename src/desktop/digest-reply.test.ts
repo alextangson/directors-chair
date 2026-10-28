@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ResearchJob } from "../modules/research/research-job-store.js";
-import { SEARCH_NOT_CONFIGURED } from "../modules/research/search-provider.js";
+import { getTopic, saveTopic, softDeleteTopic } from "../storage/local-store.js";
+import { listJobs } from "../modules/research/research-job-store.js";
 import { handleDigestReply, type DigestReplyDeps } from "./digest-reply.js";
 import { saveDigestState, type DigestState } from "./digest-state.js";
 
@@ -12,9 +12,8 @@ const NOW = new Date(2026, 8, 7, 10, 0, 0).getTime();
 
 let tmp: string;
 let replies: string[];
-let triggered: Array<{ topicId: string; dataDir?: string }>;
-let triggerResult: { accepted: true } | { accepted: false; reason: string };
-let job: ResearchJob | null;
+let topicA: string;
+let topicB: string;
 
 const settings = { botToken: "123:abc", allowedUserIds: ["7"], targetWorkspaceId: "default" };
 
@@ -27,11 +26,6 @@ function deps(over: Partial<DigestReplyDeps> = {}): DigestReplyDeps {
       replies.push(text);
       return true;
     },
-    trigger: async (topicId: string, dataDir?: string) => {
-      triggered.push({ topicId, ...(dataDir !== undefined ? { dataDir } : {}) });
-      return triggerResult;
-    },
-    getJobImpl: async () => job,
     ...over,
   };
 }
@@ -45,8 +39,8 @@ async function seed(over: Partial<DigestState> = {}): Promise<void> {
         date: "2026-09-07",
         sentAt: new Date(NOW - 3600_000).toISOString(),
         items: [
-          { n: 1, topicId: "topic-a", title: "甲选题" },
-          { n: 2, topicId: "topic-b", title: "乙选题" },
+          { n: 1, topicId: topicA, title: "甲选题" },
+          { n: 2, topicId: topicB, title: "乙选题" },
         ],
       },
       ...over,
@@ -58,9 +52,8 @@ async function seed(over: Partial<DigestState> = {}): Promise<void> {
 beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), "autocrew-digest-reply-"));
   replies = [];
-  triggered = [];
-  triggerResult = { accepted: true };
-  job = null;
+  topicA = (await saveTopic({ title: "甲选题", description: "", tags: [] }, tmp)).id;
+  topicB = (await saveTopic({ title: "乙选题", description: "", tags: [] }, tmp)).id;
 });
 
 afterEach(async () => {
@@ -76,60 +69,62 @@ describe("摘要回复（spec §2.4）", () => {
 
   it("盘上没有清单时，数字也只是一条随手记", async () => {
     expect(await handleDigestReply({ text: "3", chatId: CHAT }, deps())).toBe(false);
-    expect(triggered).toHaveLength(0);
+    expect(replies).toHaveLength(0);
   });
 
-  it("回 0 → 「好，今天不动」，不起任何 job", async () => {
+  it("回 0 → 「好，今天不动」，不碰选题", async () => {
     await seed();
     expect(await handleDigestReply({ text: "0", chatId: CHAT }, deps())).toBe(true);
     expect(replies).toEqual(["好，今天不动"]);
-    expect(triggered).toHaveLength(0);
+    expect((await getTopic(topicA, tmp))?.topicMeetingRequestedAt).toBeUndefined();
   });
 
-  it("回范围内的数字 → 起深调研（带上摘要那个工作区），回执带标题", async () => {
+  it("回范围内的数字 → 选题标「待开选题会」，回执让人去 Claude 会话开选题会，不起任何调研任务", async () => {
     await seed();
     expect(await handleDigestReply({ text: " 2 ", chatId: CHAT }, deps())).toBe(true);
-    expect(triggered).toEqual([{ topicId: "topic-b", dataDir: tmp }]);
-    expect(replies[0]).toContain("已起深调研：《乙选题》");
+    expect(replies).toEqual([`已记下《乙选题》，到 Claude 会话里说『给《乙选题》开选题会（选题 ${topicB}）』`]);
+    const topic = await getTopic(topicB, tmp);
+    expect(topic?.topicMeetingRequestedAt).toBe(new Date(NOW).toISOString());
+    expect(topic?.renewedAt).toBe(new Date(NOW).toISOString());
+    expect(await listJobs(tmp)).toEqual([]);
   });
 
-  it("同一个数字再回一次 → 回当前 job 状态，不再起第二轮", async () => {
+  it("同一个数字再回一次 → 同一句回执，不出错", async () => {
     await seed();
     await handleDigestReply({ text: "1", chatId: CHAT }, deps());
-    job = { topicId: "topic-a", status: "running", startedAt: "", perspectives: [], topicHash: "h" };
     expect(await handleDigestReply({ text: "1", chatId: CHAT }, deps())).toBe(true);
-    expect(triggered).toHaveLength(1);
-    expect(replies[1]).toBe("《甲选题》的深调研：进行中");
+    expect(replies).toEqual([
+      `已记下《甲选题》，到 Claude 会话里说『给《甲选题》开选题会（选题 ${topicA}）』`,
+      `已记下《甲选题》，到 Claude 会话里说『给《甲选题》开选题会（选题 ${topicA}）』`,
+    ]);
   });
 
   it("超范围 → 明说范围", async () => {
     await seed();
     await handleDigestReply({ text: "12", chatId: CHAT }, deps());
     expect(replies).toEqual(["清单里只有 1–2"]);
-    expect(triggered).toHaveLength(0);
   });
 
-  it("搜索没配 → 把那句人话原样回过去，不起 job", async () => {
+  it("选题已进回收站 → 照实说没法记下，不改它", async () => {
     await seed();
-    triggerResult = { accepted: false, reason: SEARCH_NOT_CONFIGURED };
-    expect(await handleDigestReply({ text: "1", chatId: CHAT }, deps())).toBe(true);
-    expect(replies).toEqual([SEARCH_NOT_CONFIGURED]);
-    // 拒了就不该记成「已起过」——下次再回同一个数字要能真的重试
-    expect(await handleDigestReply({ text: "1", chatId: CHAT }, deps())).toBe(true);
-    expect(triggered).toHaveLength(2);
+    await softDeleteTopic(topicA, tmp);
+    await handleDigestReply({ text: "1", chatId: CHAT }, deps());
+    expect(replies[0]).toContain("已经不在灵感库里了");
+    expect((await getTopic(topicA, tmp))?.topicMeetingRequestedAt).toBeUndefined();
   });
 
   it("回的是旧清单 → 回执带上那份的日期", async () => {
+    const old = await saveTopic({ title: "昨天那条", description: "", tags: [] }, tmp);
     await seed({
       lastDigest: {
         date: "2026-09-06",
         sentAt: new Date(NOW - 26 * 3600_000).toISOString(),
-        items: [{ n: 1, topicId: "topic-old", title: "昨天那条" }],
+        items: [{ n: 1, topicId: old.id, title: "昨天那条" }],
       },
     });
     await handleDigestReply({ text: "1", chatId: CHAT }, deps());
     expect(replies[0]).toContain("（这是 9 月 6 日的清单）");
-    expect(replies[0]).toContain("已起深调研：《昨天那条》");
+    expect(replies[0]).toContain("已记下《昨天那条》");
   });
 
   it("拿不到 chatId 也算处理过——「3」不该变成一条灵感", async () => {

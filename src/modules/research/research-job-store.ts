@@ -73,14 +73,6 @@ export interface ResearchJob {
   usedFallback?: { role: string; from: string; to: string; error: string };
   /** 触发时选题「标题+描述」的 hash；与当前选题不符 = 简报已过期（§2） */
   topicHash: string;
-  /**
-   * 派这活的那段对话（调研回流轮）。**只有从聊天派出的任务才有**——写稿闸口自动补的
-   * 调研、选题卡按钮触发的都没有来源会话，缺席即天然不回流，不需要再加一道开关。
-   * 由 chat-persist 在本轮落盘拿到 convId 后回填（首轮的会话此前还不存在）。
-   */
-  originConversationId?: string;
-  /** 已经回报过的时刻。防重的持久依据：一个任务只回报一次 */
-  followupAt?: string;
 }
 
 const RESEARCH_DIR = "research";
@@ -168,43 +160,6 @@ export async function upsertJob(job: ResearchJob, dataDir: string): Promise<Rese
   return job;
 }
 
-/**
- * 读-改-追加一个字段。**只给回流轮那两个标记用**：它们不属于 runner 的状态机
- * （runner 只写 queued/running/落定三处），却要落在同一条记录上，所以在这层给两个
- * 语义明确的小写口，而不是开一个「随便打补丁」的通用 API——台账不猜补丁语义的纪律还在。
- * job 不存在返回 null（选题被删/从没调研过）。
- */
-async function amendJob(
-  topicId: string,
-  patch: Partial<Pick<ResearchJob, "originConversationId" | "followupAt">>,
-  dataDir: string,
-): Promise<ResearchJob | null> {
-  const job = await getJob(topicId, dataDir);
-  if (!job) return null;
-  return upsertJob({ ...job, ...patch }, dataDir);
-}
-
-/**
- * 回填「这活是哪段对话派的」。本轮 turn 落盘后才知道 convId（首轮成功前不建会话），
- * 所以是回填不是直写。任务可能已经落定——照样打标，只是那一刻的回流钩子已经错过了。
- */
-export function noteJobOrigin(
-  topicId: string,
-  conversationId: string,
-  dataDir: string,
-): Promise<ResearchJob | null> {
-  return amendJob(topicId, { originConversationId: conversationId }, dataDir);
-}
-
-/** 盖「已回报」戳。回流轮真的落盘之后才盖——没发出去的回报不算回报 */
-export function markJobFollowedUp(
-  topicId: string,
-  at: string,
-  dataDir: string,
-): Promise<ResearchJob | null> {
-  return amendJob(topicId, { followupAt: at }, dataDir);
-}
-
 export async function getJob(topicId: string, dataDir: string): Promise<ResearchJob | null> {
   const journal = await readJournal(dataDir);
   for (let i = journal.length - 1; i >= 0; i--) {
@@ -223,4 +178,28 @@ export async function listJobs(dataDir: string): Promise<ResearchJob[]> {
   return [...byTopic.values()].sort(
     (a, b) => a.startedAt.localeCompare(b.startedAt) || a.topicId.localeCompare(b.topicId),
   );
+}
+
+/** 引擎调研下线（2026-10-28）：升级时还排着/跑着的引擎任务一律落失败，原因原样给用户看 */
+export const ENGINE_RESEARCH_RETIRED = "引擎调研已下线，请交给 AI 调研";
+
+/** 非终态、且不是宿主任务 = 再也没人会跑完它的旧引擎任务 */
+export function isRetiredEngineJob(job: ResearchJob): boolean {
+  return !isTerminalJobStatus(job.status) && job.executedBy?.kind !== "host";
+}
+
+/** 读时纠正：命中旧引擎在途任务就当场落失败（append 一条），否则原样返回 */
+export async function settleRetiredEngineJob(job: ResearchJob, dataDir: string): Promise<ResearchJob> {
+  if (!isRetiredEngineJob(job)) return job;
+  return upsertJob(
+    { ...job, claimedAt: undefined, status: "failed", settledAt: new Date().toISOString(), errorCode: "engine_retired", failReason: ENGINE_RESEARCH_RETIRED },
+    dataDir,
+  );
+}
+
+/** 启动扫一遍：把全部旧引擎在途任务落失败，返回处理条数 */
+export async function failRetiredEngineJobs(dataDir: string): Promise<number> {
+  const stale = (await listJobs(dataDir)).filter(isRetiredEngineJob);
+  for (const job of stale) await settleRetiredEngineJob(job, dataDir);
+  return stale.length;
 }

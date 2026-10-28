@@ -54,15 +54,15 @@ describe("buildEnginePayload", () => {
 });
 
 describe("runOnboardingSave", () => {
-  it("引擎存好 → 探针 → 搜索：三步顺序固定", async () => {
+  it("引擎存好 → 探针：两步顺序固定，不碰搜索", async () => {
     const calls: string[] = [];
     const invoke = vi.fn(async (channel: string) => {
       calls.push(channel);
       if (channel === "settings:test_route") return { ok: true, data: { ms: 820 } };
       return { ok: true };
     });
-    const r = await runOnboardingSave(invoke, form({ searchKey: "bocha-key" }));
-    expect(calls).toEqual(["settings:set", "settings:test_route", "settings:search_set"]);
+    const r = await runOnboardingSave(invoke, form());
+    expect(calls).toEqual(["settings:set", "settings:test_route"]);
     expect(r).toMatchObject({ engineSaved: true, probeMs: 820 });
     expect(r.probeError).toBeUndefined();
   });
@@ -73,44 +73,21 @@ describe("runOnboardingSave", () => {
       calls.push(channel);
       return { ok: false, error: "base_url 不合法" };
     });
-    const r = await runOnboardingSave(invoke, form({ searchKey: "bocha-key" }));
+    const r = await runOnboardingSave(invoke, form());
     expect(calls).toEqual(["settings:set"]);
     expect(r).toEqual({ engineSaved: false, engineError: "base_url 不合法" });
   });
 
-  it("探针不通 → 引擎已存,搜索照存,把那句人话交给 UI（不锁门）", async () => {
+  it("探针不通 → 引擎已存,把那句人话交给 UI（不锁门）", async () => {
     const calls: string[] = [];
     const invoke = vi.fn(async (channel: string) => {
       calls.push(channel);
       if (channel === "settings:test_route") return { ok: false, error: "端点 deepseek（api.deepseek.com）连不上：网络不通或域名解析失败。" };
       return { ok: true };
     });
-    const r = await runOnboardingSave(invoke, form({ searchKey: "bocha-key" }));
-    expect(calls).toEqual(["settings:set", "settings:test_route", "settings:search_set"]);
+    const r = await runOnboardingSave(invoke, form());
+    expect(calls).toEqual(["settings:set", "settings:test_route"]);
     expect(r.engineSaved).toBe(true);
     expect(r.probeError).toContain("连不上");
-    expect(r.searchError).toBeUndefined();
-  });
-
-  it("搜索 Key 存不上 → 不回滚引擎,只留一行", async () => {
-    const invoke = vi.fn(async (channel: string) => {
-      if (channel === "settings:search_set") return { ok: false, error: "api_key 必须是非空字符串" };
-      if (channel === "settings:test_route") return { ok: true, data: { ms: 300 } };
-      return { ok: true };
-    });
-    const r = await runOnboardingSave(invoke, form({ searchKey: "x" }));
-    expect(r.engineSaved).toBe(true);
-    expect(r.searchError).toBe("api_key 必须是非空字符串");
-  });
-
-  it("没填搜索 Key → 根本不碰搜索通道", async () => {
-    const calls: string[] = [];
-    const invoke = vi.fn(async (channel: string) => {
-      calls.push(channel);
-      if (channel === "settings:test_route") return { ok: true, data: { ms: 100 } };
-      return { ok: true };
-    });
-    await runOnboardingSave(invoke, form());
-    expect(calls).toEqual(["settings:set", "settings:test_route"]);
   });
 });

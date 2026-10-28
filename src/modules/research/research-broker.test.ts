@@ -6,12 +6,10 @@ import {
   normalizeWhitespace,
   type BrokerActivity,
   type BrokerFetchImpl,
-  type BrokerSearchImpl,
   type ResearchBroker,
   type ResearchBrokerDeps,
 } from "./research-broker.js";
 import type { ExternalPage, ImageCandidate } from "../inbox/fetch-external.js";
-import type { WebSearchResult } from "./search-provider.js";
 
 const NOW = Date.UTC(2026, 6, 26, 1, 2, 3);
 const STAMP = new Date(NOW).toISOString();
@@ -38,21 +36,8 @@ function makeFetch(presets: Record<string, PagePreset> = {}): {
   return { impl, calls };
 }
 
-function makeSearch(presets: Record<string, WebSearchResult[]> = {}): {
-  impl: BrokerSearchImpl;
-  calls: string[];
-} {
-  const calls: string[] = [];
-  const impl: BrokerSearchImpl = async (query) => {
-    calls.push(query);
-    return presets[query] ?? [{ title: `结果:${query}`, url: `https://ex.test/${encodeURIComponent(query)}`, snippet: "片段" }];
-  };
-  return { impl, calls };
-}
-
 function makeBroker(deps: ResearchBrokerDeps = {}): ResearchBroker {
   return createResearchBroker({
-    searchImpl: makeSearch().impl,
     fetchImpl: makeFetch().impl,
     now: () => NOW,
     ...deps,
@@ -72,16 +57,6 @@ async function quotaErrorOf(run: Promise<unknown>): Promise<BrokerQuotaError> {
 const img = (url: string): ImageCandidate => ({ url, sourceAttr: "img" });
 
 describe("broker 配额 — 每视角一层", () => {
-  it("搜索第 5 次触视角上限（默认 4）", async () => {
-    const search = makeSearch();
-    const b = makeBroker({ searchImpl: search.impl });
-    const p = b.forPerspective("受众痛点");
-    for (let i = 0; i < DEFAULT_BROKER_QUOTAS.searchPerPerspective; i++) await p.search(`词${i}`);
-    const err = await quotaErrorOf(p.search("再来一次"));
-    expect([err.scope, err.kind, err.limit]).toEqual(["perspective", "search", 4]);
-    expect(err.message).toContain("视角「受众痛点」");
-    expect(search.calls).toHaveLength(4);
-  });
 
   it("读页第 7 次触视角上限（默认 6）", async () => {
     const fetchStub = makeFetch();
@@ -95,30 +70,9 @@ describe("broker 配额 — 每视角一层", () => {
     expect(fetchStub.calls).toHaveLength(6);
   });
 
-  it("一路耗尽不影响另一路（计数按视角隔离）", async () => {
-    const b = makeBroker();
-    const a = b.forPerspective("A");
-    for (let i = 0; i < 4; i++) await a.search(`a${i}`);
-    await quotaErrorOf(a.search("a-over"));
-    await expect(b.forPerspective("B").search("b0")).resolves.toMatchObject({ cached: false });
-  });
 });
 
 describe("broker 配额 — 全 job 一层", () => {
-  it("四路各自没超，但全 job 搜索满 14 即拦", async () => {
-    const b = makeBroker();
-    const names = ["A", "B", "C"];
-    for (const name of names) {
-      const p = b.forPerspective(name);
-      for (let i = 0; i < 4; i++) await p.search(`${name}-${i}`);
-    }
-    const d = b.forPerspective("D");
-    await d.search("D-0");
-    await d.search("D-1");
-    const err = await quotaErrorOf(d.search("D-2"));
-    expect([err.scope, err.kind, err.limit]).toEqual(["job", "search", 14]);
-    expect(b.usage().perspectives.D.search.used).toBe(2); // 本路只用了 2/4，被全局闸拦下
-  });
 
   it("全 job 读页满 20 即拦", async () => {
     const b = makeBroker();
@@ -216,58 +170,6 @@ describe("broker 缓存 — 跨视角共享且不计配额", () => {
     expect(b.usage().readPage.used).toBe(1);
   });
 
-  it("搜索缓存按归一化查询共享（大小写/空白不敏感）", async () => {
-    const search = makeSearch();
-    const b = makeBroker({ searchImpl: search.impl });
-    const first = await b.forPerspective("A").search("  Deep   Research  ");
-    const second = await b.forPerspective("B").search("deep research");
-    expect(search.calls).toEqual(["Deep   Research"]);
-    expect(second.cached).toBe(true);
-    expect(second.results.map((r) => r.sourceId)).toEqual(first.results.map((r) => r.sourceId));
-    const usage = b.usage();
-    expect(usage.search.used).toBe(1);
-    expect(usage.perspectives.B.search.used).toBe(0);
-  });
-});
-
-describe("broker 来源登记", () => {
-  it("搜索结果登记为 s*、读页登记为 p*，字段齐全", async () => {
-    const b = makeBroker({
-      searchImpl: makeSearch({
-        q: [
-          { title: "甲", url: "https://ex.test/a", snippet: "s1" },
-          { title: "乙", url: "https://ex.test/b", snippet: "s2" },
-        ],
-      }).impl,
-      fetchImpl: makeFetch({ "https://ex.test/a": { title: "甲页", finalUrl: "https://ex.test/a-final" } }).impl,
-    });
-    const p = b.forPerspective("A");
-    const hits = await p.search("q");
-    expect(hits.results.map((r) => r.sourceId)).toEqual(["s1", "s2"]);
-    const page = await p.readPage("https://ex.test/a");
-    expect(page.sourceId).toBe("p1");
-    expect(b.getSource("p1")).toEqual({
-      sourceId: "p1",
-      kind: "page",
-      url: "https://ex.test/a",
-      finalUrl: "https://ex.test/a-final",
-      title: "甲页",
-      fetchedAt: STAMP,
-    });
-    expect(b.getSource("s1")).toMatchObject({ kind: "search_result", url: "https://ex.test/a", title: "甲" });
-    expect(b.getSource("s99")).toBeNull();
-    expect(b.listSources().map((s) => s.sourceId)).toEqual(["s1", "s2", "p1"]);
-  });
-
-  it("同一 URL 跨查询复用同一个 sourceId", async () => {
-    const hit = [{ title: "同一篇", url: "https://ex.test/same?utm_source=a", snippet: "x" }];
-    const b = makeBroker({ searchImpl: makeSearch({ q1: hit, q2: [{ ...hit[0], url: "https://ex.test/same" }] }).impl });
-    const p = b.forPerspective("A");
-    const first = await p.search("q1");
-    const second = await p.search("q2");
-    expect(second.results[0].sourceId).toBe(first.results[0].sourceId);
-    expect(b.listSources()).toHaveLength(1);
-  });
 });
 
 describe("broker quote 校验", () => {
@@ -275,11 +177,9 @@ describe("broker quote 校验", () => {
 
   async function readied(): Promise<ResearchBroker> {
     const b = makeBroker({
-      searchImpl: makeSearch({ q: [{ title: "搜到的", url: "https://ex.test/s", snippet: "片段" }] }).impl,
       fetchImpl: makeFetch({ "https://ex.test/p": { text: TEXT } }).impl,
     });
     const p = b.forPerspective("证据");
-    await p.search("q");
     await p.readPage("https://ex.test/p");
     return b;
   }
@@ -305,12 +205,6 @@ describe("broker quote 校验", () => {
     expect(b.locateQuote("   ")).toBeNull();
   });
 
-  it("search_result 不可验：明确要求先读页", async () => {
-    const b = await readied();
-    const check = b.validateQuote("s1", "片段");
-    expect(check.ok).toBe(false);
-    expect(check.ok === false && check.reason).toContain("证据必须来自已读页面");
-  });
 
   it("未登记的 sourceId 与空引文各有明确理由", async () => {
     const b = await readied();
@@ -399,9 +293,9 @@ describe("broker usage 与视角句柄", () => {
 
   it("同名句柄共享计数", async () => {
     const b = makeBroker();
-    await b.forPerspective("A").search("q1");
-    await b.forPerspective("A").search("q2");
-    expect(b.usage().perspectives.A.search.used).toBe(2);
+    await b.forPerspective("A").readPage("https://ex.test/1");
+    await b.forPerspective("A").readPage("https://ex.test/2");
+    expect(b.usage().perspectives.A.readPage.used).toBe(2);
   });
 
   it("usage 汇总全 job 各配额的已用/上限", async () => {
@@ -409,22 +303,20 @@ describe("broker usage 与视角句柄", () => {
       fetchImpl: makeFetch({ "https://ex.test/p": { text: "abcd", imageCandidates: [img("https://cdn.test/1.jpg")] } }).impl,
     });
     const p = b.forPerspective("A");
-    await p.search("q");
     await p.readPage("https://ex.test/p");
     expect(b.usage()).toMatchObject({
-      search: { used: 1, limit: 14 },
+      search: { used: 0, limit: 14 },
       readPage: { used: 1, limit: 20 },
       textBytes: { used: 4, limit: 300 * 1024 },
       assets: { used: 1, limit: 40 },
-      sources: 2,
+      sources: 1,
       cacheHits: { search: 0, page: 0 },
     });
   });
 
-  it("空查询/空链接直接报错，不浪费配额", async () => {
+  it("空链接直接报错，不浪费配额", async () => {
     const b = makeBroker();
     const p = b.forPerspective("A");
-    await expect(p.search("   ")).rejects.toThrow("搜索词不能为空");
     await expect(p.readPage("  ")).rejects.toThrow("读页链接不能为空");
     expect(b.usage().perspectives.A).toEqual({
       search: { used: 0, limit: 4 },
@@ -434,12 +326,6 @@ describe("broker usage 与视角句柄", () => {
 });
 
 describe("broker 活动事件 — 调研在干活得让人看见", () => {
-  it("搜索发一条：带视角名与搜索词原文", async () => {
-    const seen: BrokerActivity[] = [];
-    const b = makeBroker({ onActivity: (a) => seen.push(a) });
-    await b.forPerspective("evidence").search("新能源车企 2026 销量");
-    expect(seen).toEqual([{ perspective: "evidence", action: "search", detail: "新能源车企 2026 销量" }]);
-  });
 
   it("读页发一条：detail 只报 host（整条长 URL 会把日志淹了）", async () => {
     const seen: BrokerActivity[] = [];
@@ -448,15 +334,6 @@ describe("broker 活动事件 — 调研在干活得让人看见", () => {
     expect(seen).toEqual([{ perspective: "counter", action: "read_page", detail: "zhuanlan.zhihu.com" }]);
   });
 
-  it("被配额拒掉的调用不发事件（事件量天然被配额封顶）", async () => {
-    const seen: BrokerActivity[] = [];
-    const b = makeBroker({ onActivity: (a) => seen.push(a) });
-    const p = b.forPerspective("audience");
-    for (let i = 0; i < DEFAULT_BROKER_QUOTAS.searchPerPerspective; i++) await p.search(`词${i}`);
-    await quotaErrorOf(p.search("超额的这次"));
-    expect(seen).toHaveLength(4);
-    expect(seen.some((a) => a.detail === "超额的这次")).toBe(false);
-  });
 
   it("缓存命中不发事件——没出网就没有「在搜」这回事", async () => {
     const seen: BrokerActivity[] = [];
@@ -473,7 +350,6 @@ describe("broker 活动事件 — 调研在干活得让人看见", () => {
       },
     });
     const p = b.forPerspective("evidence");
-    await expect(p.search("还能搜")).resolves.toMatchObject({ query: "还能搜", cached: false });
     await expect(p.readPage("https://ex.test/p")).resolves.toMatchObject({ cached: false });
   });
 });

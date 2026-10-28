@@ -13,7 +13,7 @@ import { initializeProjectLayout } from "../storage/content-project.js";
 import { getContent, listContents, saveContent, saveTopic, updateContent, type Topic } from "../storage/local-store.js";
 import { founderAuthored } from "../modules/research/angle-gate.test-helper.js";
 import { startWriting } from "./board-actions.js";
-import { deliver, handOff, writePrompt } from "./writing-handoff.js";
+import { deliver, handOff, handOffResearch, writePrompt } from "./writing-handoff.js";
 import { connectedWriters, pickWriter, writeWritingHost } from "./host-connect/writing-host.js";
 import { ensureHostToken } from "./host-tokens.js";
 import { recordVerify } from "./host-connect/verify-state.js";
@@ -185,5 +185,25 @@ describe("交出去之后：等接手 / 在写 / 认领中", () => {
     expect((await getContent(c.id, dir))?.writingHandoff).toBeUndefined();
     const late = await saveContent({ _provenance: HUMAN_WRITE, title: "待发", body: "正文", platform: "wechat_mp", status: "publish_ready", tags: [] }, dir);
     expect(await handOff(late.id, { mode: "write" }, dir, with_("codex", "Codex"))).toMatchObject({ ok: false, code: "wrong_stage" });
+  });
+});
+
+describe("选题「交给 X 调研」（引擎调研下线后的唯一调研入口）", () => {
+  it("指令是「给《标题》开选题会（选题 id）」：带 id 免得宿主按标题另建一条；Codex 打开新对话、指令进剪贴板；不建稿", async () => {
+    const r = await handOffResearch(topic.id, null, dir, with_("codex", "Codex"));
+    expect(r).toMatchObject({ ok: true, topic_id: topic.id, host: "codex", prompt: `给《喊一定没用》开选题会（选题 ${topic.id}）`, opened: true, paste: true });
+    expect((await listContents(dir)).filter((c) => c.topicId === topic.id)).toHaveLength(0);
+  });
+
+  it("一个 AI 都没接：no_writer（前端说「先接一个 AI」），配了钥匙也不退给总编辑，不开窗", async () => {
+    const keyOnly = { platform: "darwin" as const, spawnImpl, writer: () => ({ ok: false as const, code: "no_writer" as const, error: "先接一个 AI" }), engineReady: async () => true };
+    expect(await handOffResearch(topic.id, null, dir, keyOnly)).toMatchObject({ ok: false, code: "no_writer" });
+    expect(await handOffResearch(topic.id, "chief", dir, with_("codex", "Codex"))).toMatchObject({ ok: false, code: "no_writer" });
+    expect(spawnImpl).not.toHaveBeenCalled();
+  });
+
+  it("选题不存在 / id 不对：照实拒", async () => {
+    expect(await handOffResearch("content-1-a", null, dir, with_("codex", "Codex"))).toMatchObject({ ok: false, code: "bad_request" });
+    expect(await handOffResearch("topic-1-nope", null, dir, with_("codex", "Codex"))).toMatchObject({ ok: false, code: "not_found" });
   });
 });

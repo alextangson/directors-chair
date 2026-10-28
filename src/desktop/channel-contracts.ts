@@ -72,8 +72,6 @@ export const REQUIRED_FIELDS: Record<IpcChannel, readonly string[]> = {
   "hosts:list": [],
   // 撤销就是删掉 `<dataDir>/tokens/<host>.token`，那个宿主下一次调用 401
   "hosts:revoke": ["host"],
-  "settings:search_get": [],
-  "settings:search_set": ["provider", "api_key"],
   "settings:publish_get": [],
   "settings:publish_set": [],
   "style:update_rule": ["rule_id", "revision"],
@@ -194,10 +192,7 @@ export const REQUIRED_FIELDS: Record<IpcChannel, readonly string[]> = {
   "patterns:list": [],
   "patterns:update": ["id"],
   "patterns:delete": ["id"],
-  // 深调研（deep-research spec §8）。brief_get 的可选键 revision（正整数）= 回溯指定版本
-  "research:deep_dive": ["topic_id"],
-  // 重新立意（P1 spec §3.5）：只在当前生效简报上重跑立意 pass，投递即返回
-  "research:regenerate_angles": ["topic_id"],
+  // 调研读口（deep-research spec §8）。brief_get 的可选键 revision（正整数）= 回溯指定版本
   "research:status": ["topic_id"],
   "research:brief_get": ["topic_id"],
   "research:list_assets": ["topic_id"],

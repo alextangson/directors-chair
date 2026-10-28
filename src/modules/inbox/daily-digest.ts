@@ -146,7 +146,7 @@ function itemBlock(item: DigestItem, now: number): string {
 }
 
 function compose(items: DigestItem[], opts: RenderOptions, now: number): string {
-  const footer = `回复数字起深调研（1–${items.length}）；回 0 = 今天都不做。`;
+  const footer = `回复数字记成「待开选题会」（1–${items.length}）；回 0 = 今天都不做。`;
   return [header(opts.date), "", ...items.map((it) => itemBlock(it, now)), "", footer].join("\n");
 }
 
@@ -218,24 +218,14 @@ export function outOfRangeReply(count: number): string {
   return `清单里只有 1–${count}`;
 }
 
-export function startedReply(title: string): string {
-  return `已起深调研：《${title}》。立意卡出来后到工作台看，或再回同一个数字看进度`;
+/** 回了序号（§2.4）：只记下「待开选题会」，调研交给宿主 AI——重复回同一个数字也是这句 */
+/** 把一条已有选题交给宿主开选题会的那句话：带选题 id，宿主才不会按标题另建一条（摘要回执与「交给 AI 调研」共用） */
+export function topicMeetingPrompt(title: string, topicId: string): string {
+  return `给《${Array.from(title).slice(0, 60).join("")}》开选题会（选题 ${topicId}）`;
 }
 
-const JOB_STATUS_TEXT: Record<string, string> = {
-  queued: "排队中",
-  running: "进行中",
-  succeeded: "已完成——立意卡在工作台的选题卡上",
-  partial: "部分完成——简报已出，有视角没跑通",
-  failed: "失败",
-};
-
-/** 同一个数字再回一次 = 查进度（§2.4）。没有 job 记录时照实说，不假装在跑 */
-export function jobStatusReply(title: string, status?: string, failReason?: string): string {
-  if (!status) return `《${title}》还没有调研记录——再回一次这个数字我重新起一轮`;
-  const label = JOB_STATUS_TEXT[status] ?? status;
-  const tail = status === "failed" && failReason ? `：${failReason}` : "";
-  return `《${title}》的深调研：${label}${tail}`;
+export function meetingQueuedReply(title: string, topicId: string): string {
+  return `已记下《${title}》，到 Claude 会话里说『${topicMeetingPrompt(title, topicId)}』`;
 }
 
 /** 回的是旧清单时的前缀（§2.4）——不说日期，用户会以为自己在点今天的第 3 条 */

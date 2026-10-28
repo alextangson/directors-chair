@@ -63,8 +63,6 @@ export const IPC_CHANNELS = [
   // 只出宿主名与时间戳，token 值一个字节都不进这条通道
   "hosts:list",
   "hosts:revoke",
-  "settings:search_get",
-  "settings:search_set",
   "settings:publish_get",
   "settings:publish_set",
   "style:update_rule",
@@ -185,8 +183,6 @@ export const IPC_CHANNELS = [
   "patterns:list",
   "patterns:update",
   "patterns:delete",
-  "research:deep_dive",
-  "research:regenerate_angles",
   "research:status",
   "research:brief_get",
   "research:list_assets",

@@ -61,8 +61,6 @@ describe("IPC_CHANNELS", () => {
     "chat:turn",
     "settings:get",
     "settings:set",
-    "settings:search_get",
-    "settings:search_set",
     "settings:publish_get",
     "settings:publish_set",
     "style:update_rule",
@@ -145,8 +143,6 @@ describe("IPC_CHANNELS", () => {
     "content:restore",
     "content:open_folder",
     "trash:list",
-    "research:deep_dive",
-    "research:regenerate_angles",
     "research:status",
     "research:brief_get",
     "research:list_assets",
@@ -160,8 +156,8 @@ describe("IPC_CHANNELS", () => {
   // 2026-10-04 薄路径定稿：draft:final_get / draft:finalize（draft-handlers.ts）
   // 2026-10-15 试跑示例一键删：topic:delete_example（ipc.ts 直连 deleteExampleTopic）
   // 2026-10-25 在 ego lite 里打开平台后台：ego:open_console（ego-open-console.ts）；2026-10-26 顶栏定稿：script:final_get / script:finalize
-  it("has exactly 181 channels", () => {
-    expect(IPC_CHANNELS).toHaveLength(181);
+  it("has exactly 177 channels", () => {
+    expect(IPC_CHANNELS).toHaveLength(177);
   });
 
   it.each(EXPECTED)("contains %s", (ch) => {
@@ -298,8 +294,6 @@ describe("CHANNEL_ACTIONS — channel→action bindings", () => {
           // 宿主令牌（P3 spec §4.1）:host-tokens.ts 的 hostsList/hostsRevoke,直接读写 tokens/
           ch !== "hosts:list" &&
           ch !== "hosts:revoke" &&
-          ch !== "settings:search_get" &&
-          ch !== "settings:search_set" &&
           ch !== "settings:publish_get" &&
           ch !== "settings:publish_set" &&
           ch !== "style:update_rule" &&
@@ -394,8 +388,6 @@ describe("CHANNEL_ACTIONS — channel→action bindings", () => {
           ch !== "patterns:list" &&
           ch !== "patterns:update" &&
           ch !== "patterns:delete" &&
-          ch !== "research:deep_dive" &&
-          ch !== "research:regenerate_angles" &&
           ch !== "research:status" &&
           ch !== "research:brief_get" &&
           ch !== "research:list_assets" &&

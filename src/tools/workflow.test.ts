@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
-import { executeWorkflow, resetWorkflowRunners, workflowSchema } from "./workflow.js";
+import { executeWorkflow, workflowSchema } from "./workflow.js";
 import {
   BRIEF_SCHEMA_VERSION,
   saveBrief,
@@ -26,8 +26,6 @@ import {
   type ResearchJob,
   type ResearchJobStatus,
 } from "../modules/research/research-job-store.js";
-import type { ResearchRunner, TriggerResult } from "../modules/research/research-runner.js";
-import { SEARCH_NOT_CONFIGURED } from "../modules/research/search-provider.js";
 import { getTopic, saveTopic, updateTopic, updateContent, saveContent, type Topic } from "../storage/local-store.js";
 import { TEST_FOUNDER_WORDS, asFounder } from "../modules/research/angle-gate.test-helper.js";
 import { HUMAN_WRITE } from "../storage/first-body-guard.js";
@@ -48,7 +46,6 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  resetWorkflowRunners();
   await fs.rm(testDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
   for (const k of ENV_KEYS) {
     if (savedEnv[k] === undefined) delete process.env[k];
@@ -128,34 +125,6 @@ async function seed(brief: ResearchBrief | null = makeBrief()): Promise<Topic> {
   return topic;
 }
 
-async function configureSearch(): Promise<void> {
-  await fs.writeFile(path.join(testDir, "search.json"), JSON.stringify({ provider: "bocha", apiKey: "k-test" }));
-}
-
-function fakeRunner(trigger: TriggerResult): { runner: ResearchRunner; calls: string[][]; reclaims: number } {
-  const calls: string[][] = [];
-  const state = { reclaims: 0 };
-  const runner: ResearchRunner = {
-    trigger: async (topicId, kind = "full") => {
-      calls.push([topicId, kind]);
-      return trigger;
-    },
-    reclaimStaleJobs: async () => {
-      state.reclaims += 1;
-      return [];
-    },
-    idle: async () => {},
-    stop: () => {},
-  };
-  return {
-    runner,
-    calls,
-    get reclaims() {
-      return state.reclaims;
-    },
-  };
-}
-
 const run = async (params: Record<string, unknown>, deps = {}) => {
   // 老测试测的不是原话本身：选卡时补上创始人原话（缺原话被拒有专门测试）
   if (params.action === "select_angle" && params.founder_words === undefined) params = { ...params, founder_words: TEST_FOUNDER_WORDS };
@@ -167,8 +136,7 @@ describe("workflow prepare", () => {
   it("默认宿主模式无需engine或搜索key，保留规划且状态查询只等待宿主", async () => {
     const topic = await seed(null);
     await fs.writeFile(path.join(testDir, "engine.json"), "{broken");
-    const createRunnerImpl = vi.fn(() => { throw new Error("不能启动后台模型"); });
-    const result = await run({ action: "prepare", topic_id: topic.id, platform: "douyin", requirements: "原样保留本次规划" }, { createRunnerImpl });
+    const result = await run({ action: "prepare", topic_id: topic.id, platform: "douyin", requirements: "原样保留本次规划" });
     expect(result).toMatchObject({ ok: true, status: "awaiting_host_research", model_api_calls: 0, creative_task: { requirements: "原样保留本次规划" }, next_action: { tool: "autocrew_scout" } });
     // 任务包已随 prepare 返回：下一步直接是按包提交，不再领一次 scout pack（P6 §3.7）
     const researchTask = result.research_task as Record<string, any>;
@@ -178,43 +146,18 @@ describe("workflow prepare", () => {
     const again = await run({ action: "status", topic_id: topic.id });
     expect(again).toMatchObject({ status: "awaiting_host_research", next_action: { tool: "autocrew_scout", params: { task_id: (result.research_task as Record<string, unknown>).task_id } } });
     expect(again).not.toHaveProperty("poll_after_seconds");
-    expect(createRunnerImpl).not.toHaveBeenCalled();
   });
 
-  it("首次自动开始研究但不代写，并保留请求给后续调用", async () => {
+  it("引擎调研已下线：execution=engine 的 prepare 也只备宿主调研任务，不代写", async () => {
     const topic = await seed(null);
     const start = vi.fn(async () => ({ contentId: "unused" }));
-    const fake = fakeRunner({ accepted: true, deduped: false, job: { topicId: topic.id, status: "queued", startedAt: "now", perspectives: [], topicHash: "h" } });
-    const requirements = "  用我提供的顺序\n不要统一反常识开头。  ";
-    const trigger = vi.spyOn(fake.runner, "trigger");
-    const result = await run({ action: "prepare", execution: "engine", topic_id: topic.id, platform: "douyin", requirements }, { searchAvailableImpl: async () => true, createRunnerImpl: () => fake.runner, startGenerateScriptImpl: start });
-    expect(result).toMatchObject({ ok: true, status: "researching", ready: false, poll_after_seconds: 30, research: { status: "running", autoResearched: false }, continue_params: { requirements }, next_action: { params: { action: "prepare", requirements } } });
-    expect(fake.calls).toEqual([[topic.id, "full"]]);
-    expect(trigger).toHaveBeenCalledWith(topic.id, "full", createCreativeTask({ platform: "douyin", requirements }));
+    const result = await run({ action: "prepare", execution: "engine", topic_id: topic.id, platform: "douyin", requirements: "原样" }, { startGenerateScriptImpl: start });
+    expect(result).toMatchObject({ ok: true, status: "awaiting_host_research", model_api_calls: 0, next_action: { tool: "autocrew_scout" } });
     expect(start).not.toHaveBeenCalled();
   });
 
-  it("正在研究不重复投递；失败不偷偷无限重试", async () => {
-    const topic = await seed(null);
-    const trigger = vi.fn();
-    const createRunnerImpl = vi.fn(() => ({ trigger, reclaimStaleJobs: async () => [], idle: async () => {}, stop: () => {} }));
-    await adopt(topic.id, undefined, "running");
-    expect(await run({ action: "prepare", execution: "engine", topic_id: topic.id }, { createRunnerImpl })).toMatchObject({ ok: true, status: "researching", poll_after_seconds: 30 });
-    await adopt(topic.id, undefined, "failed");
-    expect(await run({ action: "prepare", execution: "engine", topic_id: topic.id }, { createRunnerImpl })).toMatchObject({ status: "needs_attention", research: { status: "failed" }, next_action: { params: { action: "research" } } });
-    expect(createRunnerImpl).not.toHaveBeenCalled();
-    expect(trigger).not.toHaveBeenCalled();
-  });
 
-  it("过期简报自动刷新，但失败后的旧简报保持问题可见", async () => {
-    const topic = await seed();
-    await updateTopic(topic.id, { description: "已改变规划" }, testDir);
-    const fake = fakeRunner({ accepted: true, deduped: false, job: { topicId: topic.id, status: "queued", startedAt: "now", perspectives: [], topicHash: "new" } });
-    expect(await run({ action: "prepare", execution: "engine", topic_id: topic.id, direction: "沿用角度" }, { searchAvailableImpl: async () => true, createRunnerImpl: () => fake.runner })).toMatchObject({ status: "researching", research: { stale: true } });
-    expect(fake.calls).toEqual([[topic.id, "full"]]);
-    await adopt(topic.id, 1, "failed");
-    expect(await run({ action: "prepare", execution: "engine", topic_id: topic.id })).toMatchObject({ status: "needs_attention", research: { status: "failed", stale: true } });
-  });
+
 
   it("显式已有材料直接走宿主路线，并如实标明未自动调研", async () => {
     const topic = await seed(null);
@@ -245,62 +188,23 @@ describe("workflow prepare", () => {
 // ─── research ─────────────────────────────────────────────────────────────────
 
 describe("workflow research", () => {
-  it("搜索没配好就不排 full job——拒单文案与桌面投递口一字不差", async () => {
+  it("只走宿主：领 scout 宿主调研任务（execution=engine 也一样），不启动后台", async () => {
     const topic = await seed(null);
-    const res = await run({ action: "research", execution: "engine", topic_id: topic.id });
-    expect(res.ok).toBe(false);
-    expect((res as { error: string }).error).toBe(SEARCH_NOT_CONFIGURED);
+    for (const execution of [undefined, "engine"]) {
+      const res = await run({ action: "research", topic_id: topic.id, ...(execution ? { execution } : {}) });
+      expect(res).toMatchObject({ ok: true, task_id: expect.any(String) });
+    }
   });
 
-  it("没有生效简报时拒 angles——它的起点就是那份简报", async () => {
-    const topic = await seed(null);
-    const res = await run({ action: "research", execution: "engine", topic_id: topic.id, kind: "angles" });
-    expect(res.ok).toBe(false);
-    expect((res as { error: string }).error).toContain("先跑一轮深调研");
-  });
-
-  it("angles 不看搜索 key：有简报就放行（搜索未配置也一样）", async () => {
+  it("只重跑立意没有单独通道：引导去 scout force prepare", async () => {
     const topic = await seed();
-    const fake = fakeRunner({ accepted: true, deduped: false, job: { topicId: topic.id, status: "queued", kind: "angles", startedAt: "x", perspectives: [], topicHash: "h" } });
-    const res = await run({ action: "research", execution: "engine", topic_id: topic.id, kind: "angles" }, { createRunnerImpl: () => fake.runner });
-    expect(res.ok).toBe(true);
-    expect(fake.calls).toEqual([[topic.id, "angles"]]);
-  });
-
-  it("投递成功即返回 job，并且首次使用时跑过一次启动回收", async () => {
-    await configureSearch();
-    const topic = await seed(null);
-    const fake = fakeRunner({
-      accepted: true,
-      deduped: false,
-      job: { topicId: topic.id, status: "queued", startedAt: "2026-09-04T09:00:00.000Z", perspectives: pendingPerspectives(), topicHash: "h" },
-    });
-    const res = await run({ action: "research", execution: "engine", topic_id: topic.id }, { createRunnerImpl: () => fake.runner });
-    expect(res.ok).toBe(true);
-    expect((res as { job: { status: string; kind: string; terminal: boolean } }).job).toMatchObject({
-      status: "queued",
-      kind: "full",
-      terminal: false,
-    });
-    expect(fake.reclaims).toBe(1);
-    // 同一个 dataDir 第二次不再重建 runner，也不再补扫
-    await run({ action: "research", execution: "engine", topic_id: topic.id }, { createRunnerImpl: () => fake.runner });
-    expect(fake.reclaims).toBe(1);
-    expect(fake.calls).toHaveLength(2);
-  });
-
-  it("在途任务的拒单带 inFlight，宿主要说「研究进行中」而不是「投递失败」", async () => {
-    await configureSearch();
-    const topic = await seed(null);
-    const fake = fakeRunner({ accepted: false, reason: "研究进行中：这条选题的深调研正在跑", inFlight: true });
-    const res = await run({ action: "research", execution: "engine", topic_id: topic.id }, { createRunnerImpl: () => fake.runner });
-    expect(res).toMatchObject({ ok: false, inFlight: true });
-    expect((res as { error: string }).error).toContain("研究进行中");
+    const res = await run({ action: "research", topic_id: topic.id, kind: "angles" });
+    expect(res).toMatchObject({ ok: false, code: "host_angles_handoff", next_action: { tool: "autocrew_scout", params: { action: "prepare", force: true } } });
   });
 
   it("未知 kind 当场拒，不猜", async () => {
     const topic = await seed(null);
-    const res = await run({ action: "research", execution: "engine", topic_id: topic.id, kind: "deep" });
+    const res = await run({ action: "research", topic_id: topic.id, kind: "deep" });
     expect(res).toMatchObject({ ok: false });
     expect((res as { error: string }).error).toContain("full | angles");
   });
@@ -373,6 +277,14 @@ describe("workflow select_angle", () => {
     const res = (await run({ action: "select_angle", topic_id: topic.id, angle_id: "angle-1", brief_revision: 1 })) as Record<string, any>;
     expect(res.ok).toBe(true);
     expect(res.topic.selectedAngle).toMatchObject({ angleId: "angle-1", briefRevision: 1 });
+  });
+
+  it("选定立意 = 选题会开完：摘要里记下的「待开选题会」标记随之清掉", async () => {
+    const topic = await seed();
+    await updateTopic(topic.id, { topicMeetingRequestedAt: "2026-10-28T08:00:00.000Z" }, testDir);
+    const res = (await run({ action: "select_angle", topic_id: topic.id, angle_id: "angle-1", brief_revision: 1 })) as Record<string, any>;
+    expect(res.ok).toBe(true);
+    expect((await getTopic(topic.id, testDir))?.topicMeetingRequestedAt).toBeUndefined();
   });
 
   it("手上的 revision 跟当前简报对不上 = 看的是过期候选，拒", async () => {
@@ -453,7 +365,7 @@ describe("workflow select_angle", () => {
   it("没有生效简报时不给选", async () => {
     const topic = await seed(null);
     const res = await run({ action: "select_angle", topic_id: topic.id, angle_id: "angle-1", brief_revision: 1 });
-    expect((res as { error: string }).error).toContain("先跑一轮深调研");
+    expect((res as { error: string }).error).toContain("先交给 AI 开选题会");
   });
 });
 
@@ -604,13 +516,13 @@ describe("workflow draft", () => {
 // ─── doctor ───────────────────────────────────────────────────────────────────
 
 describe("workflow doctor", () => {
-  it("引擎与搜索都没配：两条都进 hints，engine.configured=false", async () => {
+  it("引擎没配：进 hints，engine.configured=false；不再检查搜索 key", async () => {
     const res = (await run({ action: "doctor" })) as Record<string, any>;
     expect(res.ok).toBe(true);
     expect(res.engine.configured).toBe(false);
-    expect(res.search.configured).toBe(false);
+    expect(res).not.toHaveProperty("search");
     expect(res.dataDir).toBe(testDir);
-    expect(res.hints.join("\n")).toContain(SEARCH_NOT_CONFIGURED);
+    expect(res.hints.join("\n")).not.toContain("搜索");
   });
 
   it("engine.json 缺席但环境变量有 key：只给建议，不写盘、不回显 key", async () => {
@@ -673,10 +585,8 @@ describe("workflow doctor", () => {
 
   it("配好了就不再提示种子文件", async () => {
     await fs.writeFile(path.join(testDir, "engine.json"), JSON.stringify({ apiKey: "sk-in-file", strongModel: "m1" }));
-    await configureSearch();
     const res = (await run({ action: "doctor" })) as Record<string, any>;
     expect(res.engine).toMatchObject({ configured: true, strongModel: "m1" });
-    expect(res.search.configured).toBe(true);
     expect(res.hints).toEqual([]);
     expect(res.engineSeedHint).toBeUndefined();
   });

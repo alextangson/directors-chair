@@ -18,6 +18,9 @@ export const CHIEF_LABEL = "总编辑";
 export const WRITING_STATUSES: ReadonlySet<string> = new Set(["topic_saved", "drafting", "draft_ready", "reviewing", "revision", "needs_evidence"]);
 
 
+/** write = 写稿；look = 只读看看；research = 选题交给它开选题会（调研只有本机 AI 做得了） */
+export type HandOffMode = "write" | "look" | "research";
+
 /** chief：本机 AI 一个都没接、但配了模型钥匙 → 交给右侧的总编辑 */
 export interface Writers { writers: HostId[]; defaultHost: HostId | null; chief: boolean; error?: string }
 
@@ -43,8 +46,8 @@ export function useWriters(): Writers | null {
 }
 
 /** 交出去之后那一句（剪贴板已经写好 / 没写成两种） */
-export function deliveryText(d: Delivery, mode: "write" | "look", copied: boolean): string {
-  const verb = mode === "write" ? "开始写" : "看这篇";
+export function deliveryText(d: Delivery, mode: HandOffMode, copied: boolean): string {
+  const verb = mode === "write" ? "开始写" : mode === "research" ? "开选题会" : "看这篇";
   if (!d.paste) return `已交给 ${d.label}：新会话里填好了指令，按发送${verb}`;
   if (!copied) return `${d.label}${d.opened ? " 已打开" : ""}，但指令没能写进剪贴板`;
   if (d.open_error) return `${d.label} 没打开（${d.open_error}）。指令已复制，去 ${d.label} 里粘贴发送`;
@@ -53,7 +56,7 @@ export function deliveryText(d: Delivery, mode: "write" | "look", copied: boolea
 }
 
 /** 放剪贴板 + 说一句；剪贴板写不进去就把指令原文摆出来让人手动复制 */
-export async function announce(d: Delivery, mode: "write" | "look", prefix = ""): Promise<void> {
+export async function announce(d: Delivery, mode: HandOffMode, prefix = ""): Promise<void> {
   if (d.host === "chief") {
     window.dispatchEvent(new CustomEvent(CHIEF_PREFILL_EVENT, { detail: { text: d.prompt } }));
     return toast(`${prefix}右边的总编辑里填好了指令，看一眼按发送${mode === "write" ? "开始写" : ""}`);
@@ -70,10 +73,11 @@ export async function announce(d: Delivery, mode: "write" | "look", prefix = "")
 type Failure = { error: string; body?: Record<string, unknown> };
 
 /** 交不出去：没接 AI → 先接一个；默认的断开了 → 换一个 / 去设置；认领中 → 照实说。retry(host) 换一个 AI 再交 */
-export async function explainFailure(f: Failure, retry: (host: HostId) => Promise<void>): Promise<void> {
+export async function explainFailure(f: Failure, retry: (host: HostId) => Promise<void>, mode: HandOffMode = "write"): Promise<void> {
   const code = f.body?.code;
   if (code === "no_writer") {
-    const go = await confirmDialog({ title: "先接一个 AI", body: "写稿要一个接上了导演椅的 AI（Claude Code、Codex 或 WorkBuddy）。去设置里接上就能开工，这次什么都没建。", confirmLabel: "去设置" });
+    const job = mode === "research" ? "调研" : "写稿";
+    const go = await confirmDialog({ title: "先接一个 AI", body: `${job}要一个接上了导演椅的 AI（Claude Code、Codex 或 WorkBuddy）。去设置里接上就能开工，这次什么都没建。`, confirmLabel: "去设置" });
     if (go) window.location.hash = SETTINGS_HREF;
     return;
   }
@@ -87,9 +91,9 @@ export async function explainFailure(f: Failure, retry: (host: HostId) => Promis
   toast(f.error);
 }
 
-export async function settle(r: ApiResult<Delivery>, mode: "write" | "look", retry: (host: HostId) => Promise<void>, prefix = ""): Promise<void> {
+export async function settle(r: ApiResult<Delivery>, mode: HandOffMode, retry: (host: HostId) => Promise<void>, prefix = ""): Promise<void> {
   if (r.ok) return announce(r.data, mode, prefix);
-  return explainFailure(r, retry);
+  return explainFailure(r, retry, mode);
 }
 
 export { handoffLine, PICKUP_STALE_MS, type HandoffView } from "./handoff-line";

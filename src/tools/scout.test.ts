@@ -11,7 +11,6 @@ import { EMPTY_OWN_MATERIAL } from "../modules/research/own-material.js";
 import { createEvidenceLedger, seedLedgerFromBrief } from "../modules/research/evidence-ledger.js";
 import { loadBrief } from "../modules/research/brief-store.js";
 import { getJob, PERSPECTIVE_NAMES, upsertJob } from "../modules/research/research-job-store.js";
-import { createResearchRunner } from "../modules/research/research-runner.js";
 import { saveTopic, updateTopic, saveContent, updateContent, getContent } from "../storage/local-store.js";
 import { writePack, readPack, type ReadyPack } from "./writer-pack.js";
 import { claimContent } from "../storage/claims.js";
@@ -215,9 +214,9 @@ describe("host research lifecycle", () => {
 });
 
 describe("truthful provenance and durable quotas", () => {
-  it("搜索摘要不能cite；假引文不能cite；离线必须说明原因且不会自动退回", async () => {
+  it("scout 不再有 search 动作；未读的来源不能cite；假引文不能cite；离线必须说明原因且不会自动退回", async () => {
     await prepare();
-    await run("search", { perspective: "evidence", query: "菜园" });
+    expect((await run("search", { perspective: "evidence", query: "菜园" })).ok).toBe(false);
     expect(await run("cite", { source_id: "s1", claim: "证明", quote: "有轮班安排" })).toMatchObject({
       code: "quote_not_verified",
     });
@@ -308,23 +307,13 @@ describe("task identity and engine isolation", () => {
     expect(await run("status", {}, "another-host")).toMatchObject({ executedBy: { host: "claude" } });
   });
 
-  it("活跃后台任务不被宿主覆盖；宿主任务不被启动回收或trigger变成引擎任务", async () => {
-    const runner = createResearchRunner({
-      dataDir: dir,
-      runJob: vi.fn(async () => ({ status: "failed", perspectives: [] })),
-      onError: () => {},
-    });
-    try {
-      await prepare();
-      expect(await runner.reclaimStaleJobs()).toEqual([]);
-      expect(await runner.trigger(topicId)).toMatchObject({ accepted: false, inFlight: true });
-      await runner.idle();
-      expect(await getJob(topicId, dir)).toMatchObject({ status: "running", executedBy: { kind: "host" } });
-      await upsertJob({ topicId, status: "queued", startedAt: new Date().toISOString(), perspectives: [] }, dir);
-      expect(await run("prepare", { force: true })).toMatchObject({ code: "engine_research_in_flight" });
-    } finally {
-      runner.stop();
-    }
+  it("升级前遗留的在途引擎任务不挡宿主：prepare 时把它落失败（原因写明），宿主照常接手", async () => {
+    await upsertJob({ topicId, status: "queued", startedAt: new Date().toISOString(), perspectives: [] }, dir);
+    const res = await run("prepare", { force: true });
+    expect(res.ok).toBe(true);
+    expect(await getJob(topicId, dir)).toMatchObject({ status: "running", executedBy: { kind: "host" } });
+    // 台账留着那一笔落失败的历史（append-only）
+    expect(await fs.readFile(path.join(dir, "research", "jobs.jsonl"), "utf-8")).toContain("引擎调研已下线，请交给 AI 调研");
   });
 });
 

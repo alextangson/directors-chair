@@ -8,7 +8,6 @@
 import { describe, expect, it } from "vitest";
 import {
   assembleResearchInput,
-  joinCoreEvidence,
   renderCoreEvidence,
   renderVoiceReference,
   ANCHOR_BUDGET,
@@ -186,7 +185,7 @@ describe("assembleResearchInput — 老路逐字不变", () => {
   });
 });
 
-describe("renderCoreEvidence / joinCoreEvidence", () => {
+describe("renderCoreEvidence", () => {
   const item = { id: "ev-1", claim: "实测提效有限", quote: "在真实项目里只快了一成", sourceUrl: "https://example.com/a/b" };
 
   it("带 id、引文与域名，装进消毒定界块", () => {
@@ -211,22 +210,6 @@ describe("renderCoreEvidence / joinCoreEvidence", () => {
     expect(renderCoreEvidence([{ id: "ev-1", quote: "   " }])).toBe("");
   });
 
-  it("两段拼接后仍装得进优先级 1 的 4000（两段各自封过顶，拼接不再截断）", () => {
-    const core = renderCoreEvidence(
-      Array.from({ length: 8 }, (_, i) => ({ id: `ev-${i + 1}`, claim: "主".repeat(80), quote: "引".repeat(200) })),
-    );
-    const targeted = `${EXTERNAL_BLOCK_START}\n${"补".repeat(3000)}\n${EXTERNAL_BLOCK_END}`;
-    const joined = joinCoreEvidence(core, targeted);
-    expect(joined.length).toBeLessThanOrEqual(CORE_EVIDENCE_BUDGET);
-    // 拼完仍是两对完整定界符
-    expect(joined.split(EXTERNAL_BLOCK_END).length - 1).toBe(2);
-  });
-
-  it("一段缺席时不留多余空行", () => {
-    expect(joinCoreEvidence("", "补证块")).toBe("补证块");
-    expect(joinCoreEvidence("核心块", "")).toBe("核心块");
-    expect(joinCoreEvidence("", "")).toBe("");
-  });
 });
 
 describe("预算表常量（改数即改产品行为，锁住）", () => {

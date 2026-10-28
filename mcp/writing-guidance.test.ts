@@ -117,9 +117,11 @@ describe("writing guidance matches callable product capabilities", () => {
     }
     expect(WRITING_INSTRUCTIONS).toContain("普通 MCP 流程无需配置 engine");
     expect(WRITING_INSTRUCTIONS).toContain("awaiting_host_review");
-    expect(WRITING_INSTRUCTIONS).toContain("第三方搜索、图像与视频仍使用独立服务额度");
+    expect(WRITING_INSTRUCTIONS).toContain("导演椅不做搜索，不需要搜索 key");
+    expect(WRITING_INSTRUCTIONS).not.toContain("scout search");
     expect(harness("research")).toContain('action:"read_page"');
-    expect(harness("research")).toContain("不要求第三方搜索 key");
+    expect(harness("research")).toContain("不需要任何搜索 key");
+    expect(harness("research")).not.toContain('action:"search"');
     // 风格分析归当前宿主：autocrew_style 对宿主不列（host-policy），技能不能指望它，也不能把分析转给后台模型
     expect(harness("style-calibration")).toContain("样本由你自己读、自己分析");
     expect(harness("style-calibration")).toContain("无需后台模型");

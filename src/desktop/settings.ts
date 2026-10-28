@@ -1,9 +1,9 @@
 /**
  * 设置面的读写汇总口（PRD §7.3 个性化中心）。key 永远掩码返回（renderer 拿不到原文）。
  * 引擎那一块搬去了 settings-engine.ts（v2 端点表的写入是固定四步，塞不进这里的增量 merge），
- * 本文件保留搜索 / 发布 / 生图链，并把引擎与收件箱原样转出——设置页只认 settings.ts 一个入口。
+ * 本文件保留发布 / 生图链，并把引擎与收件箱原样转出——设置页只认 settings.ts 一个入口。
  *
- * 两种落盘根，别混：本文件的 engine/search/publish 都走**工作区** <dataDir>
+ * 两种落盘根，别混：本文件的 engine/publish 都走**工作区** <dataDir>
  * （server 端从注册表解析后注入 _dataDir）；收件箱走**全局根** ~/.autocrew/，
  * 不随工作区切换，因此单独放 settings-inbox.ts（下方原样转出，设置页从这里取）。
  */
@@ -32,49 +32,6 @@ export {
   onInboxSettingsChanged,
   type InboxSettings,
 } from "./settings-inbox.js";
-
-/** 搜索 provider 配置读(V5.3):key 掩码返回,renderer 拿不到原文 */
-export async function getSearchSettings(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-    return { ok: false, error: "Invalid payload: expected object" };
-  }
-  try {
-    const { loadSearchConfig } = await import("../modules/research/search-provider.js");
-    const cfg = await loadSearchConfig((payload._dataDir as string) || undefined);
-    return {
-      ok: true,
-      data: cfg
-        ? { configured: true, provider: cfg.provider, apiKeyMasked: maskKey(cfg.apiKey), baseUrl: cfg.baseUrl ?? null }
-        : { configured: false, provider: null, apiKeyMasked: null, baseUrl: null },
-    };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-/** 搜索 provider 配置写(V5.3):写 <dataDir>/search.json(600 权限) */
-export async function setSearchSettings(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-    return { ok: false, error: "Invalid payload: expected object" };
-  }
-  const provider = payload.provider;
-  if (provider !== "bocha" && provider !== "tavily") {
-    return { ok: false, error: "provider 必须是 bocha 或 tavily" };
-  }
-  const apiKey = payload.api_key;
-  if (typeof apiKey !== "string" || apiKey.trim() === "") {
-    return { ok: false, error: "api_key 必须是非空字符串" };
-  }
-  const baseUrl = typeof payload.base_url === "string" && payload.base_url.trim() ? payload.base_url.trim() : undefined;
-  try {
-    const dataDir = (payload._dataDir as string) || undefined;
-    const { saveSearchConfig } = await import("../modules/research/search-provider.js");
-    await saveSearchConfig({ provider, apiKey: apiKey.trim(), ...(baseUrl ? { baseUrl } : {}) }, dataDir);
-    return getSearchSettings({ _dataDir: dataDir });
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
 
 /** 发布配置读(V5.6 设置收口):publish.json 可视化,key 掩码 */
 export async function getPublishSettings(payload: Record<string, unknown>): Promise<Record<string, unknown>> {

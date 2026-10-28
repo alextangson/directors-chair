@@ -33,7 +33,7 @@ export const ENGINE_ROLE_NAMES: readonly EngineRouteName[] = ["writer", "reviewe
 export const ENGINE_ROLE_LABELS: Record<EngineRouteName, string> = {
   writer: "写稿专线",
   reviewer: "审稿专线",
-  scout: "调研专线",
+  scout: "雷达专线",
   analytics: "复盘专线",
 };
 

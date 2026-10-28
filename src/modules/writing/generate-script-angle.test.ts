@@ -278,21 +278,6 @@ describe("显式跳过", () => {
       .rejects.toMatchObject({ refusal: { code: "skip_removed" } });
   });
 
-  it("没带上简报（闸口跑不了）→ 注记照实说，创始人自定的角度照常用", async () => {
-    const topic = await seedResearched();
-    const seen: Seen = {};
-
-    // 闸口跑不了 = 这稿没等到本轮新简报（wroteWithoutBrief）；盘上那份旧简报的角度卡照样没选
-    const res = await generateScript({ ...TEST_REQ, topicId: topic.id }, testDir, {
-      runLoopImpl: capturingLoop(seen),
-      onWarn: () => {},
-      ensureBriefImpl: async () => ({ state: "unavailable", note: "搜索 key 没配" }),
-    });
-
-    const saved = await getContent(res.contentId, testDir);
-    expect(saved?.versions?.at(-1)?.note).toContain("未带调研简报");
-    expect(res.wroteWithoutBrief).toBe(true);
-  });
 });
 
 // ─── 单一简报快照（P1 spec §3.0）──────────────────────────────────────────────

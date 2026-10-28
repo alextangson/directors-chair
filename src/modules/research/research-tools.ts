@@ -15,7 +15,6 @@ import { matchesTopicThemes } from "../patterns/pattern-select.js";
 import type { PatternCard } from "../patterns/pattern-store.js";
 import { BrokerQuotaError, type PerspectiveBroker } from "./research-broker.js";
 import {
-  clampChars,
   externalBlock,
   sanitizeExternal,
   sanitizeUrlish,
@@ -49,39 +48,6 @@ function toolFailure(err: unknown, what: string): string {
     return `${err.message}。请用已经拿到的材料收束，并把没查到的部分写进 gaps。`;
   }
   return `Error: ${what}失败：${errText(err)}。可以换个思路继续，或用现有材料收束。`;
-}
-
-export function buildSearchTool(broker: PerspectiveBroker, state: RunState): LoopTool {
-  return {
-    name: "search",
-    description: "联网搜索，返回若干候选来源（s 开头的来源 id）。要引用原文必须再 read_page 打开。",
-    parameters: {
-      type: "object",
-      properties: { query: { type: "string", description: "搜索词，一次一个具体问题" } },
-      required: ["query"],
-    },
-    async execute(args) {
-      if (state.abandoned) return ABANDONED_MSG;
-      const query = str(args.query);
-      if (!query) return "Error: query 不能为空";
-      try {
-        const res = await broker.search(query);
-        if (res.results.length === 0) return `搜索「${clampChars(query, 60)}」没有结果，换个说法再试。`;
-        return externalBlock([
-          `搜索「${clampChars(query, 60)}」命中 ${res.results.length} 条：`,
-          ...res.results.map((r) =>
-            [
-              `- ${r.sourceId} ${sanitizeExternal(r.title ?? "", MAX_TITLE_CHARS) || "(无标题)"}`,
-              `  ${sanitizeUrlish(r.url, MAX_URL_CHARS)}`,
-              `  ${sanitizeExternal(r.snippet ?? "", MAX_SNIPPET_CHARS) || "(无摘要)"}`,
-            ].join("\n"),
-          ),
-        ]);
-      } catch (err) {
-        return toolFailure(err, "搜索");
-      }
-    },
-  };
 }
 
 export function buildReadPageTool(broker: PerspectiveBroker, state: RunState): LoopTool {
