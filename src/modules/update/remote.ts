@@ -1,8 +1,8 @@
 /**
  * 跨进程的两件事（self-update §3，Codex 审 P1）：
  * - 问正在跑的服务「你那边有没有对话轮在跑」：内置引擎的轮只在服务进程内存里，runs.json 看不见；
- * - 服务是不是启动器（npm start）起的：启动器记的是 tsx 的 pid，真正跑 server.ts 的是 tsx 拉起的另一个 node，
- *   所以不比 pid，比启动器发给这一次启动的一次性标记（启动器写文件、经环境变量交给服务）。
+ * - 服务是不是启动器（npm start）起的：旧启动器记的是 tsx 外壳的 pid，新启动器记服务本身的 pid。
+ *   跨版本统一比一次性标记，不把旧外壳 pid 当成服务 pid（启动器写文件、经环境变量交给服务）。
  */
 import fs from "node:fs";
 import path from "node:path";

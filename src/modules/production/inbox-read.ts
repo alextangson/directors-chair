@@ -100,7 +100,12 @@ async function enPackageOf(id: string, dataDir: string): Promise<ContentInput["e
   if ("error" in s) return { hash: `unreadable:${s.error}`, problems: [s.error], approved: false, reopen: s.error, revisions: 0 };
   // 英文平台全取消勾选（spec §9.2）：线停了，不拿一个空包请他重批
   if (!s.platforms.length) return { hash: s.hash, problems: s.problems, approved: false, reopen: null, revisions: s.file.revisions?.length ?? 0 };
-  return { hash: s.hash, problems: s.problems, approved: s.approval.ok, reopen: reopenReason(s), revisions: s.file.revisions?.length ?? 0 };
+  // 媒体只给登记身份，不带路径；现有 inbox/media 端点核对登记 SHA 后提供预览。
+  const preview = { hash: s.hash, thumbnail: s.thumbnail ? { fact_id: `en-thumbnail-${s.thumbnail.sha256}` } : null, cut: s.cut ? { fact_id: `en-cut-${s.cut.sha256}` } : null, kits: s.platforms.flatMap((platform) => {
+    const k = s.kits[platform];
+    return k ? [{ platform, title: k.postTitle, caption: k.caption, tags: k.tags ?? [], chapters: (k.chapters ?? []).map((c) => ({ at: c.at, title: c.title })), aiDisclosure: k.aiDisclosure ?? null }] : [];
+  }) };
+  return { hash: s.hash, problems: s.problems, approved: s.approval.ok, reopen: reopenReason(s), revisions: s.file.revisions?.length ?? 0, preview };
 }
 
 async function contentInput(c: Content, dataDir: string, ctx: Awaited<ReturnType<typeof explainContext>>): Promise<ContentInput> {

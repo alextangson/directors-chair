@@ -11,12 +11,14 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DATA_DIR = process.env.AUTOCREW_LOCAL_DIR || process.env.AUTOCREW_DATA_DIR || path.join(os.homedir(), ".autocrew");
 const PID_FILE = path.join(DATA_DIR, "autocrew.pid");
+const PROCESS_FILE = path.join(DATA_DIR, "autocrew.process.json");
 const LOG_FILE = path.join(DATA_DIR, "server.log");
 const PORT = Number(process.env.AUTOCREW_PORT) || 4317;
 const BASE_URL = `http://127.0.0.1:${PORT}/`;
 const NO_OPEN = process.argv.includes("--no-open");
 const rawCommand = process.argv.slice(2).find((arg) => !arg.startsWith("--"));
-const command = process.argv.includes("--help") || process.argv.includes("-h") ? "help" : rawCommand || "start";
+const command = process.argv.includes("--help") || process.argv.includes("-h") ? "help"
+  : process.argv.includes("--version") || process.argv.includes("-v") ? "version" : rawCommand || "start";
 
 function printHelp() {
   console.log(`导演椅快速启动器
@@ -52,6 +54,7 @@ function printHelp() {
   autocrew update         更新到最新发布版（失败自动退回）
 
 选项:
+  --version, -v           查看安装版本（不启动服务）
   --no-open               启动后不打开浏览器
   --json                  输出机器可读 JSON`);
 }
@@ -144,11 +147,19 @@ function openBrowser(url) {
   child.unref();
 }
 
-function runBuild() {
+async function runCommand(cmd, args, options) {
+  const child = spawn(cmd, args, options);
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => resolve(code ?? 1));
+  });
+}
+
+async function runBuild() {
   console.log("导演椅正在构建前端…");
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const result = spawnSync(npm, ["run", "fe:build"], { cwd: ROOT, stdio: "inherit" });
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  const code = await runCommand(npm, ["run", "fe:build"], { cwd: ROOT, stdio: "inherit" });
+  if (code !== 0) process.exit(code);
 }
 
 /** 递归找目录下最新的文件 mtime（跳过 node_modules/dist）。 */
@@ -176,7 +187,7 @@ function newestMtime(dir) {
   return newest;
 }
 
-function ensureBuild() {
+async function ensureBuild() {
   const marker = path.join(ROOT, "frontend", "dist", "index.html");
   if (!fs.existsSync(marker)) return runBuild();
   // dist 存在但源码更新过 → 必须重建。否则"更新代码后 restart"会静默端出旧前端,
@@ -194,12 +205,98 @@ function ensureBuild() {
       /* 可选文件缺失跳过 */
     }
   }
-  if (newestSrc > distAt) runBuild();
+  if (newestSrc > distAt) await runBuild();
 }
 
 const LAUNCH_FILE = path.join(DATA_DIR, "autocrew.launch");
 /** 新版本起得慢也给够时间；超时就结束它，绝不留一个没人管的进程（e2e P1-1） */
 const LAUNCH_TIMEOUT_MS = Number(process.env.AUTOCREW_LAUNCH_TIMEOUT_MS) || 60_000;
+
+/** start/stop/restart 共用一把锁；构建与资料库准备异步等待，让锁的心跳持续刷新。 */
+async function withLifecycleLock(action) {
+  await fsp.mkdir(DATA_DIR, { recursive: true });
+  let lockfile;
+  try { ({ default: lockfile } = await import("proper-lockfile")); }
+  catch (err) {
+    if (err.code !== "ERR_MODULE_NOT_FOUND") throw err;
+    // 更新中断时依赖可能暂时不在；恢复步骤不能被启动锁的导入错误盖住。
+    const help = command === "stop" ? null : interruptedUpdateHelp();
+    console.error(help ?? `缺少启动器依赖。请先在 ${ROOT} 执行 npm ci；尚未启动或结束任何进程`);
+    process.exitCode = 1;
+    return;
+  }
+  let release;
+  try {
+    release = await lockfile.lock(DATA_DIR, {
+      realpath: false, lockfilePath: path.join(DATA_DIR, "autocrew.lifecycle.lock"),
+      stale: 10_000, update: 2_000,
+      retries: { retries: Math.ceil((LAUNCH_TIMEOUT_MS + 120_000) / 100), factor: 1, minTimeout: 100, maxTimeout: 100 },
+    });
+  } catch (err) {
+    if (err.code === "ELOCKED") throw new Error("另一个启动器正在启停导演椅，等它完成后重试");
+    throw err;
+  }
+  try {
+    if (process.env.AUTOCREW_UPDATER !== "1" && liveUpdateLock()) throw new Error("导演椅正在更新，等它完成后重试");
+    return await action();
+  } finally { await release(); }
+}
+
+function readProcessRecord() {
+  try {
+    const record = JSON.parse(fs.readFileSync(PROCESS_FILE, "utf-8"));
+    return Number.isInteger(record?.pid) && record.pid > 0 && Number.isFinite(record.start) && record.start > 0
+      && typeof record.nonce === "string" && /^[a-f0-9]{32}$/.test(record.nonce) ? record : null;
+  } catch { return null; }
+}
+
+function sameProcess(record) {
+  return record && processAlive(record.pid) && startEpoch(record.pid) === record.start;
+}
+
+/** 旧版没有启动时刻：必须从目标进程核实私有 nonce 和启动脚本，不能只信 pid 或 HTTP 应答。 */
+function legacyProcessRecord(pid) {
+  let nonce = "";
+  try { nonce = fs.readFileSync(LAUNCH_FILE, "utf-8").trim(); } catch { return null; }
+  if (!/^[a-f0-9]{32}$/.test(nonce)) return null;
+  const script = process.env.AUTOCREW_SERVER_SCRIPT || path.join(ROOT, "desktop", "server.ts");
+  const inspected = spawnSync("ps", ["eww", "-p", String(pid), "-o", "command="], { encoding: "utf-8", timeout: 1_500 });
+  const commandLine = inspected.status === 0 ? inspected.stdout : "";
+  // 不输出 ps 的内容：进程环境可能包含凭证。
+  if (!commandLine.includes(script) || !new RegExp(`(?:^|\\s)AUTOCREW_LAUNCH_NONCE=${nonce}(?=\\s|$)`).test(commandLine)) return null;
+  const start = startEpoch(pid);
+  return start === null ? null : { pid, start, nonce };
+}
+
+function ownedProcess(pid) {
+  const record = readProcessRecord();
+  if (record) return record.pid === pid && sameProcess(record) ? record : null;
+  return legacyProcessRecord(pid);
+}
+
+async function clearLaunch(record) {
+  // 清理只认自己这一代：后来的启动记录绝不随失败重试一起删掉。
+  const stored = readProcessRecord();
+  if (stored && stored.nonce !== record.nonce) return;
+  if (readPid() === record.pid) await fsp.rm(PID_FILE, { force: true });
+  if (stored?.pid === record.pid && stored.nonce === record.nonce) await fsp.rm(PROCESS_FILE, { force: true });
+  let nonce = "";
+  try { nonce = await fsp.readFile(LAUNCH_FILE, "utf-8"); } catch { /* 没有标记 */ }
+  if (nonce.trim() === record.nonce) await fsp.rm(LAUNCH_FILE, { force: true });
+}
+
+function signalOwned(record, signal) {
+  if (!sameProcess(record)) return false;
+  const group = spawnSync("ps", ["-o", "pgid=", "-p", String(record.pid)], { encoding: "utf-8", timeout: 1_500 });
+  const groupLeader = group.status === 0 && Number(group.stdout.trim()) === record.pid;
+  try { process.kill(process.platform !== "win32" && groupLeader ? -record.pid : record.pid, signal); }
+  catch (err) {
+    if (err.code === "ESRCH" || !sameProcess(record)) return false;
+    if (!groupLeader) throw err;
+    try { process.kill(record.pid, signal); } catch (direct) { if (direct.code !== "ESRCH") throw direct; }
+  }
+  return true;
+}
 
 /** 端口上那个服务报的启动标记（不是 AutoCrew、或旧版本没有这个端点 → null） */
 async function launchInfo() {
@@ -221,10 +318,16 @@ async function ourServerUp() {
   return Boolean(mine && info?.nonce && info.nonce === mine);
 }
 
-function killLaunched(pid) {
-  for (const sig of ["SIGTERM", "SIGKILL"]) {
-    try { process.kill(process.platform === "win32" ? pid : -pid, sig); } catch { try { process.kill(pid, sig); } catch { /* 已经不在 */ } }
-  }
+/** 新服务由 node 直接运行。ChildProcess 句柄尚未退出时可可靠停止它，不依赖 ps 或磁盘记录。 */
+async function stopLaunchedChild(child, closed) {
+  const wait = (ms) => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    closed.then(() => { clearTimeout(timer); resolve(true); });
+  });
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+  if (await wait(1_500)) return;
+  child.kill("SIGKILL");
+  if (!(await wait(1_500))) throw new Error(`这次启动的进程未能退出（PID ${child.pid}），请手动停止后重试`);
 }
 
 async function waitForLaunch(logOffset, pid) {
@@ -269,10 +372,11 @@ async function start() {
   const help = interruptedUpdateHelp();
   if (help) { console.error(help); process.exit(1); }
   const stalePid = readPid();
+  if (stalePid && processAlive(stalePid)) throw new Error("启动记录里的进程仍在，但服务没有应答。先执行 autocrew stop；无法核实身份时，请在原终端停掉服务后重试");
   if (stalePid && !processAlive(stalePid)) await fsp.rm(PID_FILE, { force: true });
   // 测试钩子：AUTOCREW_SERVER_SCRIPT 换成一个假服务脚本（不构建前端、不碰资料库）；正常使用不设
   const testScript = process.env.AUTOCREW_SERVER_SCRIPT;
-  if (!testScript) ensureBuild();
+  if (!testScript) await ensureBuild();
 
   const tsx = path.join(ROOT, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
   if (!fs.existsSync(tsx)) {
@@ -281,17 +385,18 @@ async function start() {
   }
 
   if (!testScript) {
-    const storageApply = spawnSync(tsx, [path.join(ROOT, "scripts", "storage.mts"), "apply"], { stdio: "inherit", env: process.env });
-    if (storageApply.status !== 0) throw new Error("资料库准备失败；未启动服务，原资料保持不变");
+    const storageCode = await runCommand(tsx, [path.join(ROOT, "scripts", "storage.mts"), "apply"], { stdio: "inherit", env: process.env });
+    if (storageCode !== 0) throw new Error("资料库准备失败；未启动服务，原资料保持不变");
   }
 
   const logOffset = fs.existsSync(LOG_FILE) ? fs.statSync(LOG_FILE).size : 0;
   const logFd = fs.openSync(LOG_FILE, "a", 0o600);
   fs.chmodSync(LOG_FILE, 0o600);
-  // 一次性启动标记：服务凭它确认「我是启动器起的」，一键更新才敢重启它（pid 文件里是 tsx 的 pid，不是服务本身）
+  // 一次性启动标记：服务凭它确认「我是启动器起的」，一键更新才敢重启它。
   const launchNonce = randomBytes(16).toString("hex");
   await fsp.writeFile(LAUNCH_FILE, `${launchNonce}\n`, { mode: 0o600 });
-  const child = spawn(tsx, [testScript || path.join(ROOT, "desktop", "server.ts")], {
+  // 不经 tsx CLI 外壳：身份读取或写记录失败时，ChildProcess 句柄必须直接对应服务本身。
+  const child = spawn(process.execPath, ["--import", "tsx", testScript || path.join(ROOT, "desktop", "server.ts")], {
     cwd: ROOT,
     detached: true,
     stdio: ["ignore", logFd, logFd],
@@ -299,42 +404,50 @@ async function start() {
   });
   fs.closeSync(logFd);
   child.unref();
-  await fsp.writeFile(PID_FILE, `${child.pid}\n`, { mode: 0o600 });
+  child.on("error", () => { /* 未起来会在下面按启动失败处理 */ });
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  const record = { pid: child.pid, start: null, nonce: launchNonce };
+  const recordTmp = `${PROCESS_FILE}.new-${process.pid}-${randomBytes(6).toString("hex")}`;
+  try {
+    record.start = startEpoch(child.pid);
+    if (record.start === null) throw new Error(`无法核实新进程的启动时刻。查看日志: ${LOG_FILE}`);
+    await fsp.writeFile(recordTmp, JSON.stringify(record), { mode: 0o600, flag: "wx" });
+    await fsp.rename(recordTmp, PROCESS_FILE);
+    await fsp.writeFile(PID_FILE, `${child.pid}\n`, { mode: 0o600 });
 
-  const url = await waitForLaunch(logOffset, child.pid);
-  // 打印了地址还不够：端口上应答的必须是这一次起的进程（标记对上），否则可能是别的进程占着端口
-  if (!url || !(await ourServerUp())) {
-    killLaunched(child.pid);
-    await fsp.rm(PID_FILE, { force: true });
-    console.error(url
-      ? `导演椅启动失败：端口 ${PORT} 上应答的不是这次启动的进程，已结束它。查看日志: ${LOG_FILE}`
-      : `导演椅 ${Math.round(LAUNCH_TIMEOUT_MS / 1000)} 秒内没起来，已结束这次启动的进程。查看日志: ${LOG_FILE}`);
-    process.exit(1);
-  }
-  console.log(`导演椅已启动（PID ${child.pid}）`);
-  console.log(`浏览器地址: ${BASE_URL}`);
-  console.log(`日志: ${LOG_FILE}`);
-  openBrowser(url);
+    const url = await waitForLaunch(logOffset, child.pid);
+    // 打印了地址还不够：端口上应答的必须是这一次起的进程。
+    if (!url || !(await ourServerUp())) throw new Error(url
+      ? `端口 ${PORT} 上应答的不是这次启动的进程`
+      : `${Math.round(LAUNCH_TIMEOUT_MS / 1000)} 秒内没起来。查看日志: ${LOG_FILE}`);
+    console.log(`导演椅已启动（PID ${child.pid}）`);
+    console.log(`浏览器地址: ${BASE_URL}`);
+    console.log(`日志: ${LOG_FILE}`);
+    openBrowser(url);
+  } catch (err) {
+    await stopLaunchedChild(child, closed);
+    await clearLaunch(record);
+    throw new Error(`导演椅启动失败：${err.message}。已结束这次启动的进程`);
+  } finally { await fsp.rm(recordTmp, { force: true }); }
 }
 
 async function stop() {
   const pid = readPid();
   if (!pid || !processAlive(pid)) {
     await fsp.rm(PID_FILE, { force: true });
+    await fsp.rm(PROCESS_FILE, { force: true });
     console.log("导演椅当前未由快速启动器运行");
     return;
   }
-  try {
-    process.kill(process.platform === "win32" ? pid : -pid, "SIGTERM");
-  } catch {
-    process.kill(pid, "SIGTERM");
-  }
+  const record = ownedProcess(pid);
+  if (!record) throw new Error("无法确认启动记录里的进程属于导演椅，未结束任何进程。请在原服务终端按 Ctrl-C 停掉服务，再重试");
+  signalOwned(record, "SIGTERM");
   const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline && processAlive(pid)) {
+  while (Date.now() < deadline && sameProcess(record)) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  if (processAlive(pid)) throw new Error("导演椅尚未退出；不会迁移仍在写入的资料，请稍后重试");
-  await fsp.rm(PID_FILE, { force: true });
+  if (sameProcess(record)) throw new Error("导演椅尚未退出；不会迁移仍在写入的资料，请稍后重试");
+  await clearLaunch(record);
   console.log("导演椅已停止");
 }
 
@@ -499,22 +612,24 @@ if (["start", "stop", "restart"].includes(command) && process.env.AUTOCREW_UPDAT
 
 switch (command) {
   case "start":
-    await start();
+    await withLifecycleLock(start);
     break;
   case "stop":
-    await stop();
+    await withLifecycleLock(stop);
     break;
   case "restart": {
-    // 上次更新中断、安装不一致：先拒绝再停——停了之后才发现起不来，等于把还在跑的服务白白停掉（第 16 轮 P3）
-    const help = interruptedUpdateHelp();
-    if (help) { console.error(help); process.exit(1); }
-    await stop();
-    // 停完端口上还有人应答：旧的没停下来（pid 记录丢了 / 不是启动器起的）。这不是「已在运行」，是重启失败（Codex 审第 10 轮 P1）
-    if (await serverUp()) {
-      console.error(`导演椅重启失败：端口 ${PORT} 上已在运行的旧服务停不下来（找不到它的进程记录）。先在运行它的终端里按 Ctrl-C 停掉，再运行 npm start`);
-      process.exit(1);
-    }
-    await start();
+    await withLifecycleLock(async () => {
+      // 上次更新中断、安装不一致：先拒绝再停——停了之后才发现起不来，等于把还在跑的服务白白停掉（第 16 轮 P3）
+      const help = interruptedUpdateHelp();
+      if (help) { console.error(help); process.exit(1); }
+      await stop();
+      // 停完端口上还有人应答：旧的没停下来（pid 记录丢了 / 不是启动器起的）。这不是「已在运行」，是重启失败（Codex 审第 10 轮 P1）
+      if (await serverUp()) {
+        console.error(`导演椅重启失败：端口 ${PORT} 上已在运行的旧服务停不下来（找不到它的进程记录）。先在运行它的终端里按 Ctrl-C 停掉，再运行 npm start`);
+        process.exit(1);
+      }
+      await start();
+    });
     break;
   }
   case "status":
@@ -529,7 +644,7 @@ switch (command) {
     break;
   }
   case "build":
-    runBuild();
+    await runBuild();
     break;
   case "topics": {
     const result = await invokeChannel("topics:list");
@@ -816,6 +931,9 @@ switch (command) {
   case "--help":
   case "-h":
     printHelp();
+    break;
+  case "version":
+    console.log(JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf-8")).version);
     break;
   default:
     printHelp();

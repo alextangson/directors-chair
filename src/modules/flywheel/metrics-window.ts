@@ -14,7 +14,7 @@
  * 日期口径：metricDate 是 YYYY-MM-DD（本地日）；publishedAt 统一按 Asia/Shanghai 取日
  * （shanghaiDate，选题会 spec §5.3）——否则北京时间 0–8 点发的作品龄期差一天。
  */
-import { outcomeKey, shanghaiDate, type OutcomeMetrics, type PerformanceOutcome } from "./outcome-schema.js";
+import { normalizePlatform, outcomeKey, shanghaiDate, type OutcomeMetrics, type PerformanceOutcome } from "./outcome-schema.js";
 
 /** 绝对量（计数类）：只在同平台内聚合 */
 export const COUNTER_METRICS = [
@@ -318,21 +318,27 @@ export function publishCohort(
   from: string,
   to: string,
 ): CohortResult {
-  const byContent = new Map<string, EntityGroup>();
+  const byContent = new Map<string, EntityGroup[]>();
+  const byContentPlatform = new Map<string, EntityGroup>();
   for (const g of groupByEntity(outcomes)) {
-    if (g.contentId) byContent.set(g.contentId, g);
+    if (!g.contentId) continue;
+    byContent.set(g.contentId, [...(byContent.get(g.contentId) ?? []), g]);
+    byContentPlatform.set(`${g.contentId}\0${normalizePlatform(g.platform)}`, g);
   }
 
   const items: CohortItem[] = [];
   for (const c of contents) {
     const pubDate = c.publishedAt ? shanghaiDate(c.publishedAt) : null;
     if (!pubDate || pubDate < from || pubDate > to) continue;
-    const g = byContent.get(c.id);
+    const platform = c.platform ? normalizePlatform(c.platform) : undefined;
+    const groups = byContent.get(c.id);
+    // 同一稿可以发多个平台；缺平台时只允许唯一平台的快照兜底，不猜是哪一个。
+    const g = platform ? byContentPlatform.get(`${c.id}\0${platform}`) : groups?.length === 1 ? groups[0] : undefined;
     const latest = g ? g.snapshots[g.snapshots.length - 1] : undefined;
     items.push({
       contentId: c.id,
       title: c.title,
-      platform: c.platform || g?.platform || "未定平台",
+      platform: platform || g?.platform || "未定平台",
       publishedAt: c.publishedAt as string,
       latestMetricDate: latest?.metricDate ?? null,
       ageDays: latest ? ageInDays(c.publishedAt as string, latest.metricDate) : null,

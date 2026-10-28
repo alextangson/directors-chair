@@ -135,6 +135,7 @@ export function claimView(content: Content): { host: string; live: boolean; leas
 }
 
 import { handoffView } from "./handoff-view.js";
+import { publicationOverviewOf } from "./publication-overview.js";
 
 export async function cardPanel(contentId: string, dataDir: string): Promise<Record<string, unknown>> {
   const content = await getContent(contentId, dataDir);
@@ -145,8 +146,9 @@ export async function cardPanel(contentId: string, dataDir: string): Promise<Rec
   const draft = draftRef(content);
   const doc = await readProductionDocOrEmpty(contentId, dataDir);
   const record = isVideoPlatform(content.platform) ? await readPublishRecord(content.id, content.manualPublications, dataDir) : null;
+  const publication = exp.stage === "已发布" ? await publicationOverviewOf(content, dataDir, doc) : null;
   const base = { ok: true, ...(draft ? { draft_item: draft } : {}), id: content.id, title: content.title, platform: content.platform ?? null, status: content.status, active,
-    column: exp.column, stage: exp.stage, reason: exp.reason, missing: exp.missing, badges: exp.badges, alerts: exp.alerts, candidates: exp.candidates,
+    column: exp.column, stage: exp.stage, ...(publication ? { publication } : {}), reason: exp.reason, missing: exp.missing, badges: exp.badges, alerts: exp.alerts, candidates: exp.candidates,
     // 一条视频一张卡：各平台状态与剩下的动作（吸收 4）；只有回执没认稿 = 只提醒
     targets: publishTargets(content, doc, record, active), no_script_approval: exp.no_script_approval === true,
     claim: claimView(content), ...(handoffView(content) ? { handoff: handoffView(content) } : {}) };

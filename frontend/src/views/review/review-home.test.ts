@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { createHash, webcrypto } from "node:crypto";
 import type { InboxItem } from "./review-model";
 
 const decided: Array<Record<string, unknown>> = [];
@@ -21,16 +22,17 @@ vi.mock("./review-api", () => ({
   INBOX_OPEN_EVENT: "autocrew:inbox-open",
   openInboxItem: () => {},
 }));
-vi.mock("../../transport", () => ({ invoke: async () => ({ ok: true, content: { body: "正文" } }), authedFetch: async () => new Response("{}"), SESSION_EXPIRED: "x" }));
+vi.mock("../../transport", () => ({ invoke: async () => ({ ok: true, content: { body: "正文", title: "测试稿", updatedAt: "2026-10-28T00:00:00.000Z" } }), authedFetch: async () => new Response("{}"), SESSION_EXPIRED: "x" }));
 
 let el: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  vi.stubGlobal("crypto", webcrypto);
   decided.length = 0; inbox = []; failWith = null;
   el = document.createElement("div"); document.body.appendChild(el); root = createRoot(el);
 });
-afterEach(async () => { await act(async () => { root.unmount(); }); el.remove(); });
+afterEach(async () => { await act(async () => { root.unmount(); }); el.remove(); vi.unstubAllGlobals(); });
 const tick = () => act(async () => { await new Promise((r) => setTimeout(r, 20)); });
 
 const item = (over: Partial<InboxItem>): InboxItem => ({ item_id: "x", gen: "g", type: "draft", content_id: "content-1-a", title: "测试稿", summary: "", waiting: null, agent_waiting: false,
@@ -58,7 +60,7 @@ describe("首页「要你做的」", () => {
   it("每行有动词；按主题分组；点开是原来的面板，动作按 item_id + gen 交出去", async () => {
     inbox = [
       item({ item_id: "draft:content-2-b", content_id: "content-2-b", type: "draft", rank: 3, summary: "稿子写好了，过一眼", theme_id: "content-1-a", theme_title: "主题甲",
-        actions: [{ action: "approve_script", label: "稿子没问题", role: "primary" }], detail: { words: 300 } }),
+        actions: [{ action: "approve_script", label: "稿子没问题", role: "primary" }], detail: { words: 300, body_hash: createHash("sha256").update("正文").digest("hex"), updated_at: "2026-10-28T00:00:00.000Z" } }),
       item({ item_id: "cut:r1", type: "cut_review", summary: "成片剪好了，看一遍", theme_id: "content-1-a", theme_title: "主题甲",
         actions: [{ action: "approve_cut", label: "就用这版", role: "primary", params: { fact_id: "f2", sha256: "s2" } }], detail: { review_fact_id: "f2", versions: [{ fact_id: "f2", sha256: "s2", at: new Date().toISOString(), label: "最新一版", ready: true }] } }),
     ];

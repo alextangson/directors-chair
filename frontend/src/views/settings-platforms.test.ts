@@ -40,7 +40,8 @@ describe("运营平台标签", () => {
   it("三组都在，每组说清勾了开什么", async () => {
     stored = ["douyin"];
     await render();
-    for (const t of ["中文视频", "图文", "英文版", "视频发布包出这些平台", "自动派生一篇公众号长文", "出英文配音版"]) expect(el.textContent).toContain(t);
+    for (const t of ["中文视频", "图文", "英文版", "视频发布包出这些平台", "派生一篇公众号长文", "派生英文配音版", "中文目标平台完成排期后", "已有主题保留各自的计划", "关闭公众号会暂停公众号在途生产和发布", "关闭英文平台会停发该平台", "YouTube 和 X 都关闭时暂停整条英文生产线"]) expect(el.textContent).toContain(t);
+    expect(el.textContent).not.toContain("成片审过后");
     for (const l of ["抖音", "视频号", "小红书", "B站", "公众号", "头条", "YouTube", "X（推特）"]) expect(box(l)).toBeTruthy();
     expect(box("抖音").checked).toBe(true);
     expect(box("公众号").checked).toBe(false);

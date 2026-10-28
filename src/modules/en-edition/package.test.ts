@@ -13,6 +13,7 @@ import { founderDecision } from "../production/decisions.js";
 import { png, put, record, waiveSliverCheck, type Env } from "../production/testkit.js";
 import { readInbox } from "../production/inbox-read.js";
 import { decideItem } from "../production/inbox-decide.js";
+import { openFactMedia } from "../production/inbox-attachment.js";
 import { listForChat } from "../production/chat-approval/present.js";
 import { executeEnEdition } from "../../tools/en-edition.js";
 import { executePrePublish, executePrePublishTool } from "../../tools/pre-publish.js";
@@ -83,7 +84,12 @@ describe("英文发布包", () => {
     const page = await completePackage();
     const html = await fs.readFile(page, "utf8");
     for (const s of ["Why max effort makes AI drift", "0:10 The test", "Max effort is not a free upgrade.", "english-en-cut-v1.mp4", "1280×720", "file://"]) expect(html).toContain(s);
-    expect(await pkgItem()).toMatchObject({ type: "en_package" });
+    const item = await pkgItem();
+    expect(item).toMatchObject({ type: "en_package", detail: { preview: { hash: expect.any(String), thumbnail: { fact_id: expect.stringMatching(/^en-thumbnail-/) }, cut: { fact_id: expect.stringMatching(/^en-cut-/) }, kits: [expect.objectContaining({ platform: "youtube", title: YT.post_title }), expect.objectContaining({ platform: "x" })] } } });
+    const preview = item!.detail.preview as { hash: string; thumbnail: { fact_id: string }; cut: { fact_id: string } };
+    expect(preview.hash).toBe(item!.detail.package_hash);
+    expect(await openFactMedia(id, preview.thumbnail.fact_id, env.dir)).toMatchObject({ ok: true, file: path.join(env.outside, "thumb.png") });
+    expect((await openFactMedia(id, preview.cut.fact_id, env.dir)).ok).toBe(true);
     const list = await listForChat(env.dir, { content_id: id });
     expect((list.items as Array<Record<string, unknown>>).some((i) => String(i.brief).includes("英文发布包审阅页"))).toBe(true);
     // 英文版不出中文的「还差一步才能发（封面）」

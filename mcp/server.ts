@@ -9,6 +9,7 @@ import { contentFile } from "../src/storage/content-project.js";
  * 不再自带 stdio 循环，全部宿主经同一个写进程（P3 §3）。
  */
 import { beginWork } from "../src/modules/update/active-work.js";
+import { localVersion, programRoot } from "../src/modules/update/check.js";
 import { effectiveAction, isLongRunningTool } from "../src/modules/update/long-running.js";
 import { WRITING_INSTRUCTIONS, MCP_INSTRUCTIONS } from "./writing-instructions.js";
 import { mcpToolView, TOOL_GUIDE_PREFIX, toolGuideText } from "./tool-docs.js";
@@ -38,6 +39,7 @@ const workspaceRuntimes = new Map<string, { ctx: typeof ctx; runner: ToolRunner 
 registerAutocrewCapabilities(runner);
 
 export const MCP_PROTOCOL_VERSION = "2025-11-25";
+const SERVER_VERSION = localVersion(programRoot());
 /**
  * 2026-09-06 实测（日志代理抓包）：Codex CLI 0.145 的远端客户端要 `2025-06-18`，
  * 标准 TS SDK 客户端（Claude Code 用的那个）同样。两家都接受服务端回一个更高的版本，
@@ -236,7 +238,7 @@ export async function handleMcpRequest(req: McpRequest, access?: McpAccessContex
       protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.has(requested) ? requested : MCP_PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false } },
       instructions: MCP_INSTRUCTIONS,
-      serverInfo: { name: "autocrew", version: "0.1.0", description: "导演椅 Director's Chair (formerly AutoCrew): local-first AI content operations crew" },
+      serverInfo: { name: "autocrew", version: SERVER_VERSION, description: "导演椅 Director's Chair (formerly AutoCrew): local-first AI content operations crew" },
     });
   }
   if (method === "ping") return resultResponse(id, {});

@@ -5,7 +5,7 @@
 
 export type InboxType =
   | "ask" | "ask_reported" | "cut_review" | "cover_pick" | "candidate" | "sliver"
-  | "register_blocked" | "publish_check" | "published_ask" | "publish_claim" | "draft" | "writing_rule" | "playbook_change" | "writing_promotion" | "other";
+  | "register_blocked" | "publish_check" | "published_ask" | "publish_claim" | "draft" | "en_package" | "writing_rule" | "playbook_change" | "writing_promotion" | "other";
 
 export interface InboxAction {
   action: string;
@@ -158,6 +158,7 @@ export const DONE_TEXT: Record<string, string> = {
   confirm_candidate: "记下了，就是它", reject_candidate: "记下了，不是它", answer_ask: "已经回复了", undo_ask_answer: "撤回了转述的回答",
   i_published: "记下了，已经发出去了", confirm_receipt: "记下了，发了", correct_publish: "记下了，没发", approve_script: "稿子定了", revise_script: "已经告诉写稿的了",
   publish_check_confirm: "记下了，没问题", publish_check_revise: "已经告诉发布的了", publish_check_override: "按你的原话重新检查了", waive_sliver: "这处放行了",
+  approve_en_package: "英文发布包定了", revise_en_package: "已经告诉做英文版的了",
   waive_sliver_check: "这条不查了", ack: "记下了", nudge: "已经催了", undo_auto_attach: "挪回去了",
 };
 
@@ -218,6 +219,7 @@ const VERB: Record<InboxType, string> = {
   draft: "认稿", cut_review: "看成片", cover_pick: "挑封面", candidate: "认素材", sliver: "看闪帧",
   publish_check: "发前核对", published_ask: "确认发布", publish_claim: "确认发布", ask: "回答", ask_reported: "回答",
   register_blocked: "补登记", writing_rule: "定规则", playbook_change: "定规则", writing_promotion: "定写法", other: "看看",
+  en_package: "看英文发布包",
 };
 /** 由视频派生的英文版 / 公众号文章的认稿：说清认的是哪种稿（2026-10-25：首页写「认稿」看不出是英文稿） */
 export const isDerivedDraft = (i: Pick<InboxItem, "type" | "detail"> | undefined): boolean => i?.type === "draft" && (i.detail.derived === "en_edition" || i.detail.derived === "wechat_article");

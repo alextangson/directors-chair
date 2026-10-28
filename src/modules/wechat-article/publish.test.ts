@@ -26,6 +26,7 @@ import { planSlot, hostSlot } from "./slot.js";
 import { readPublishState } from "./publish-state.js";
 import { resolveContentProject } from "../../storage/content-project.js";
 import { readProductionDoc, readProductionDocOrEmpty, writeProductionDoc } from "../../storage/production-store.js";
+import { observationFact } from "../production/receipts.js";
 
 const genMock = vi.mocked(generateWechatImageAsset);
 const NOW = new Date("2026-10-24T10:00:00+08:00");
@@ -223,9 +224,28 @@ describe("编辑器收尾：视频号、排期、扫码、结果不明", () => {
   it("发布台计划停在 overdue，但资料库里已认可视频号发布回执（老视频）→ 按已公开算，按回执时间排", async () => {
     await videoChannel("overdue");
     const doc = await readProductionDocOrEmpty(srcId, env.dir);
-    const fact = { id: "fact-pub-wv", kind: "publish", round: doc.round, state: "accepted", availability: "present", source: "host", at: "2026-10-24T09:00:00+08:00", platform: "wechat_video", published_at: "2026-10-24T09:00:00+08:00" };
-    await writeProductionDoc(srcId, env.dir, { ...doc, facts: [...doc.facts, fact as never] }, (await readProductionDoc(srcId, env.dir))?.revision ?? 0);
+    const fact = observationFact(doc, { source: "plan", platform: "wechat_video", pub_state: "public", published_at: "2026-10-24T09:00:00+08:00", evidence: "已核到公开" }, doc.round);
+    await writeProductionDoc(srcId, env.dir, { ...doc, facts: [...doc.facts, fact] }, (await readProductionDoc(srcId, env.dir))?.revision ?? 0);
     expect(await run({ op: "begin_editor" })).toMatchObject({ ok: true, phase: "editor_finishing", slot: { at: "2026-10-24T12:00:00+08:00" } });
+  });
+
+  it("明天定时的已认可回执不代表原片已公开：仍等待视频号，不占文章排期", async () => {
+    const scheduledAt = "2026-10-25T18:00:00+08:00";
+    const root = resolveContentProject(srcId, env.dir)!.project_root;
+    await put(path.join(root, "06-publish/publish-plan.json"), JSON.stringify({ platforms: [{ platform: "wechat_video", publication: { status: "scheduled", scheduled_at: scheduledAt } }] }));
+    const doc = await readProductionDocOrEmpty(srcId, env.dir);
+    const fact = observationFact(doc, { source: "claim", platform: "wechat_video", pub_state: "scheduled", published_at: scheduledAt, accepted: true, evidence: "已排期" }, doc.round);
+    await writeProductionDoc(srcId, env.dir, { ...doc, facts: [...doc.facts, fact] }, (await readProductionDoc(srcId, env.dir))?.revision ?? 0);
+    expect(await run({ op: "begin_editor" })).toMatchObject({ ok: false, code: "video_not_live", phase: "waiting_video_live", slot: null });
+    expect((await readPublishState(id, env.dir)).slot).toBeUndefined();
+  });
+
+  it("已公开的旧回执被纠正后不再提前放行公众号", async () => {
+    await videoChannel("overdue");
+    const doc = await readProductionDocOrEmpty(srcId, env.dir);
+    const fact = observationFact(doc, { source: "plan", platform: "wechat_video", pub_state: "public", published_at: "2026-10-24T09:00:00+08:00", evidence: "旧公开记录" }, doc.round);
+    await writeProductionDoc(srcId, env.dir, { ...doc, facts: [...doc.facts, fact], decisions: [...doc.decisions, { id: "correction-audit", type: "publish_correction", round: doc.round, target_id: `slot:${doc.round}:wechat_video`, at: new Date(Date.parse(fact.seen_at!) + 1000).toISOString(), source: "founder" }] }, (await readProductionDoc(srcId, env.dir))?.revision ?? 0);
+    expect(await run({ op: "begin_editor" })).toMatchObject({ ok: false, code: "video_not_live", phase: "waiting_video_live" });
   });
 
   it("读不到视频号时间 → 要创始人给时间；给的时间要带时区、在 +6 天内、整分钟", async () => {
@@ -259,6 +279,21 @@ describe("编辑器收尾：视频号、排期、扫码、结果不明", () => {
     for (const op of ["push_draft", "begin_editor", "mark_editor_done"]) expect(await run({ op, scheduled_for: "2026-10-24T12:00:00+08:00" }), op).toMatchObject({ ok: false, code: "reconcile_first" });
     expect((await run({ op: "publish_status" })).next_step).toMatch(/先去编辑器/);
     expect(await run({ op: "record_scheduled", scheduled_at: "2026-10-24T12:00:00+08:00", founder_quote: "我看到定时列表里有了" })).toMatchObject({ ok: true, phase: "scheduled" });
+  });
+
+  it.each(["scheduled_waiting_scan", "unknown", "scheduled"] as const)("%s：其他草稿的回执被拒绝，已知草稿身份和状态保持原样", async (phase) => {
+    const state = { ...(await readPublishState(id, env.dir)), phase };
+    await writePublishState(id, state, env.dir);
+    const receipt = { op: "record_scheduled", scheduled_at: "2026-10-24T12:00:00+08:00", founder_quote: "扫好了", published: phase === "scheduled" };
+    expect(await run({ ...receipt, media_id: "UNRELATED-DRAFT" })).toMatchObject({ ok: false, code: "draft_identity_mismatch" });
+    expect(await readPublishState(id, env.dir)).toEqual(state);
+    expect(await run({ ...receipt, media_id: "MID-1" })).toMatchObject({ ok: true, phase: phase === "scheduled" ? "published" : "scheduled" });
+  });
+
+  it("结果不明时找回的草稿 ID 也必须与后续回执一致", async () => {
+    await writePublishState(id, { phase: "unknown", foundDraft: { mediaId: "RECOVERED-DRAFT" }, superseded: [], attempts: [] }, env.dir);
+    expect(await run({ op: "record_scheduled", scheduled_at: "2026-10-24T12:00:00+08:00", founder_quote: "核到了", media_id: "OTHER-DRAFT" })).toMatchObject({ ok: false, code: "draft_identity_mismatch" });
+    expect((await readPublishState(id, env.dir)).phase).toBe("unknown");
   });
 
   it("另一篇派生文章已占当天群发 → 顺延到第二天同一时间", async () => {

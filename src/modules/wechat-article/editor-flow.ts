@@ -133,6 +133,7 @@ export function recordScheduled(id: string, dataDir: string, input: ScheduledInp
     if (st.phase === "scheduled" && !input.published) return fail("wrong_phase", "已经记过定时了；到点发出后带 published:true 再记一次");
     const known = st.mediaId ?? st.foundDraft?.mediaId;
     const found = input.draft.mediaId || (input.draft.title && input.draft.updatedAt) ? input.draft : null;
+    if (known && found?.mediaId && known !== found.mediaId) return fail("draft_identity_mismatch", `核到的草稿 ${found.mediaId} 不是这篇已推送的草稿 ${known}：先核准草稿身份，不记这条回执`);
     if (st.phase === "unknown" && !known && !found) return fail("draft_identity_required", "结果不明时记回执要带核到的草稿身份：media_id（看得到的话），或 draft_title + draft_updated_at（定时列表 / 发表记录里这篇的标题和更新时间）");
     if (!input.founderWords) return fail("founder_words_required", "记定时回执要创始人的原话（他说扫了 / 看到了的那句，founder_quote 照抄）");
     const when = parseShanghai(input.scheduledAt);

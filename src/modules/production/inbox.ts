@@ -83,6 +83,13 @@ export const genOf = (snapshot: unknown): string => crypto.createHash("sha256").
 /** input：按留档输入重算的现在的指纹，same = 计划与文件没改过 */
 export interface CheckView { check_id: string; platform: string; verdict: string; checked_at: string; items: unknown[]; input?: { same: boolean; fp: string } }
 
+export interface EnPackagePreview {
+  hash: string;
+  thumbnail: { fact_id: string } | null;
+  cut: { fact_id: string } | null;
+  kits: Array<{ platform: string; title: string; caption: string; tags: string[]; chapters: Array<{ at: string; title: string }>; aiDisclosure: string | null }>;
+}
+
 export interface ContentInput {
   content: Content;
   /** 按本体走的视频稿才有（迁移后的样子） */
@@ -103,7 +110,7 @@ export interface ContentInput {
   /** 由视频派生的公众号文章：整包指纹（正文 + 标题 + 配图 + 封面 + 创作来源）进认稿那件的代次，包一变就要重新看 */
   articlePackageHash?: string;
   /** 英文版（Phase 3 方案 (b)）：英文发布包的现状——没批 / 批准失效时出「英文发布包」那件 */
-  enPackage?: { hash: string; problems: string[]; approved: boolean; reopen: string | null; revisions: number };
+  enPackage?: { hash: string; problems: string[]; approved: boolean; reopen: string | null; revisions: number; preview?: EnPackagePreview };
 }
 
 type Draft = Omit<InboxItem, "gen" | "content_id" | "title"> & { snapshot: unknown };
@@ -397,7 +404,7 @@ function draftItem(content: Content, behindDoc: ProductionDoc | null = null, pac
     // 挡着成片 / 封面审阅时算「挡住推进」
     summary: behind.length ? `稿子写好了，过一眼（${BEHIND_TEXT[behind.join(",")]}，认稿后才能审）` : "稿子写好了，过一眼", rank: behind.length ? 1 : 3,
     actions: [{ action: "approve_script", label: "稿子没问题", role: "primary" }, { action: "revise_script", label: "还要改…", role: "secondary", note: "required", placeholder: "比如：开头换成客户问的那句话" }],
-    detail: { platform: content.platform ?? null, ...(content.derivedFrom?.kind === "en_edition" || content.derivedFrom?.kind === "wechat_article" ? { derived: content.derivedFrom.kind } : {}), words: Array.from((content.body ?? "").replace(/\s+/g, "")).length, ...(behind.length ? { waiting_behind: behind } : {}), ...(packageHash ? { package_hash: packageHash } : {}) },
+    detail: { platform: content.platform ?? null, body_hash: bodyHash(content.body), updated_at: content.updatedAt, ...(content.derivedFrom?.kind === "en_edition" || content.derivedFrom?.kind === "wechat_article" ? { derived: content.derivedFrom.kind } : {}), words: Array.from((content.body ?? "").replace(/\s+/g, "")).length, ...(behind.length ? { waiting_behind: behind } : {}), ...(packageHash ? { package_hash: packageHash } : {}) },
     // 退回修改后重交（同样的正文也算重交）开新代次
     snapshot: [bodyHash(content.body), content.title, content.updatedAt, ...(packageHash ? [packageHash] : [])],
   };
@@ -410,7 +417,7 @@ function enPackageItem(content: Content, p: NonNullable<ContentInput["enPackage"
     item_id: `enpkg:${content.id}`, type: "en_package", waiting: null, agent_waiting: false, since: content.updatedAt, rank: 2,
     summary: p.reopen ? `批过的英文发布包变了（${p.reopen}），重新看一眼` : "英文发布包齐了（缩略图、文案、章节、成片），过一眼",
     actions: [{ action: "approve_en_package", label: "英文发布包没问题", role: "primary" }, { action: "revise_en_package", label: "还要改…", role: "secondary", note: "required", placeholder: "比如：YouTube 标题再短一点" }],
-    detail: { package_hash: p.hash, problems: p.problems, ...(p.reopen ? { reopened: p.reopen } : {}) },
+    detail: { package_hash: p.hash, problems: p.problems, ...(p.preview ? { preview: p.preview } : {}), ...(p.reopen ? { reopened: p.reopen } : {}) },
     // 带上「还要改」的次数：改回之前退过的那一包也是新的一次出示，不会被当成已经处理过的代次藏掉
     snapshot: [p.hash, p.reopen ?? "", p.revisions],
   };

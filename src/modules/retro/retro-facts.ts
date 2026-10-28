@@ -10,7 +10,6 @@ import { contentFile } from "../../storage/content-project.js";
  * 跨平台纪律：绝对量的小计一律带平台前缀分列；率类才做跨平台中位数。
  */
 import fs from "node:fs/promises";
-import path from "node:path";
 import { listContents, getDataDir, type Content } from "../../storage/local-store.js";
 import { listOutcomes } from "../flywheel/outcome-store.js";
 import {
@@ -30,6 +29,7 @@ import { loadProfile, personaSummary, goalSummary } from "../profile/creator-pro
 import { listOpenHypotheses, type Hypothesis } from "./hypotheses.js";
 import { judgeHypothesis, JUDGE_AGE_DAYS, type JudgeVerdict } from "./hypothesis-judge.js";
 import { computeProductionTiming, timingFactsBlock, type ProductionTiming } from "./production-timing.js";
+import { reviewedRow } from "../insights/metric-review.js";
 
 const DAY_MS = 86_400_000;
 
@@ -168,6 +168,8 @@ export interface RetroFacts {
   timing: ProductionTiming;
   /** 本期代码裁决结果——写台账与结果回传都用它，模型碰不到 */
   judged: JudgedHypothesis[];
+  /** 复核只剔除可疑指标；excludedRows 是剔除后已无任何有效指标的快照数。 */
+  metricReview: { excludedRows: number; excludedMetrics: number };
   /** 数据账本读取失败的原因——「读不到」不等于「没数据」，必须显式 */
   outcomesError?: string;
   /** 假设台账读取失败的原因：本期做不了裁决，报告与结果都要明说 */
@@ -270,7 +272,14 @@ export async function gatherFacts(days: number, dataDir?: string): Promise<Retro
     // 选题会下注按各自 watchDay（D+3/D+7）由选题会对账裁，不在周复盘里按默认 D+7 提前判
     readOrReport(listOpenHypotheses(dataDir).then((list) => list.filter((h) => !h.meetingDate)), []),
   ]);
-  const outcomes = outcomesRead.value;
+  const metricReview = { excludedRows: 0, excludedMetrics: 0 };
+  const outcomes = outcomesRead.value.flatMap((row) => {
+    const reviewed = reviewedRow(row);
+    if (!reviewed) metricReview.excludedRows++;
+    metricReview.excludedMetrics += Object.values(row.metrics).filter((v) => typeof v === "number").length
+      - Object.values(reviewed?.metrics ?? {}).filter((v) => typeof v === "number").length;
+    return reviewed ? [reviewed] : [];
+  });
 
   const delta = deltaInWindow(outcomes, fromDate, toDate);
   const cohort = publishCohort(contents, outcomes, fromDate, toDate);
@@ -291,7 +300,10 @@ export async function gatherFacts(days: number, dataDir?: string): Promise<Retro
     "",
     output.block,
     "",
-    dataSection({ error: outcomesRead.error, count: outcomes.length }, delta, cohort, atAge),
+    ...(metricReview.excludedMetrics ? [`数据复核:已剔除 ${metricReview.excludedMetrics} 个待复核指标；其中 ${metricReview.excludedRows} 条快照无有效指标，未进入统计与裁决；其余有效指标保留。`, ""] : []),
+    !outcomesRead.error && outcomesRead.value.length > 0 && outcomes.length === 0
+      ? "数据表现:全部快照的指标都待复核，本期没有可用指标，不作数据结论。"
+      : dataSection({ error: outcomesRead.error, count: outcomes.length }, delta, cohort, atAge),
     "",
     ledgerRead.error
       ? `假设台账:读取失败(${ledgerRead.error})——本期不做假设复盘,也不要提新假设(台账写不进去)。`
@@ -299,7 +311,7 @@ export async function gatherFacts(days: number, dataDir?: string): Promise<Retro
     "",
     timingFactsBlock(timing),
   ];
-  const facts: RetroFacts = { fromDate, toDate, block: parts.join("\n"), timing, judged };
+  const facts: RetroFacts = { fromDate, toDate, block: parts.join("\n"), timing, judged, metricReview };
   if (outcomesRead.error) facts.outcomesError = outcomesRead.error;
   if (ledgerRead.error) facts.ledgerError = ledgerRead.error;
   return facts;

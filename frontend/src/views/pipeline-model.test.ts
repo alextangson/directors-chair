@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canReshoot, canSkipRow, collapsedColumns, DROP_TARGET, groupByTheme, meterRows, meterTone, mmdd, pendingDerivedDrafts, skippedLine, statusLine, stateIcon, withPendingReviews, type ThemeCard } from "./pipeline-model";
+import { canReshoot, canSkipRow, collapsedColumns, DROP_TARGET, groupByTheme, meterRows, meterTone, mmdd, needsFounder, pendingDerivedDrafts, skippedLine, statusLine, stateIcon, withPendingReviews, type ThemeCard } from "./pipeline-model";
 import { canConfirmPublic, exceptionRows } from "./PipelineCard";
 import type { BoardItem, BoardTopic } from "./board-columns";
 import { sortPipelineTopics, topicAgeLine } from "./pipeline-model";
@@ -14,6 +14,15 @@ const card = (extra: Partial<ThemeCard> = {}): ThemeCard => ({
 });
 
 describe("管线页面模型", () => {
+  it("等我的筛选和状态行共用判定：剪辑问答、原片提示和 alerts 都保留", () => {
+    const waiting = [
+      card({ column: "剪辑", item: item({ status: "editing", missing: ["待你回答：配乐可以吗"] }) }),
+      card({ column: "录制", item: item({ status: "approved", badges: ["原片自动挂上，不对就点"] }) }),
+      card({ column: "写稿", item: item({ status: "revision", alerts: ["需要你补充材料"] }) }),
+    ];
+    for (const c of waiting) { expect(statusLine(c)?.tone).toBe("you"); expect(needsFounder(c)).toBe(true); }
+    expect(needsFounder(card({ column: "剪辑", item: item({ status: "editing" }) }))).toBe(false);
+  });
   it("去向条只画要发的；颜色按状态", () => {
     const c = card({ destinations: [
       { platform: "douyin", state: "已发", detail: "已发", content_id: "v", required: true },

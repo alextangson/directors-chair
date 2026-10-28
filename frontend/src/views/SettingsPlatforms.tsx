@@ -22,12 +22,12 @@ export const PLATFORM_GROUPS: Array<{ title: string; note: string; items: Choice
   },
   {
     title: "图文",
-    note: "公众号：成片审过后，自动派生一篇公众号长文；其余平台出对应的图文稿",
+    note: "公众号：中文目标平台完成排期后，派生一篇公众号长文；其余平台出对应的图文稿",
     items: SEAT_CHOICES.filter((c) => !caps(c.id) || caps(c.id)?.kind === "article"),
   },
   {
     title: "英文版",
-    note: "成片审过后，出英文配音版，发到勾选的平台（X 和 YouTube 各自只出勾了的那个）",
+    note: "中文目标平台完成排期后，派生英文配音版，发到勾选的平台（X 和 YouTube 各自只出勾了的那个）",
     items: SEAT_CHOICES.filter((c) => caps(c.id)?.kind === "video" && caps(c.id)?.language === "en"),
   },
 ];
@@ -63,7 +63,7 @@ function Tile(props: { c: Choice; on: boolean; last: boolean; busy: boolean; sta
 const Head = () => (
   <header>
     <h3 className="serif pf-title">运营平台</h3>
-    <p className="pf-sub">勾哪个平台，就开哪条生产线</p>
+    <p className="pf-sub">设置新主题默认要发的平台和生产线</p>
   </header>
 );
 
@@ -113,7 +113,7 @@ export function SettingsPlatforms() {
         <Head />
         <span className="pf-summary">已开 {count} 个平台 · {lines} 条生产线</span>
       </div>
-      <p className="pf-autosave">改了即刻保存</p>
+      <p className="pf-autosave">改了即刻保存，作为新主题的默认去向。已有主题保留各自的计划。关闭公众号会暂停公众号在途生产和发布；关闭英文平台会停发该平台，YouTube 和 X 都关闭时暂停整条英文生产线。稿件和发布包保留，重新打开后可继续。</p>
       {PLATFORM_GROUPS.map((g) => (
         <div key={g.title} className="pf-card" role="group" aria-label={g.title}>
           <div className="pf-card-head">

@@ -8,6 +8,8 @@ import path from "node:path";
 import { contentRoot } from "../../storage/content-project.js";
 import { resolveArchivedFile } from "../../storage/nas-kept.js";
 import { readProductionDocOrEmpty } from "../../storage/production-store.js";
+import type { Fact } from "../../storage/production-types.js";
+import { readEnThumbnail } from "../en-edition/thumbnail.js";
 import { isWithin } from "../../storage/storage-roots.js";
 /** 按文件身份（dev、ino、大小、修改时间）缓存的 sha：拖一次进度不再整份重读（整分支审 8 P2） */
 import { cachedSha } from "./observe.js";
@@ -46,7 +48,15 @@ export async function openAttachment(contentId: string, askId: string, index: nu
  */
 export async function openFactMedia(contentId: string, factId: string, dataDir: string): Promise<AttachmentOpen> {
   const doc = await readProductionDocOrEmpty(contentId, dataDir);
-  const f = doc.facts.find((x) => x.id === factId);
+  let f: Pick<Fact, "path" | "sha256" | "state" | "kind"> | undefined = doc.facts.find((x) => x.id === factId);
+  // 英文发布包只按当前登记的字节身份预览；合法登记可以位于项目外，不接收页面传来的路径。
+  const cutSha = /^en-cut-([a-f\d]{64})$/.exec(factId)?.[1];
+  if (!f && cutSha) f = doc.facts.find((x) => x.round === doc.round && x.kind === "cut" && x.state === "accepted" && !x.replaced_at && x.sha256 === cutSha);
+  const thumbSha = /^en-thumbnail-([a-f\d]{64})$/.exec(factId)?.[1];
+  if (!f && thumbSha) {
+    const thumbnail = await readEnThumbnail(contentId, dataDir);
+    if (thumbnail?.sha256 === thumbSha) f = { path: thumbnail.path, sha256: thumbnail.sha256, state: "accepted", kind: "cover" };
+  }
   if (!f || f.state === "rejected" || !f.path || !f.sha256 || !["cut", "cover", "aroll"].includes(f.kind)) return { ok: false, status: 404, error: "没有这个文件" };
   const type = TYPES[path.extname(f.path).toLowerCase()];
   if (!type) return { ok: false, status: 415, error: "这种文件不能在网页里预览" };

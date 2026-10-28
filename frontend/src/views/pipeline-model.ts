@@ -131,6 +131,13 @@ export function statusLine(card: ThemeCard): { text: string; tone: "you" | "wip"
   return null;
 }
 
+/** 管线筛选和首页提示共用：状态行、发布去向或重拍取消正在等创始人处理。 */
+export function needsFounder(card: ThemeCard): boolean {
+  return statusLine(card)?.tone === "you"
+    || card.destinations.some((d) => (d.state === "待你定" || d.state === "没发成") && (d.required || Boolean(d.content_id)))
+    || Boolean(card.reshoot?.to_cancel.length);
+}
+
 /** 空列收成竖条（mock 的「待发布 0」）；选题列永远展开 */
 export function collapsedColumns(themes: ThemeCard[]): Set<ThemeColumn> {
   const out = new Set<ThemeColumn>();

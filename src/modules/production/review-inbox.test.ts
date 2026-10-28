@@ -10,7 +10,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { createBoardHandler } from "../../desktop/board-route.js";
 import { getContent, softDeleteContent } from "../../storage/local-store.js";
-import { readProductionDoc } from "../../storage/production-store.js";
+import { bodyHash, readProductionDoc } from "../../storage/production-store.js";
 import { executeContentSave } from "../../tools/content-save.js";
 import { hostPolicy } from "../../../mcp/host-policy.js";
 import { executePublishCheck } from "../publish/review-gate/check.js";
@@ -387,6 +387,7 @@ describe("稿子写好了（§3.1）", () => {
     const a = await videoContent(env, "稿子一");
     const b = await videoContent(env, "稿子二");
     const ia = (await itemOf(`draft:${a.id}`))!;
+    expect(ia.detail).toMatchObject({ body_hash: bodyHash(a.body), updated_at: a.updatedAt });
     expect(await decideItem({ content_id: a.id, item_id: ia.item_id, gen: ia.gen, action: "approve_script" }, env.dir)).toMatchObject({ ok: true });
     expect((await getContent(a.id, env.dir))!.status).toBe("approved");
     const ib = (await itemOf(`draft:${b.id}`))!;

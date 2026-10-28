@@ -17,7 +17,8 @@ async function call<T>(url: string, init?: RequestInit): Promise<Reply<T>> {
   }
 }
 
-export const loadInbox = () => call<InboxView>("/api/inbox");
+export const loadInbox = (options: { includeDrafts?: boolean } = {}) =>
+  call<InboxView>(`/api/inbox${options.includeDrafts ? "?with_drafts=1" : ""}`);
 
 /** 条目的动作：params 原样来自后端给的 actions[i].params，再加 item_id / gen / 一句话等可编辑字段 */
 export const decideItem = (payload: Json) =>

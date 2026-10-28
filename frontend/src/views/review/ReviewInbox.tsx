@@ -78,16 +78,25 @@ export function ReviewInbox(props: { focusContent?: string; focusTypes?: string[
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const onItems = useRef(props.onItems);
   onItems.current = props.onItems;
+  const request = useRef(0), live = useRef(true);
+  const latestItems = useRef<InboxItem[] | null>(null);
+  const includeDrafts = useRef(Boolean(props.focusContent));
+  const previousFocus = useRef(props.focusContent);
 
   const reload = useCallback(async (): Promise<InboxItem[] | null> => {
-    const r = await loadInbox();
+    const mine = ++request.current;
+    const r = await loadInbox({ includeDrafts: includeDrafts.current });
+    if (!live.current) return null;
+    if (mine !== request.current) return latestItems.current;
     if (!r.ok) { setError(r.error); return null; }
     const sorted = sortItems(r.data.items);
+    latestItems.current = sorted;
     setItems(sorted); setError(null); setLastOkAt(Date.now());
     onItems.current?.(sorted);
     return sorted;
   }, []);
   useEffect(() => {
+    live.current = true;
     void reload();
     let last = Date.now();
     const hiddenMs = props.hiddenPollMs ?? HIDDEN_POLL_MS;
@@ -96,8 +105,14 @@ export function ReviewInbox(props: { focusContent?: string; focusTypes?: string[
       last = Date.now();
       void reload();
     }, Math.min(POLL_MS, hiddenMs));
-    return () => clearInterval(t);
+    return () => { clearInterval(t); live.current = false; ++request.current; };
   }, [reload, props.hiddenPollMs]);
+  useEffect(() => {
+    if (previousFocus.current === props.focusContent) return;
+    previousFocus.current = props.focusContent;
+    includeDrafts.current = Boolean(props.focusContent);
+    void reload();
+  }, [props.focusContent, reload]);
 
   const list = items ?? [];
   // 「要你做的」按主题分组显示（管线重规划 §8-5）：同一主题的行挨在一起，键盘上下切也按这个顺序
@@ -114,6 +129,7 @@ export function ReviewInbox(props: { focusContent?: string; focusTypes?: string[
   useEffect(() => {
     const on = (e: Event) => {
       const d = (e as CustomEvent<InboxOpenDetail>).detail;
+      includeDrafts.current = true;
       const pick = (xs: InboxItem[]) => focusPick(xs, d.content_id, d.types);
       const hit = pick(list);
       if (hit) { setCollapsed(false); open(rowOfItem(hit.item_id)); return; }
@@ -126,12 +142,17 @@ export function ReviewInbox(props: { focusContent?: string; focusTypes?: string[
     window.addEventListener(INBOX_OPEN_EVENT, on);
     return () => window.removeEventListener(INBOX_OPEN_EVENT, on);
   });
-  const focused = useRef(false);
+  const focusRequest = useRef<string | null>(null), focused = useRef<string | null>(null);
   useEffect(() => {
-    if (focused.current || !props.focusContent || !items) return;
-    focused.current = true;
+    const key = props.focusContent ? JSON.stringify([props.focusContent, props.focusTypes ?? []]) : null;
+    if (focusRequest.current !== key) {
+      focusRequest.current = key;
+      focused.current = null;
+      if (key) open(null);
+    }
+    if (!key || focused.current === key || !props.focusContent || !items) return;
     const hit = focusPick(items, props.focusContent, props.focusTypes);
-    if (hit) { setCollapsed(false); open(rowOfItem(hit.item_id)); }
+    if (hit) { focused.current = key; setCollapsed(false); open(rowOfItem(hit.item_id)); }
   });
   const current = rows.find((r) => r.key === openKey) ?? null;
   const shown = current ?? held;

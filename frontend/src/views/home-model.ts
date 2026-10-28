@@ -7,7 +7,7 @@
 import { pullHint, type PullPlatformStatus } from "../pull-lib";
 import { baselines, latestVideo, platformLines, daysAfter } from "./data-answers";
 import { MIN_SAMPLES, median, type DataPageData, type DataRow, type Snapshot, type Work } from "./data-lib";
-import { PIPELINE_COLUMNS, statusLine, type PipelineColumn, type PipelineData } from "./pipeline-model";
+import { PIPELINE_COLUMNS, needsFounder, type PipelineColumn, type PipelineData } from "./pipeline-model";
 
 /** 账号区的主格（mock 的五格）；YouTube / X 在下面一行小字 */
 export const MAIN_PLATFORMS = ["douyin", "wechat_video", "xiaohongshu", "bilibili", "wechat_mp"] as const;
@@ -216,7 +216,7 @@ export function glanceOf(data: PipelineData): Glance[] {
       return ready ? { col, n, hint: `${ready} 篇等你认`, hot: true } : { col, n, hint: "AI 在写", hot: false };
     }
     if (col === "录制" || col === "剪辑") {
-      const you = cards.filter((t) => statusLine(t)?.tone === "you").length;
+      const you = cards.filter(needsFounder).length;
       if (you) return { col, n, hint: col === "剪辑" ? `${you} 条等你看` : `${you} 条要你处理`, hot: true };
       return { col, n, hint: col === "录制" ? "等你录 A-roll" : "在剪", hot: false };
     }

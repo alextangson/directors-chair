@@ -19,8 +19,8 @@ import { ThemeCardView, TopicCardView } from "./PipelineCard";
 import { ReviewInbox } from "./review/ReviewInbox";
 import type { InboxItem } from "./review/review-model";
 import {
-  COLUMN_PROGRESS, DEST_LABEL, DROP_TARGET, PIPELINE_COLUMNS, PIPELINE_VISIBLE, collapsedColumns, columnCards, pendingDerivedDrafts, sortPipelineTopics, withPendingReviews,
-  type PipelineColumn, type PipelineData, type ThemeCard, type ThemeColumn, type TopicSupply,
+  COLUMN_PROGRESS, DEST_LABEL, DROP_TARGET, PIPELINE_COLUMNS, PIPELINE_VISIBLE, collapsedColumns, columnCards, needsFounder, pendingDerivedDrafts, sortPipelineTopics, withPendingReviews,
+  type PipelineColumn, type PipelineData, type ThemeColumn, type TopicSupply,
 } from "./pipeline-model";
 import "./pipeline.css";
 
@@ -55,9 +55,6 @@ function usePipeline() {
   return { data, error, reload, pause };
 }
 
-/** 「只看等我的」：卡上有要你定 / 没发成的去向，或稿子等你认 */
-const waitsOnMe = (t: ThemeCard) => t.item.status === "draft_ready" || t.destinations.some((d) => (d.state === "待你定" || d.state === "没发成") && (d.required || d.content_id)) || Boolean(t.reshoot?.to_cancel.length);
-
 export function Pipeline(props: { openEditor: (id: string) => void; openTopic: (key: string) => void }) {
   const { data, error, reload, pause } = usePipeline();
   const [open, setOpen] = useState<string | null>(null);
@@ -77,7 +74,7 @@ export function Pipeline(props: { openEditor: (id: string) => void; openTopic: (
   // 「等你拍板」里的派生稿认稿：卡上对应的去向行直接给「认英文稿 →」，点了打开同一个面板（下面的 ReviewInbox panel）
   const [inbox, setInbox] = useState<InboxItem[]>([]);
   const pending = useMemo(() => pendingDerivedDrafts(inbox), [inbox]);
-  const themes = useMemo(() => (data?.themes ?? []).map((t) => withPendingReviews(t, pending)).filter((t) => (!dest || t.destinations.some((d) => d.platform === dest) || t.plan.required.includes(dest)) && (!mine || waitsOnMe(t))), [data, dest, mine, pending]);
+  const themes = useMemo(() => (data?.themes ?? []).map((t) => withPendingReviews(t, pending)).filter((t) => (!dest || t.destinations.some((d) => d.platform === dest) || t.plan.required.includes(dest)) && (!mine || needsFounder(t))), [data, dest, mine, pending]);
   const collapsed = useMemo(() => collapsedColumns(themes), [themes]);
   const topics = useMemo(() => sortPipelineTopics(data?.topics ?? []), [data]);
 

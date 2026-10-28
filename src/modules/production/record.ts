@@ -27,7 +27,7 @@ import { explainContent } from "./read.js";
 import { hiddenUntilScriptApproved } from "./ready.js";
 import { approvedCoverShas, ensureProductionReady, mutateProduction } from "./service.js";
 import { commitRegistration } from "./registration.js";
-import { canonPlatform, claimAccepted, observationFact, slotGate } from "./receipts.js";
+import { claimAccepted, observationFact, slotGate } from "./receipts.js";
 import { gateFromPlan } from "./publish-check-link.js";
 import { dropTxn, isCommitted, rollbackTxn, runMove, saveTxn, type ReleaseOp, type Txn, type TxnOp } from "./txn.js";
 import { applyRelease } from "./release.js";
@@ -35,6 +35,8 @@ import { STORYBOARD_HINT, validateStoryboard } from "./storyboard.js";
 import { currentCut, triggerSliverCheck } from "./sliver/check.js";
 import { latestCheck } from "./sliver/verdict.js";
 import { chatcutHold, inUseEvidence } from "./chatcut-refs.js";
+import { publicationNext, publicationOverviewOf } from "./publication-overview.js";
+import { normalizePlatform } from "../publish/review-gate/platforms.js";
 
 type Receipt = Record<string, unknown>;
 const fail = (code: string, error: string, extra: Receipt = {}): Receipt => ({ ok: false, code, error, ...extra });
@@ -47,8 +49,9 @@ const fail = (code: string, error: string, extra: Receipt = {}): Receipt => ({ o
 class StaleRound extends Error {}
 
 export async function recordPublishClaim(content: Content, dataDir: string, a: Pick<RecordArgs, "platform" | "account" | "url" | "item_id" | "host" | "request_id" | "note" | "pub_state" | "scheduled_at"> & { round?: number }): Promise<Receipt> {
-  const platform = a.platform || content.platform ? canonPlatform((a.platform || content.platform)!) : undefined;
-  if (!platform) return fail("bad_param", "kind=publish 要带 platform");
+  const rawPlatform = a.platform || content.platform;
+  const platform = normalizePlatform(rawPlatform);
+  if (!platform) return fail("bad_param", rawPlatform ? `不认识发布平台「${rawPlatform}」：请使用支持的平台名称` : "kind=publish 要带 platform");
   const scheduled = a.pub_state === "scheduled" && a.scheduled_at;
   if (!a.url && !a.item_id && !scheduled) return fail("bad_param", "kind=publish 要带作品链接 url 或平台作品 id item_id（定时的报 pub_state=scheduled + scheduled_at）");
   if (a.url && !/^https?:\/\//.test(a.url)) return fail("bad_param", `url 只接受 http/https：${a.url.slice(0, 80)}`);
@@ -76,7 +79,10 @@ export async function recordPublishClaim(content: Content, dataDir: string, a: P
   if (!r) return fail("stale", "这条已经重开过，报的是上一轮：刷新再看");
   // 回执说的以实际用上的那条事实为准（重复提交复用的旧事实可能没被直接认）
   const used = r.value.claim_accepted === true;
-  return { ok: true, content_id: content.id, fact_id: r.value.id, kind: "publish", verified: used, stage: r.explanation.stage ?? r.explanation.column, badges: r.explanation.badges,
+  const publication = await publicationOverviewOf(r.content, dataDir, r.doc);
+  return { ok: true, content_id: content.id, fact_id: r.value.id, kind: "publish", verified: used,
+    stage: r.explanation.stage === "已发布" ? publication.label : r.explanation.stage ?? r.explanation.column,
+    production_stage: r.explanation.stage, publication, next: publicationNext(publication), badges: r.explanation.badges,
     next_action: used
       ? "已直接记为已投出（带了本平台作品链接 / 报了定时），不用创始人确认；定时的过了定时时间一天还没核到公开会再问他。不要再改状态。"
       : "已记成待核的发布回执，卡上会问创始人。下次报发布带上这个平台的作品链接 url（或定时的报 pub_state=scheduled + scheduled_at），带了就直接算已投出。不要再改状态。" };
@@ -495,7 +501,13 @@ function nextAction(core: ReceiptCore, exp: Explanation): string {
 
 async function receiptFor(content: Content, dataDir: string, core: ReceiptCore): Promise<Receipt> {
   const exp = await explainContent(content, dataDir);
-  return receipt(core, exp, content, contentRoot(content.id, dataDir));
+  const base = receipt(core, exp, content, contentRoot(content.id, dataDir));
+  if (core.kind !== "publish") return base;
+  const doc = await readProductionDocOrEmpty(content.id, dataDir);
+  const publication = await publicationOverviewOf(content, dataDir, doc);
+  return { ...base, verified: doc.facts.find((f) => f.id === core.fact_id)?.claim_accepted === true,
+    stage: exp.stage === "已发布" ? publication.label : exp.stage ?? exp.column,
+    production_stage: exp.stage, publication, next: publicationNext(publication) };
 }
 
 function receipt(core: ReceiptCore, exp: Explanation, content: Content, projectRoot: string | null, note?: string): Receipt {

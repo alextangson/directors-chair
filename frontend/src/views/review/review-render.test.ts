@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { createHash, webcrypto } from "node:crypto";
 import type { InboxItem } from "./review-model";
 
 const decided: Array<Record<string, unknown>> = [];
@@ -25,12 +26,13 @@ vi.mock("./review-api", () => ({
 }));
 let draftBody = "正文第一段。";
 const invoked: Array<[string, Record<string, unknown>]> = [];
-vi.mock("../../transport", () => ({ invoke: async (ch: string, p: Record<string, unknown>) => { invoked.push([ch, p]); return { ok: true, content: { body: draftBody } }; }, authedFetch: async () => new Response("{}"), SESSION_EXPIRED: "x" }));
+vi.mock("../../transport", () => ({ invoke: async (ch: string, p: Record<string, unknown>) => { invoked.push([ch, p]); return { ok: true, content: { body: draftBody, title: "测试稿", updatedAt: "2026-10-28T00:00:00.000Z" } }; }, authedFetch: async () => new Response("{}"), SESSION_EXPIRED: "x" }));
 
 let el: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  vi.stubGlobal("crypto", webcrypto);
   decided.length = 0; undone.length = 0; decideReply = { ok: true }; inbox = []; failWith = null; draftBody = "正文第一段。"; invoked.length = 0;
   el = document.createElement("div"); document.body.appendChild(el); root = createRoot(el);
   window.localStorage?.clear?.();
@@ -61,7 +63,7 @@ export const ITEMS: InboxItem[] = [
   base({ item_id: "pubcheck:r1:douyin", type: "publish_check", rank: 2, summary: "发之前再看一眼（抖音）", actions: [{ action: "publish_check_confirm", label: "没问题", role: "primary", params: { check_id: "chk-1" } }, { action: "publish_check_revise", label: "有几处要改…", role: "secondary", params: { check_id: "chk-1" }, note: "required" }], detail: { platform: "douyin", verdict: "pass", items: [] } }),
   base({ item_id: "published:content-1-a:r1:douyin", type: "published_ask", rank: 2, summary: "发了吗（抖音）", actions: [{ action: "i_published", label: "已经发出去了", role: "primary", params: { platform: "douyin" }, note: "optional" }], detail: { platform: "douyin" } }),
   base({ item_id: "claim:content-1-a:r1:douyin", type: "publish_claim", rank: 2, summary: "Claude说已经发了（抖音）", actions: [{ action: "confirm_receipt", label: "对，发了", role: "primary", params: { fact_id: "p1" } }, { action: "correct_publish", label: "没发", role: "secondary", params: { target_id: "slot:1:douyin" } }], detail: { platform: "douyin" } }),
-  base({ item_id: "draft:content-2-b", content_id: "content-2-b", type: "draft", rank: 3, summary: "稿子写好了，过一眼", actions: [{ action: "approve_script", label: "稿子没问题", role: "primary" }, { action: "revise_script", label: "还要改…", role: "secondary", note: "required" }], detail: { words: 300 } }),
+  base({ item_id: "draft:content-2-b", content_id: "content-2-b", type: "draft", rank: 3, summary: "稿子写好了，过一眼", actions: [{ action: "approve_script", label: "稿子没问题", role: "primary" }, { action: "revise_script", label: "还要改…", role: "secondary", note: "required" }], detail: { words: 300, body_hash: createHash("sha256").update("正文第一段。").digest("hex"), updated_at: "2026-10-28T00:00:00.000Z" } }),
 ];
 
 async function mountInbox(items: InboxItem[]) {

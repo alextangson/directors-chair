@@ -140,7 +140,8 @@ export function createBoardHandler(deps: BoardRouteDeps) {
       try {
         const dir = await deps.resolveDataDir();
         // 「要你做的」按主题分组显示：只加主题标注，每件仍是原来的身份和生命周期
-        const [view, contents] = await Promise.all([readInbox(dir), listContents(dir)]);
+        // 默认隐藏认稿，避免和管线卡重复；显式认稿入口才包含 draft。
+        const [view, contents] = await Promise.all([readInbox(dir, { withDrafts: url.searchParams.get("with_drafts") === "1" }), listContents(dir)]);
         const themes = themeIndex(contents);
         send(res, 200, { ...view, items: view.items.map((i) => { const t = i.content_id ? themes.get(i.content_id) : undefined; return t ? { ...i, theme_id: t.id, theme_title: t.title } : i; }) });
       }

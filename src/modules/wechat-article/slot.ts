@@ -5,7 +5,8 @@
  */
 import { getContent, listContents } from "../../storage/local-store.js";
 import { readPublishRecord } from "../../storage/publish-record.js";
-import { readProductionDocOrEmpty } from "../../storage/production-store.js";
+import { isOntologyActive, readProductionDocOrEmpty } from "../../storage/production-store.js";
+import { slotOf } from "../production/receipts.js";
 import { readPublishState, type PlannedSlot } from "./publish-state.js";
 
 const TZ_MS = 8 * 3600_000;
@@ -40,6 +41,14 @@ export interface VideoLive { live: boolean; at: number | null; raw: string }
 export async function videoChannelState(sourceId: string, dataDir: string, now = Date.now()): Promise<VideoLive> {
   const src = await getContent(sourceId, dataDir);
   if (!src) return { live: false, at: null, raw: "源视频不存在" };
+  // 本体稿只信当前轮次的槽：旧计划、手动标记都不能盖过纠正，也不能带进重开后的新一轮。
+  if (await isOntologyActive(dataDir, sourceId)) {
+    const doc = await readProductionDocOrEmpty(sourceId, dataDir);
+    const slot = slotOf(doc, doc.round, "wechat_video");
+    if (!slot?.verified || slot.pub_state !== "public") return { live: false, at: parseShanghai(slot?.published_at), raw: "视频号：本轮还没有有效的已公开回执" };
+    const at = parseShanghai(slot.published_at) ?? (slot.source === "founder" ? parseShanghai(slot.at) : null);
+    return { live: true, at, raw: `视频号：本轮已核到公开${slot.published_at ? ` ${slot.published_at}` : ""}` };
+  }
   const record = await readPublishRecord(sourceId, src.manualPublications, dataDir, now);
   if (record.kind === "none") return { live: false, at: null, raw: "源视频还没有发布记录（06-publish/publish-plan.json）" };
   const p = record.platforms.find((x) => x.platform === "wechat_video");
@@ -55,8 +64,8 @@ export async function videoChannelState(sourceId: string, dataDir: string, now =
 
 async function acceptedChannelsPublish(sourceId: string, dataDir: string): Promise<string | null> {
   const doc = await readProductionDocOrEmpty(sourceId, dataDir);
-  const f = doc.facts.find((x) => x.kind === "publish" && x.platform === "wechat_video" && x.state === "accepted" && !x.replaced_at && x.published_at);
-  return f?.published_at ?? null;
+  const slot = slotOf(doc, doc.round, "wechat_video");
+  return slot?.verified && slot.pub_state === "public" ? slot.published_at ?? null : null;
 }
 
 /** 别的派生文章已占的群发日（已进编辑器排了时间 / 等扫码 / 已定时 / 已发） */

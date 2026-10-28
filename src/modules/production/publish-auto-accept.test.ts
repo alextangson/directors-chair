@@ -57,6 +57,16 @@ describe("「发了吗」等满一天", () => {
 });
 
 describe("直接认的 AI 回执", () => {
+  it("未知平台不能凭定时回执写入发布事实；支持的平台别名仍能使用", async () => {
+    const r = await registeredVideo(env);
+    const before = (await readProductionDoc(r.id, env.dir))!.facts.length;
+    const scheduled = { pub_state: "scheduled", scheduled_at: new Date(Date.now() + H).toISOString() };
+    expect(await claim(r, { platform: "bilibli_typo", ...scheduled })).toMatchObject({ ok: false, code: "bad_param" });
+    expect((await readProductionDoc(r.id, env.dir))!.facts).toHaveLength(before);
+    expect(await claim(r, { platform: "B站", ...scheduled })).toMatchObject({ ok: true, verified: true });
+    expect((await readProductionDoc(r.id, env.dir))!.facts.at(-1)).toMatchObject({ kind: "publish", platform: "bilibili" });
+  });
+
   it("四个平台都带本平台链接：已发布，没有任何发布条目，原因写明谁报的", async () => {
     const r = await registeredVideo(env);
     const ps = ["douyin", "xiaohongshu", "wechat_video", "bilibili"];
