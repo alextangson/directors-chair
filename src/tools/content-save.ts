@@ -52,13 +52,13 @@ const ALL_STATUSES = [
 /** autocrew_content 里会写稿件的动作（对 imported_history 一律不受理） */
 const HISTORY_WRITE_ACTIONS: ReadonlySet<string> = new Set(["update", "record", "mark_ready", "ask", "answer_ask", "withdraw_ask", "delete", "restore", "adoption", "transition", "create_variant"]);
 export const contentSaveSchema = Type.Object({
-  action: Type.Unsafe<"save" | "list" | "get" | "summary" | "update" | "transition" | "create_variant" | "siblings" | "allowed_transitions" | "adoption" | "delete" | "restore" | "record" | "check_slivers" | "mark_ready" | "ask" | "answer_ask" | "withdraw_ask" | "wechat_article" | "en_edition">({
+  action: Type.Unsafe<"save" | "list" | "get" | "summary" | "derivative_status" | "update" | "transition" | "create_variant" | "siblings" | "allowed_transitions" | "adoption" | "delete" | "restore" | "record" | "check_slivers" | "mark_ready" | "ask" | "answer_ask" | "withdraw_ask" | "wechat_article" | "en_edition">({
     type: "string",
-    enum: ["save", "list", "get", "summary", "update", "transition", "create_variant", "siblings", "allowed_transitions", "adoption", "delete", "restore", "record", "check_slivers", "mark_ready", "ask", "answer_ask", "withdraw_ask", "wechat_article", "en_edition"],
+    enum: ["save", "list", "get", "summary", "derivative_status", "update", "transition", "create_variant", "siblings", "allowed_transitions", "adoption", "delete", "restore", "record", "check_slivers", "mark_ready", "ask", "answer_ask", "withdraw_ask", "wechat_article", "en_edition"],
     description:
       "Action: 'save' new content, 'list' all, 'get' by id, 'update' existing, " +
       "'transition' change status via state machine, 'create_variant' create platform variant from topic, " +
-      "'siblings' list sibling content, 'allowed_transitions' show valid next statuses, " +
+      "'siblings' list sibling content, 'allowed_transitions' show valid next statuses, 'derivative_status' 只读后台派生策略与真实会话任务，不创建会话, " +
       "'adoption' record adoption verdict (采纳率北极星读数)——仅工作台可用，宿主调用会被服务端拒绝（采纳不能由模型代填）, " +
       "'record' 报制作事实（原片 aroll / 成片 cut / 字幕 srt / 封面 cover / ChatCut 工程 chatcut_project）：只报盘上有什么，不带任何批准；认稿、成片通过、选封面只能创始人点; " +
       "'check_slivers' 导出前自查抽帧缝（两段 B-roll / 动效之间露出 <1 秒的真人），只读、不写任何记录，可带 chatcut_project_id / timeline_id; " +
@@ -263,6 +263,10 @@ export async function executeContentSave(
 
   // 只读进度摘要（v1.3）：查「这篇到哪了」不用拉 16KB 的整篇
   if (action === "summary") return contentSummary(String(params.id ?? "").trim(), dataDir, Date.now(), params.since_seq, params.aroll_offset, params.asks_offset);
+  if (action === "derivative_status") {
+    const { dispatchStatus } = await import("../modules/derivative-dispatch/service.js");
+    return dispatchStatus(String(params.id ?? "").trim(), getDataDir(dataDir));
+  }
 
   // 历史作品记录：所有写动作不受理（改正文、报制作事实、推进、删除……）；删除只走 autocrew_insights history_delete
   if (HISTORY_WRITE_ACTIONS.has(String(action))) {

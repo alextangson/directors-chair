@@ -9,6 +9,7 @@ import { toast } from "../ui";
 import { PLATFORM_CAPS, SEAT_CHOICES } from "../lib";
 import { PlatformLogo } from "../components/PlatformLogo";
 import { Switch } from "../components/Switch";
+import { SettingsDerivativeDispatch } from "./DerivativeDispatch";
 import "./settings-platforms.css";
 
 type Choice = { id: string; label: string };
@@ -135,6 +136,7 @@ export function SettingsPlatforms() {
           )}
         </div>
       ))}
+      <SettingsDerivativeDispatch />
     </section>
   );
 }

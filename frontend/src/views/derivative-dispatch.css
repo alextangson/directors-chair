@@ -1,0 +1,15 @@
+.dd-policy { margin-top: 20px; }
+.dd-policy-head label { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.dd-policy p { line-height: 1.65; }
+.dd-panel { margin: 12px 0; padding: 12px 0; border-top: 1px solid var(--line, #ddd); }
+.dd-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.dd-job { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin: 12px 0; }
+.dd-job-reason { display: block; margin-top: 5px; line-height: 1.5; color: var(--muted, #777); }
+.dd-error { color: #a13c26; line-height: 1.6; }
+.dd-modal-backdrop { position: fixed; inset: 0; z-index: 1100; display: flex; align-items: center; justify-content: center; padding: 24px; background: #17150e60; }
+.dd-modal { width: min(760px, 100%); max-height: 88vh; overflow: auto; padding: 24px; background: var(--paper, #fffdf7); border: 1px solid #d3cfc3; box-shadow: 0 12px 44px #0002; }
+.dd-thread-records { margin: 18px 0; }
+.dd-turn { border-top: 1px solid #dedbd2; padding-top: 12px; }
+.dd-thread-text small { color: var(--muted, #777); }
+.dd-thread-text pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.7; }
+.dd-thread-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin-top: 18px; }

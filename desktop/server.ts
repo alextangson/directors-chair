@@ -4,6 +4,11 @@ import { createPlaybookHandler } from "../src/desktop/playbook-route.js";
 import { acquireWriterLock, releaseWriterLock } from "../src/storage/writer-lock.js";
 import { createProjectReviewHandler } from "../src/desktop/project-review-route.js";
 import { createBoardHandler } from "../src/desktop/board-route.js";
+import { createDerivativeDispatchHandler } from "../src/desktop/derivative-dispatch-route.js";
+import { startDerivativeDispatchCycle } from "../src/desktop/derivative-dispatch-cycle.js";
+import { dispatchStatus, prepareDispatch, inspectDispatchThread, resumeDispatchThread, derivativeActiveCount } from "../src/modules/derivative-dispatch/service.js";
+import { readPolicy as readDerivativePolicy, writePolicy as writeDerivativePolicy } from "../src/modules/derivative-dispatch/store.js";
+import { notifyDerivativePolicyChange } from "../src/modules/derivative-dispatch/events.js";
 import { createUpdateHandler } from "../src/desktop/update-route.js";
 import { admitMutation } from "../src/desktop/http-busy-guard.js";
 import { detectInterrupted, protectedStamps } from "../src/modules/update/interrupted.js";
@@ -197,6 +202,12 @@ const ruleApproval = createRuleApprovalHandler({ authorize, originAllowed: req =
 const publishPrefs = createPublishPrefsHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody });
 const playbooks = createPlaybookHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody });
 const board = createBoardHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody });
+const derivativeDispatch = createDerivativeDispatchHandler({
+  authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody,
+  readPolicy: readDerivativePolicy,
+  writePolicy: async (input, dir) => { const policy = await writeDerivativePolicy(input, dir); notifyDerivativePolicyChange(dir); return policy; },
+  dispatchStatus, prepareDispatch, inspectDispatchThread, resumeDispatchThread,
+});
 // 上次更新被硬生生打断（进程被杀 / 机器重启）：启动时认出来，写一份「上次更新中断」结果给页面（第 12 轮 P1）
 try {
   // 新起的服务、安装一致：上次虽然断了，现在能用，清掉记录不报（e2e 1002 P2-B）
@@ -224,7 +235,7 @@ const updateRoute = createUpdateHandler({
   runningVersion: RUNNING_VERSION, processStartedAt: PROCESS_STARTED_AT,
   // 对话轮 + 后台写稿 / 生图 / 推送等长任务（self-update，Codex 审第 2 轮 P1）
   // 剪辑与深调研的 runner 在跑也算（第 12 轮 P2：重启后它们要等 10 / 30 分钟才会被捡回，不能被重启打断）
-  inProcessTurns: () => activeTurnCount() + activeWorkCount() + (videoService?.busyCount() ?? 0) + asrWarmupCount(),
+  inProcessTurns: () => activeTurnCount() + activeWorkCount() + (videoService?.busyCount() ?? 0) + asrWarmupCount() + derivativeActiveCount(),
   // 启动器记的是 tsx 的 pid，跑本文件的是 tsx 拉起的另一个 node：比启动器发给这一次启动的标记，不比 pid
   launcher: async () => ({ running: true, managed: launchedByLauncher(getMachineDir()), via: launchVia() }),
 });
@@ -436,6 +447,7 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
 
   if (await projectReview(req, res, url)) return;
   if (await board(req, res, url)) return;
+  if (await derivativeDispatch(req, res, url)) return;
   if (await updateRoute(req, res, url)) return;
   if (await connectRoute(req, res, url)) return;
   if (await libraryRoute(req, res, url)) return;
@@ -511,6 +523,7 @@ server.requestTimeout = 0;
 server.timeout = 0;
 let stopCampaignHost: (() => void) | undefined;
 let stopMetricsPull: (() => void) | undefined;
+let stopDerivativeDispatch: (() => void) | undefined;
 let radarTimer: NodeJS.Timeout | undefined;
 let myContentTimer: NodeJS.Timeout | undefined;
 let archiveStartTimer: NodeJS.Timeout | undefined;
@@ -521,6 +534,7 @@ let digestBoundDir: string | null = null;
 server.on("close", () => {
   stopCampaignHost?.();
   stopMetricsPull?.();
+  stopDerivativeDispatch?.();
   stopDigestScheduler();
   if (radarTimer) clearInterval(radarTimer);
   if (myContentTimer) clearInterval(myContentTimer);
@@ -713,6 +727,7 @@ server.listen(PORT, HOST, () => {
       ).catch(() => {});
     },
   });
+  stopDerivativeDispatch = startDerivativeDispatchCycle({ resolveDataDir: activeDataDir });
 
   // 选题雷达:启动跑一轮 + 每 30 分钟一轮(进程内调度,详见 radar-cycle.ts)。
   // 一轮 = TTL 门刷新 → 真刷新了才入库与清理;缓存新鲜就整轮跳过,不烧付费源也不重评。

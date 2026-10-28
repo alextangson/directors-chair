@@ -15,6 +15,7 @@ import { withFileOwnership } from "../production/mutex.js";
 import { DEST_LABEL, isDestination } from "./destinations.js";
 import { isThemeRoot, mutatePlan, type ReshootRecord } from "./plan.js";
 import { themesOf } from "./pipeline-data.js";
+import { notifyDerivativeChange } from "../derivative-dispatch/events.js";
 
 export interface Who { via: "board" | "chat"; host?: string }
 type Fail = { ok: false; code: string; error: string };
@@ -40,6 +41,7 @@ export async function setDestination(contentId: string, platformRaw: unknown, sk
   await mutatePlan(r.content!, dataDir, profile, (plan) => {
     plan.destinations[platform] = { required: !skip, by: "founder", via: who.via, ...(who.host ? { host: who.host } : {}), founder_words: fw, at: new Date().toISOString() };
   });
+  notifyDerivativeChange(contentId, dataDir);
   return { ok: true, platform, required: !skip };
 }
 

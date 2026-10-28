@@ -9,6 +9,7 @@ import type { HostId } from "./onboarding/connect-api";
 import type { PublishTarget, TargetAction } from "./publish-targets";
 import { performTarget } from "./StageCard";
 import { openInboxItem } from "./review/review-api";
+import { DerivativeDispatchPanel } from "./DerivativeDispatch";
 import { topicSourceLabel, type BoardItem, type BoardTopic } from "./board-columns";
 import { PGlyph, StateGlyph } from "./pipeline-glyphs";
 import {
@@ -134,6 +135,7 @@ function Expanded(p: { card: ThemeCard; open: (id: string) => void; reload: () =
   return <div className="pl-xp" onClick={(e) => e.stopPropagation()}>
     {shown.length === 0 && <div className="pl-warn">还没定发哪里：到设置里勾平台，或在下面恢复要发的去向</div>}
     {shown.map((r) => <DestLine key={`${r.platform}-${r.content_id ?? "none"}-${r.tag ?? ""}`} card={card} r={r} open={p.open} reload={p.reload} />)}
+    {card.kind === "video" && <DerivativeDispatchPanel sourceId={card.id} />}
     {card.reshoot && <div className="pl-warn">要重拍（你说「{card.reshoot.founder_words}」）{card.reshoot.to_cancel.length ? `：${card.reshoot.to_cancel.map((c) => destLabel(c.platform)).join("、")} 已定时，要你去后台撤` : ""}</div>}
     {skipped && <div className="pl-pf"><StateGlyph kind="skip" />{skipped}
       {card.plan.skipped.map((s) => <button key={s.platform} className="pl-link" title={`你说「${s.founder_words}」`} onClick={() => void skipRow(card, s.platform, false, p.reload)}>恢复 {destLabel(s.platform)}</button>)}</div>}
