@@ -19,10 +19,16 @@ describe("派生稿做没做完（归档用）", () => {
     const en = item("en", "剪辑中");
     expect(childDone(card([en], [row("en", "在做", { required: false, skipped: { by: "你在看板上", founder_words: "不出", at: "x" } })]), en)).toBe(true);
   });
-  it("still being made, scheduled, 待核 or failed → not done", () => {
-    for (const st of ["在做", "已定时", "待核", "没发成"] as const) {
+  it("still being made or failed → not done", () => {
+    for (const st of ["在做", "没发成"] as const) {
       const en = item("en", "待发布");
       expect(childDone(card([en], [row("en", st)]), en)).toBe(false);
+    }
+  });
+  it("创始人 10-30：已定时、待核都算投出去了 → done（YouTube / X 没有回流，等不到「已发」）", () => {
+    for (const st of ["已定时", "待核"] as const) {
+      const en = item("en", "待发布");
+      expect(childDone(card([en], [row("en", st)]), en)).toBe(true);
     }
   });
   it("a child with no destination rows that is not published → not done (en edition just started)", () => {

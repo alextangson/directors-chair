@@ -1,25 +1,32 @@
 /**
  * 已发布稿的「本轮发布时间」与「最近 N 条」保留名单：NAS 归档（会删本机文件）、发布即备份、「我的内容/5 已发布」共用这一份口径。
  *
- * 保守（创始人 09-30）：按本体走的稿只认本轮**可信观察**（发布计划 / 数据回流按作品 id）里真实的公开 / 定时时间；
- * 「我发了」、AI 说法、只有排序占位时间的旧回执都不算。定不出本轮时间 → null：不归档、不备份，归档报告列「待确认发布时间」。
- * 旧稿（没按本体走）照用 publishedAt。
+ * 口径（创始人 10-30 放宽 09-30 的保守口径）：本轮已投出的平台槽都能给时间——可信观察或已认的 AI 回执里写的
+ * 公开 / 定时时间、创始人点「我发了 / 确认已公开」的时刻、发布计划里的定时时间。多个平台取最早；还没到点的时间
+ * 照样返回（归档要发布满 24 小时，未来时间不会触发任何删除）。
+ * 一个都定不出 → null：不归档、不备份，归档报告列「待确认发布时间」。旧稿（没按本体走）照用 publishedAt。
  */
 import type { Content } from "./local-store.js";
 import { isImportedHistory } from "./imported-history.js";
 import { readProductionDocOrEmpty } from "./production-store.js";
 import { ontologyApplies } from "../modules/production/publish-gate.js";
 import { explainContent, explainContext } from "../modules/production/read.js";
-import { receiptsOfRound } from "../modules/production/receipts.js";
+import { canonPlatform, receiptsOfRound } from "../modules/production/receipts.js";
+import { readPublishRecord } from "./publish-record.js";
 
 export const KEEP_PUBLISHED = 5;
 
-export async function roundPublishTime(c: Content, data: string): Promise<string | null> {
+export async function roundPublishTime(c: Content, data: string, now: number = Date.now()): Promise<string | null> {
   if (!(await ontologyApplies(c, data))) return c.publishedAt ?? null;
   const doc = await readProductionDocOrEmpty(c.id, data);
-  const times = receiptsOfRound(doc).live.filter((s) => s.by === "trusted" && s.fact_id).map((s) => {
-    const f = doc.facts.find((x) => x.id === s.fact_id);
-    return f?.published_at ? Date.parse(f.published_at) : NaN;
+  const plan = await readPublishRecord(c.id, undefined, data, now);
+  const scheduled = new Map((plan.kind === "none" ? [] : plan.platforms).filter((p) => p.scheduledAt).map((p) => [canonPlatform(p.platform), Date.parse(p.scheduledAt!)]));
+  const times = receiptsOfRound(doc).live.map((s) => {
+    const f = s.fact_id ? doc.facts.find((x) => x.id === s.fact_id) : undefined;
+    if (f?.published_at) return Date.parse(f.published_at);
+    // 创始人点「我发了 / 确认已公开」：那一刻就是本轮已公开的时间
+    if (s.by === "founder" && s.seen_at) return Date.parse(s.seen_at);
+    return scheduled.get(canonPlatform(s.platform)) ?? NaN;
   }).filter((t) => !Number.isNaN(t));
   return times.length ? new Date(Math.min(...times)).toISOString() : null;
 }

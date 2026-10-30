@@ -4,12 +4,16 @@
  */
 import type { BoardItem } from "../desktop/board-data.js";
 import type { ThemeCard } from "../modules/theme/group.js";
+import { SENT } from "../modules/theme/destinations.js";
 
-/** 派生稿做完 = 本条稿的每个去向都已发或被标了不出（至少有一行）；或稿件已发布且要发的去向都已发 */
+/**
+ * 派生稿做完 = 本条稿的每个去向都已投出（已发 / 已定时 / 待核）或被标了不出（至少有一行）；或稿件已发布且要发的去向都已投出。
+ * 创始人 10-30：已定时就算发完——YouTube / X 没有回流，按「已发」永远等不到，源视频会一直压在本机。
+ */
 export function childDone(card: ThemeCard, child: BoardItem): boolean {
   const rows = card.destinations.filter((r) => r.content_id === child.id);
-  if (rows.length && rows.every((r) => r.state === "已发" || r.skipped)) return true;
-  return child.column === "已发布" && rows.every((r) => !r.required || r.state === "已发");
+  if (rows.length && rows.every((r) => SENT.has(r.state) || r.skipped)) return true;
+  return child.column === "已发布" && rows.every((r) => !r.required || SENT.has(r.state));
 }
 
 /** 父稿 id → 还没做完的派生稿标题 */
