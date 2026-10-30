@@ -419,6 +419,14 @@ describe("NAS 归档", () => {
       expect(await exists(path.join(root(old), "99-cache/remotion"))).toBe(false);
     });
 
+    it("[Codex 复核 P1] 素材库原地登记在 99-cache 的文件（assets.projectPath）也不当缓存删", async () => {
+      const old = await published("旧稿", 8, { updatedAt: daysAgo(8), assets: [{ filename: "bgm.mp3", type: "audio", projectPath: "99-cache/audio/bgm.mp3", addedAt: daysAgo(9) } as never] });
+      await fs.mkdir(path.join(root(old), "99-cache/audio"), { recursive: true });
+      await fs.writeFile(path.join(root(old), "99-cache/audio/bgm.mp3"), "licensed");
+      await archive({ archiveRoot: undefined });
+      expect(await fs.readFile(path.join(root(old), "99-cache/audio/bgm.mp3"), "utf8")).toBe("licensed");
+    });
+
     it("[Codex P2] 制作记录读不出来：判断不了最近有没有动静，不清缓存并报错", async () => {
       const old = await published("旧稿", 8, { updatedAt: daysAgo(8) });
       await putCache(old, "keep");

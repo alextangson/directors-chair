@@ -72,8 +72,10 @@ export const RECENT_RECORD_MS = 30 * 60_000;
 /** 这条还在动：有未完成的文件归属事务日志，或 30 分钟内有 agent record 的事实 */
 export async function busyInProduction(contentId: string, dataDir: string, now: Date): Promise<string | null> {
   const dir = productionServiceDir(dataDir, "txns");
-  for (const name of await fs.readdir(dir).catch(() => [] as string[])) {
-    const txn = JSON.parse(await fs.readFile(path.join(dir, name), "utf8").catch(() => "{}")) as { content_id?: string };
+  // 读不出事务就抛错（调用方跳过这条）：不能把「看不见」当成「没有未完成的事务」再去删文件
+  const names = await fs.readdir(dir).catch((e) => { if (isMissing(e)) return [] as string[]; throw e; });
+  for (const name of names) {
+    const txn = JSON.parse(await fs.readFile(path.join(dir, name), "utf8")) as { content_id?: string };
     if (txn.content_id === contentId) return "有没完成的文件事务";
   }
   const doc = await readProductionDoc(contentId, dataDir).catch(() => null);
@@ -231,7 +233,7 @@ async function archiveOne(c: Content, archiveRoot: string, ctx: Ctx): Promise<Ar
   const projectRoot = resolveContentProject(c.id, ctx.data)!.project_root;
   const target = archiveTarget(archiveRoot, c, projectRoot);
   await assertTargetOutsideSource(target, [projectRoot, ctx.lib]);
-  const recorded = await recordedRels(c.id, ctx.data, projectRoot);
+  const recorded = await recordedRels(c, ctx.data, projectRoot);
   const skip = rebuildableExcept(recorded);
   const { files: listed } = await walkProject(projectRoot, skip);
   const size = listed.reduce((n, f) => n + f.size, 0), free = await ctx.free(archiveRoot);
@@ -332,7 +334,7 @@ async function purgeIdleCaches(ctx: Ctx, report: ArchiveReport): Promise<void> {
   report.errors.push(...errors);
   for (const { content, projectRoot } of purge) {
     try {
-      const freedBytes = await purgeProjectCache(projectRoot, await recordedRels(content.id, ctx.data, projectRoot));
+      const freedBytes = await purgeProjectCache(projectRoot, await recordedRels(content, ctx.data, projectRoot));
       if (freedBytes > 0) (report.cacheFreed ??= []).push({ title: content.title, target: projectRoot, freedBytes });
     } catch (e) { report.errors.push(`${content.title}（${content.id}）：清缓存出错：${errMsg(e)}`); }
   }
@@ -347,7 +349,7 @@ async function pendingItems(ctx: Ctx, report: ArchiveReport): Promise<Content[]>
     if (d.action !== "purge_cache") continue;
     // 早先归档时还没清缓存的：这里补清，NAS 不在也能做（不碰 NAS）
     try {
-      const freedBytes = await purgeProjectCache(d.projectRoot!, await recordedRels(d.content.id, ctx.data, d.projectRoot!));
+      const freedBytes = await purgeProjectCache(d.projectRoot!, await recordedRels(d.content, ctx.data, d.projectRoot!));
       if (freedBytes > 0) (report.cacheFreed ??= []).push({ title: d.content.title, target: d.projectRoot!, freedBytes });
     } catch (e) { report.errors.push(`${d.content.title}（${d.content.id}）：${errMsg(e)}`); }
   }

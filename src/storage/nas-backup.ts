@@ -151,8 +151,8 @@ async function runBackup(data: string, ctx: Ctx, report: BackupReport): Promise<
       const binding = resolveContentProject(c.id, data);
       if (!binding) throw new Error("没有项目目录");
       // 与 record 落位 / 登记 / 重开 / 归档同一把文件归属互斥（本体 §7）：拷的时候项目里的文件不会被挪动，一条一放
-      const recorded = await recordedRels(c.id, data, binding.project_root);
-      await withFileOwnership(() => backupOneAt(c, binding.project_root, ctx, report, recorded));
+      // 受保护清单在锁里读：拷的时候不会有新登记插进来
+      await withFileOwnership(async () => backupOneAt(c, binding.project_root, ctx, report, await recordedRels(c, data, binding.project_root)));
     } catch (e) { report.errors.push(`${c.title}（${c.id}）：${errMsg(e)}`); }
   }
 }
