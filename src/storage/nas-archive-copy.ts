@@ -170,7 +170,8 @@ export async function copyProject(
 ): Promise<{ files: ArchivedFile[]; errors: string[]; links: ProjectLink[] }> {
   const { files, special } = await walkProject(root, opts.exclude);
   // 要删的目录里有链接就不删（复制不了）；其它目录里的链接留在本机，不影响
-  const blocking = special.filter((rel) => mediaDirs.some((d) => rel.startsWith(`${d}/`)));
+  // 顶层条目本身是链接也算（不然删的时候会顺着链接进到项目外）
+  const blocking = special.filter((rel) => mediaDirs.some((d) => rel === d || rel.startsWith(`${d}/`)));
   const out: ArchivedFile[] = [], errors = blocking.map((rel) => `${rel}：不是普通文件（链接等），没法归档`);
   const recorded = opts.recordSymlinks ? await recordSpecials(root, special.filter((rel) => !opts.exclude?.(rel))) : { links: [], errors: [] };
   errors.push(...recorded.errors);

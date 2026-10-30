@@ -12,7 +12,7 @@ import { archivePublished, type ArchiveOptions } from "./nas-archive.js";
 import { loadUnfinishedChildren } from "./archive-in-progress.js";
 import { ARCHIVE_ROOT_UNSET } from "./storage-roots.js";
 import { withFileOwnership } from "./file-ownership.js";
-import { writeProductionDoc } from "./production-store.js";
+import { productionFile, writeProductionDoc } from "./production-store.js";
 import { emptyProductionDoc } from "./production-types.js";
 import { HUMAN_WRITE } from "./first-body-guard.js";
 
@@ -312,6 +312,31 @@ describe("NAS 归档", () => {
     expect((await archive()).archived).toEqual([]);
   });
 
+  it("[Codex P1] review-preview 下原地登记过的文件照样复制核对、本机不当可重建删", async () => {
+    await fiveRecent();
+    const old = await published("旧稿", 8);
+    const r0 = root(old);
+    await fs.mkdir(path.join(r0, "04-edit/review-preview"), { recursive: true });
+    await fs.writeFile(path.join(r0, "04-edit/review-preview/cut.mp4"), "recorded");
+    await writeProductionDoc(old.id, data, { ...emptyProductionDoc(), facts: [{ id: "f1", kind: "cut", round: 1, state: "accepted", availability: "present", source: "record", at: daysAgo(8), path: "04-edit/review-preview/cut.mp4" } as never] }, 0);
+    const r = await archive();
+    expect(r.archived.map((a) => a.title)).toEqual(["旧稿"]);
+    expect(await fs.readFile(path.join(nasDir(old), "04-edit/review-preview/cut.mp4"), "utf8")).toBe("recorded");
+  });
+
+  it("[Codex P2] 顶层目录是指向项目外的链接：挡住归档，不顺着链接删东西", async () => {
+    await fiveRecent();
+    const old = await published("旧稿", 8);
+    const outside = path.join(temp, "outside-tree");
+    await fs.mkdir(path.join(outside, "empty-sub"), { recursive: true });
+    await fs.symlink(outside, path.join(root(old), "08-linked"));
+    const r = await archive();
+    expect(r.archived).toEqual([]);
+    expect(r.errors.join("\n")).toContain("08-linked");
+    expect(await exists(path.join(outside, "empty-sub"))).toBe(true);
+    expect(await exists(path.join(root(old), "02-aroll/raw.mov"))).toBe(true);
+  });
+
   describe("99-cache", () => {
     const putCache = async (c: Content, body: string) => {
       await fs.mkdir(path.join(root(c), "99-cache/remotion"), { recursive: true });
@@ -381,6 +406,27 @@ describe("NAS 归档", () => {
       const r = await archive({ archiveRoot: undefined });
       expect(await exists(path.join(root(busy), "99-cache/remotion/render.mp4"))).toBe(true);
       expect(r.cacheFreed?.map((x) => x.title)).toEqual(["没时间"]);
+    });
+
+    it("[Codex P1] 制作记录里原地登记在 99-cache 的成片不当缓存删", async () => {
+      const old = await published("旧稿", 8, { updatedAt: daysAgo(8) });
+      await putCache(old, "render-bytes");
+      await fs.mkdir(path.join(root(old), "99-cache/edit"), { recursive: true });
+      await fs.writeFile(path.join(root(old), "99-cache/edit/final.mp4"), "the only cut");
+      await writeProductionDoc(old.id, data, { ...emptyProductionDoc(), facts: [{ id: "f1", kind: "cut", round: 1, state: "accepted", availability: "present", source: "record", at: daysAgo(8), path: "99-cache/edit/final.mp4" } as never] }, 0);
+      await archive({ archiveRoot: undefined });
+      expect(await fs.readFile(path.join(root(old), "99-cache/edit/final.mp4"), "utf8")).toBe("the only cut");
+      expect(await exists(path.join(root(old), "99-cache/remotion"))).toBe(false);
+    });
+
+    it("[Codex P2] 制作记录读不出来：判断不了最近有没有动静，不清缓存并报错", async () => {
+      const old = await published("旧稿", 8, { updatedAt: daysAgo(8) });
+      await putCache(old, "keep");
+      await fs.mkdir(path.dirname(productionFile(old.id, data)), { recursive: true });
+      await fs.writeFile(productionFile(old.id, data), "{坏的");
+      const r = await archive({ archiveRoot: undefined });
+      expect(await exists(path.join(root(old), "99-cache/remotion/render.mp4"))).toBe(true);
+      expect(r.errors.some((e) => e.includes("旧稿"))).toBe(true);
     });
 
     it("keeps the cache of projects that are not archived (kept 5, too young, busy)", async () => {

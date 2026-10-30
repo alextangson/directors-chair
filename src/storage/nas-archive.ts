@@ -13,12 +13,13 @@ import { writeJsonAtomic } from "./json-atomic.js";
 import { writeErrorSection } from "./my-content-errors.js";
 import { VIEW_DIR } from "./my-content-view.js";
 import { withFileOwnership } from "./file-ownership.js";
-import { copyProject, isRebuildable, PROJECT_CACHE_DIR, REBUILDABLE_NAMES, sha256File as nasSha, walkProject, type ArchivedFile, type CopyImpl } from "./nas-archive-copy.js";
+import { copyProject, PROJECT_CACHE_DIR, REBUILDABLE_NAMES, sha256File as nasSha, walkProject, type ArchivedFile, type CopyImpl } from "./nas-archive-copy.js";
 import { appendArchiveLog, formatBytes } from "./nas-archive-log.js";
 import { assertTargetOutsideSource } from "./nas-safe-path.js";
 import { KEPT_DIR } from "./nas-kept.js";
 import { publishedSet, type PublishedSet } from "./round-publish-time.js";
 import { loadUnfinishedChildren } from "./archive-in-progress.js";
+import { holdsRecorded, rebuildableExcept, recordedRels } from "./recorded-files.js";
 
 /** 归档删完后保留空骨架的素材目录（剪辑软件、技能按这些名字找位置） */
 export const MEDIA_DIRS = ["02-aroll", "03-broll", "04-edit", "05-audio", "05-cover", "07-delivery"] as const;
@@ -142,16 +143,16 @@ async function keepSmallFiles(projectRoot: string, c: Content, files: ArchivedFi
  * 只删逐文件核对过、且此刻字节仍是核对时那份的文件（本体 §7，E36）；核对之后新出现 / 被改过的文件留着，
  * 下一轮归档再带走。删完清掉空目录，素材目录本身保留。
  */
-async function deleteMedia(projectRoot: string, files: ArchivedFile[]): Promise<{ kept: number; rebuildableBytes: number }> {
+async function deleteMedia(projectRoot: string, files: ArchivedFile[], recorded: Set<string>): Promise<{ kept: number; rebuildableBytes: number }> {
   let kept = 0;
   const verified = new Map(files.filter((f) => isMedia(f.rel)).map((f) => [f.rel, f]));
-  const { files: now } = await walkProject(projectRoot, isRebuildable);
+  const { files: now } = await walkProject(projectRoot, rebuildableExcept(recorded));
   for (const f of now.filter((x) => isMedia(x.rel))) {
     const v = verified.get(f.rel);
     if (v && v.size === f.size && (await nasSha(path.join(projectRoot, f.rel)).catch(() => null)) === v.sha256) await fs.rm(path.join(projectRoot, f.rel), { force: true });
     else kept++;
   }
-  const rebuildableBytes = await removeRebuildables(projectRoot, "");
+  const rebuildableBytes = await removeRebuildables(projectRoot, "", recorded);
   const skeleton = new Set<string>(MEDIA_DIRS);
   for (const d of await deletableTops(projectRoot)) await pruneEmpty(path.join(projectRoot, d), skeleton.has(d));
   for (const d of MEDIA_DIRS) await fs.mkdir(path.join(projectRoot, d), { recursive: true });
@@ -162,17 +163,17 @@ async function deleteMedia(projectRoot: string, files: ArchivedFile[]): Promise<
  * 删掉 99-cache 以外任意层的 node_modules / review-preview（可重建，不上 NAS）：是链接只删链接本身、不跟进去；
  * 是目录整棵删。返回删掉的字节数。
  */
-async function removeRebuildables(projectRoot: string, rel: string): Promise<number> {
+async function removeRebuildables(projectRoot: string, rel: string, recorded: Set<string>): Promise<number> {
   const entries = await fs.readdir(path.join(projectRoot, rel), { withFileTypes: true }).catch((e) => { if (isMissing(e)) return []; throw e; });
   let freed = 0;
   for (const e of entries) {
     const child = rel ? `${rel}/${e.name}` : e.name;
     if (child === PROJECT_CACHE_DIR) continue;
     const p = path.join(projectRoot, child);
-    if (REBUILDABLE_NAMES.has(e.name)) {
+    if (REBUILDABLE_NAMES.has(e.name) && !holdsRecorded(child, recorded)) {
       freed += e.isDirectory() ? await treeBytes(p) : 0;
       await fs.rm(p, { recursive: true, force: true });
-    } else if (e.isDirectory()) freed += await removeRebuildables(projectRoot, child);
+    } else if (e.isDirectory()) freed += await removeRebuildables(projectRoot, child, recorded);
   }
   return freed;
 }
@@ -199,15 +200,17 @@ const TRANSCRIPT_MANIFEST = "transcription-manifest.json";
 const KEEP_NEXT_TO_MANIFEST = new Set([TRANSCRIPT_MANIFEST, "full.json"]);
 
 /** 删掉目录下除转写之外的文件，返回删掉的字节数；删空的子目录一并清掉 */
-async function purgeCacheDir(dir: string): Promise<number> {
+async function purgeCacheDir(dir: string, projectRoot: string, recorded: Set<string>): Promise<number> {
   const entries = await fs.readdir(dir, { withFileTypes: true }).catch((e) => { if (isMissing(e)) return null; throw e; });
   if (!entries) return 0;
   const hasManifest = entries.some((e) => e.isFile() && e.name === TRANSCRIPT_MANIFEST);
   let freed = 0;
   for (const e of entries) {
     const p = path.join(dir, e.name);
-    if (e.isDirectory()) { freed += await purgeCacheDir(p); continue; }
+    if (e.isDirectory()) { freed += await purgeCacheDir(p, projectRoot, recorded); continue; }
     if (hasManifest && KEEP_NEXT_TO_MANIFEST.has(e.name)) continue;
+    // 制作记录里原地登记过的文件可能是唯一一份，不当缓存删
+    if (recorded.has(path.relative(projectRoot, p).split(path.sep).join("/"))) continue;
     freed += (await fs.lstat(p)).size;
     await fs.rm(p, { force: true });
   }
@@ -216,31 +219,33 @@ async function purgeCacheDir(dir: string): Promise<number> {
 }
 
 /** 归档后清 99-cache：成片和素材已在 NAS 上核对过，这里只剩可重建的中间产物（渲染、抽音频）；口播转写留着给写稿用 */
-async function purgeProjectCache(projectRoot: string): Promise<number> {
+async function purgeProjectCache(projectRoot: string, recorded: Set<string>): Promise<number> {
   const dir = path.join(projectRoot, PROJECT_CACHE_DIR);
   const st = await fs.lstat(dir).catch((e) => { if (isMissing(e)) return null; throw e; });
   // 缓存根是符号链接（指到项目外）就不跟进去删：只清项目自己的目录；子项里的链接只删链接本身
   if (!st || !st.isDirectory()) return 0;
-  return purgeCacheDir(dir);
+  return purgeCacheDir(dir, projectRoot, recorded);
 }
 
 async function archiveOne(c: Content, archiveRoot: string, ctx: Ctx): Promise<ArchivedItem> {
   const projectRoot = resolveContentProject(c.id, ctx.data)!.project_root;
   const target = archiveTarget(archiveRoot, c, projectRoot);
   await assertTargetOutsideSource(target, [projectRoot, ctx.lib]);
-  const { files: listed } = await walkProject(projectRoot, isRebuildable);
+  const recorded = await recordedRels(c.id, ctx.data, projectRoot);
+  const skip = rebuildableExcept(recorded);
+  const { files: listed } = await walkProject(projectRoot, skip);
   const size = listed.reduce((n, f) => n + f.size, 0), free = await ctx.free(archiveRoot);
   if (free < size + ctx.margin) {
     throw new Error(`NAS 空间不够（要 ${formatBytes(size)} + 预留 ${formatBytes(ctx.margin)}，剩 ${formatBytes(free)}），这次跳过`);
   }
   // 逐文件核对 NAS（发布时已备份的，这里只是核对；缺或不一致先补拷），全部对上才删本机
   // 可重建的（99-cache、node_modules、review-preview）不搬上 NAS、不挡归档；素材核对删完后一并清掉
-  const { files, errors } = await copyProject(projectRoot, target, ctx.copy, await deletableTops(projectRoot), { exclude: isRebuildable });
+  const { files, errors } = await copyProject(projectRoot, target, ctx.copy, await deletableTops(projectRoot), { exclude: skip });
   if (errors.length) throw new Error(`复制或核对出错，本机一个文件都没删，下次重试：${errors.join("；")}`);
   await keepSmallFiles(projectRoot, c, files);
   await writeRecord(projectRoot, target, files, ctx.now);
-  const { kept, rebuildableBytes } = await deleteMedia(projectRoot, files);
-  const freedBytes = files.filter((f) => isMedia(f.rel)).reduce((n, f) => n + f.size, 0) + rebuildableBytes + await purgeProjectCache(projectRoot);
+  const { kept, rebuildableBytes } = await deleteMedia(projectRoot, files, recorded);
+  const freedBytes = files.filter((f) => isMedia(f.rel)).reduce((n, f) => n + f.size, 0) + rebuildableBytes + await purgeProjectCache(projectRoot, recorded);
   if (kept) console.warn(`[nas-archive] ${c.title}：${kept} 个文件是核对之后才出现 / 被改过的，留在本机，下一轮再归档`);
   await appendArchiveLog(ctx.data, { contentId: c.id, title: c.title, target, freedBytes, archivedAt: ctx.now.toISOString() });
   return { title: c.title, target, freedBytes };
@@ -296,7 +301,8 @@ export async function planArchive(data: string, now: Date, children: Ctx["childr
 
 /** 最后一次动静：稿件改动时间与制作记录里最新事实的时间取晚的 */
 async function lastActivity(c: Content, data: string): Promise<number> {
-  const doc = await readProductionDoc(c.id, data).catch(() => null);
+  // 读不出制作记录就抛错：判断不了最近有没有动静，这条不清（调用方记错误）
+  const doc = await readProductionDoc(c.id, data);
   const times = [Date.parse(c.updatedAt), ...(doc?.facts ?? []).map((f) => Date.parse(f.at))].filter((t) => !Number.isNaN(t));
   return times.length ? Math.max(...times) : Number.NaN;
 }
@@ -326,7 +332,7 @@ async function purgeIdleCaches(ctx: Ctx, report: ArchiveReport): Promise<void> {
   report.errors.push(...errors);
   for (const { content, projectRoot } of purge) {
     try {
-      const freedBytes = await purgeProjectCache(projectRoot);
+      const freedBytes = await purgeProjectCache(projectRoot, await recordedRels(content.id, ctx.data, projectRoot));
       if (freedBytes > 0) (report.cacheFreed ??= []).push({ title: content.title, target: projectRoot, freedBytes });
     } catch (e) { report.errors.push(`${content.title}（${content.id}）：清缓存出错：${errMsg(e)}`); }
   }
@@ -341,7 +347,7 @@ async function pendingItems(ctx: Ctx, report: ArchiveReport): Promise<Content[]>
     if (d.action !== "purge_cache") continue;
     // 早先归档时还没清缓存的：这里补清，NAS 不在也能做（不碰 NAS）
     try {
-      const freedBytes = await purgeProjectCache(d.projectRoot!);
+      const freedBytes = await purgeProjectCache(d.projectRoot!, await recordedRels(d.content.id, ctx.data, d.projectRoot!));
       if (freedBytes > 0) (report.cacheFreed ??= []).push({ title: d.content.title, target: d.projectRoot!, freedBytes });
     } catch (e) { report.errors.push(`${d.content.title}（${d.content.id}）：${errMsg(e)}`); }
   }
