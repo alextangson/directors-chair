@@ -2,7 +2,7 @@
  * 已发布稿的「本轮发布时间」与「最近 N 条」保留名单：NAS 归档（会删本机文件）、发布即备份、「我的内容/5 已发布」共用这一份口径。
  *
  * 口径（创始人 10-30 放宽 09-30 的保守口径）：本轮已投出的平台槽都能给时间——可信观察或已认的 AI 回执里写的
- * 公开 / 定时时间、创始人点「我发了 / 确认已公开」的时刻、发布计划里的定时时间。多个平台取最早；还没到点的时间
+ * 公开 / 定时时间、创始人点「我发了 / 确认已公开」的时刻（槽是已公开才算）、发布计划认定的槽里的定时时间。多个平台取最早；还没到点的时间
  * 照样返回（归档要发布满 24 小时，未来时间不会触发任何删除）。
  * 一个都定不出 → null：不归档、不备份，归档报告列「待确认发布时间」。旧稿（没按本体走）照用 publishedAt。
  */
@@ -24,9 +24,12 @@ export async function roundPublishTime(c: Content, data: string, now: number = D
   const times = receiptsOfRound(doc).live.map((s) => {
     const f = s.fact_id ? doc.facts.find((x) => x.id === s.fact_id) : undefined;
     if (f?.published_at) return Date.parse(f.published_at);
-    // 创始人点「我发了 / 确认已公开」：那一刻就是本轮已公开的时间
-    if (s.by === "founder" && s.seen_at) return Date.parse(s.seen_at);
-    return scheduled.get(canonPlatform(s.platform)) ?? NaN;
+    // 创始人点「我发了 / 确认已公开」：只有槽确实是「已公开」时，那一刻才是公开时间；
+    // 确认一条「已定时 / 审核中」的回执 ≠ 已经公开，确认时刻不能当发布时间（不然会在公开前就备份、删本机）
+    if (s.by === "founder" && s.pub_state === "public" && s.seen_at) return Date.parse(s.seen_at);
+    // 计划里的定时时间只给「本轮、纠正之后、由这份计划认定」的槽用：按平台去套，可能套上上一轮或被纠正掉的那次
+    if (s.source === "plan") return scheduled.get(canonPlatform(s.platform)) ?? NaN;
+    return NaN;
   }).filter((t) => !Number.isNaN(t));
   return times.length ? new Date(Math.min(...times)).toISOString() : null;
 }

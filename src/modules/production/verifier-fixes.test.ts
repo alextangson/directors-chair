@@ -398,6 +398,21 @@ describe("seg12 归档口径", () => {
     expect(await roundPublishTime((await getContent(r.id, env.dir))!, env.dir)).toBe("2026-09-02T10:00:00.000Z");
   });
 
+  it("[Codex P1] 确认一条「已定时」的 AI 回执：确认时刻不当发布时间（不能在公开前就归档）", async () => {
+    await enable();
+    const { roundPublishTime } = await import("../../storage/round-publish-time.js");
+    const { getContent } = await import("../../storage/local-store.js");
+    const { mutateProduction } = await import("./service.js");
+    const r = await registeredVideo(env);
+    const now = new Date().toISOString();
+    await mutateProduction(r.id, env.dir, (d) => {
+      d.facts.push({ id: "claim-1", kind: "publish", round: d.round, state: "accepted", availability: "present", source: "record", at: now, seen_at: now, platform: "youtube", pub_state: "scheduled", obs_source: "claim", verified: false, evidence: "AI 说定时了" } as never);
+      d.decisions.push({ id: "conf-1", type: "publish_confirm", round: d.round, at: now, fact_id: "claim-1" } as never);
+      return { value: null, events: [] };
+    });
+    expect(await roundPublishTime((await getContent(r.id, env.dir))!, env.dir)).toBeNull();
+  });
+
   it("[seg13 P2] 保留名单里定不出发布时间的也列进「待确认」，但仍不归档", async () => {
     await enable();
     const { publishedSet } = await import("../../storage/round-publish-time.js");
