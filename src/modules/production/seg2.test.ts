@@ -102,7 +102,10 @@ describe("批准即登记（§5）", () => {
     expect(content.videoDone).toBeTruthy();
     const root = projectRoot(env, s.c.id);
     expect(await fs.readFile(path.join(root, "05-cover/封面-3x4.png"))).toEqual(png(900, 1200));
-    expect((await fs.readdir(path.join(root, "07-delivery/registered")))[0]).toMatch(/^final-r1-/);
+    // 成片原地登记：不再另存 07-delivery/registered 副本，素材记录直接指向批准的那份
+    expect(await exists(path.join(root, "07-delivery/registered"))).toBe(false);
+    const cutAsset = content.assets?.find((a) => a.filename === content.video?.final?.asset_filename);
+    expect(cutAsset?.projectPath).toBe((await readProductionDoc(s.c.id, env.dir))!.facts.find((f) => f.sha256 === s.cut.sha256 && f.kind === "cut")!.path);
     expect(await exists(path.join(root, "01-script/spoken/g0001-spoken.md"))).toBe(true);
     expect(await exists(path.join(root, "01-script/spoken/g0001-checklist.json"))).toBe(true);
   });

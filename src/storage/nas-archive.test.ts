@@ -275,6 +275,43 @@ describe("NAS 归档", () => {
     expect(copy).not.toHaveBeenCalled();
   });
 
+  it("node_modules（目录或链接）和 review-preview 不挡归档、不上 NAS，归档后一并删掉", async () => {
+    await fiveRecent();
+    const old = await published("旧稿", 8);
+    const r0 = root(old);
+    await fs.mkdir(path.join(r0, "03-broll/delivery/v1"), { recursive: true });
+    await fs.mkdir(path.join(temp, "elsewhere"), { recursive: true });
+    await fs.symlink(path.join(temp, "elsewhere"), path.join(r0, "03-broll/delivery/v1/node_modules"));
+    await fs.mkdir(path.join(r0, "04-edit/motion/node_modules/x"), { recursive: true });
+    await fs.writeFile(path.join(r0, "04-edit/motion/node_modules/x/index.js"), "js");
+    await fs.mkdir(path.join(r0, "06-publish/review-preview"), { recursive: true });
+    await fs.writeFile(path.join(r0, "06-publish/review-preview/成片.mp4"), "preview");
+    const r = await archive();
+    expect(r.archived.map((a) => a.title)).toEqual(["旧稿"]);
+    expect(await exists(path.join(r0, "03-broll/delivery/v1/node_modules"))).toBe(false);
+    expect(await exists(path.join(r0, "04-edit/motion/node_modules"))).toBe(false);
+    expect(await exists(path.join(r0, "06-publish/review-preview"))).toBe(false);
+    expect(await exists(path.join(temp, "elsewhere"))).toBe(true);
+    expect(await exists(path.join(nasDir(old), "04-edit/motion/node_modules"))).toBe(false);
+  });
+
+  it("按保留名单删：08-* 这类自建目录核对上 NAS 后也删，素材目录留空骨架，01-script 不动", async () => {
+    await fiveRecent();
+    const old = await published("旧稿", 8);
+    const r0 = root(old);
+    await fs.mkdir(path.join(r0, "08-lipsync"), { recursive: true });
+    await fs.writeFile(path.join(r0, "08-lipsync/a.mp4"), "lipsync");
+    await fs.mkdir(path.join(r0, "01-script"), { recursive: true });
+    await fs.writeFile(path.join(r0, "01-script/x.md"), "稿");
+    const r = await archive();
+    expect(r.archived.map((a) => a.title)).toEqual(["旧稿"]);
+    expect(await exists(path.join(r0, "08-lipsync"))).toBe(false);
+    expect(await fs.readFile(path.join(nasDir(old), "08-lipsync/a.mp4"), "utf8")).toBe("lipsync");
+    expect(await fs.readFile(path.join(r0, "01-script/x.md"), "utf8")).toBe("稿");
+    expect(await fs.readdir(path.join(r0, "02-aroll"))).toEqual([]);
+    expect((await archive()).archived).toEqual([]);
+  });
+
   describe("99-cache", () => {
     const putCache = async (c: Content, body: string) => {
       await fs.mkdir(path.join(root(c), "99-cache/remotion"), { recursive: true });
@@ -324,6 +361,26 @@ describe("NAS 归档", () => {
       await fs.symlink(outside, path.join(root(old), "99-cache"));
       await archive();
       expect(await fs.readFile(path.join(outside, "precious.mov"), "utf8")).toBe("keep me");
+    });
+
+    it("没配 NAS 也每天清闲置已发布稿的缓存：素材不动、照样提示未配置", async () => {
+      const old = await published("旧稿", 8, { updatedAt: daysAgo(8) });
+      await putCache(old, "render-bytes");
+      const r = await archive({ archiveRoot: undefined });
+      expect(r.cacheFreed).toEqual([expect.objectContaining({ title: "旧稿", freedBytes: Buffer.byteLength("render-bytes") })]);
+      expect(await exists(path.join(root(old), "99-cache/remotion"))).toBe(false);
+      expect(await exists(path.join(root(old), "02-aroll/raw.mov"))).toBe(true);
+      expect(r.errors).toEqual([ARCHIVE_ROOT_UNSET]);
+    });
+
+    it("24 小时内还有改动的已发布稿不清缓存（发布时间可信与否都不看）", async () => {
+      const busy = await published("刚改过", 8, { updatedAt: daysAgo(0.5) });
+      const unknownTime = await published("没时间", 8, { publishedAt: undefined, updatedAt: daysAgo(3) });
+      await putCache(busy, "keep");
+      await putCache(unknownTime, "drop");
+      const r = await archive({ archiveRoot: undefined });
+      expect(await exists(path.join(root(busy), "99-cache/remotion/render.mp4"))).toBe(true);
+      expect(r.cacheFreed?.map((x) => x.title)).toEqual(["没时间"]);
     });
 
     it("keeps the cache of projects that are not archived (kept 5, too young, busy)", async () => {

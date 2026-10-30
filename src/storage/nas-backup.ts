@@ -14,7 +14,7 @@ import { writeErrorSection } from "./my-content-errors.js";
 import { withFileOwnership } from "./file-ownership.js";
 import { publishedSet } from "./round-publish-time.js";
 import { VIEW_DIR } from "./my-content-view.js";
-import { copyProject, isProjectCache, keptName, walkProject, type ArchivedFile, type CopyImpl, type ProjectLink } from "./nas-archive-copy.js";
+import { copyProject, isRebuildable, keptName, walkProject, type ArchivedFile, type CopyImpl, type ProjectLink } from "./nas-archive-copy.js";
 import { safeNasPath, assertInside, assertTargetOutsideSource } from "./nas-safe-path.js";
 import { archiveTarget, isReachable } from "./nas-archive.js";
 import {
@@ -26,7 +26,7 @@ export interface BackupReport { skipped?: string; backedUp: string[]; pending: n
 interface Ctx { root: string; lib: string; now: Date; copy: CopyImpl; reachable: boolean }
 
 /** 不进 NAS 备份的：备份自己的记录 / 状态文件，和可重建的项目缓存 99-cache（NAS 上已有的旧副本不删） */
-const notBackedUp = (rel: string) => isBackupBookkeeping(rel) || isProjectCache(rel);
+const notBackedUp = (rel: string) => isBackupBookkeeping(rel) || isRebuildable(rel);
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** 已发布且公开时间已到点（定时稿到点才算）；不受「最近 5 条」和认领限制——备份只读不删 */

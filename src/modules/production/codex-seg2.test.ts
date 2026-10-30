@@ -55,18 +55,6 @@ describe("Codex 审 seg2", () => {
     expect(r).not.toMatchObject({ code: "not_allowed" });
   });
 
-  it("[P1 registration.ts:86] 07-delivery/registered 是指向库外的符号链接：登记拒，不往库外写", async () => {
-    const s = await edited();
-    const escape = path.join(env.outside, "escape");
-    await fs.mkdir(escape, { recursive: true });
-    await fs.mkdir(path.join(projectRoot(env, s.c.id), "07-delivery"), { recursive: true });
-    await fs.symlink(escape, path.join(projectRoot(env, s.c.id), "07-delivery/registered"));
-    await decide(s.c.id, "approve_cut", s.cut);
-    const r = await pick(s);
-    expect(String(r.registration_failed)).toContain("符号链接");
-    expect(await fs.readdir(escape)).toEqual([]);
-  });
-
   it("[P1 derive.ts:72] 选封面并登记后又打回其中一张：批准失效，不可发", async () => {
     const s = await registered();
     expect(await registeredPackage((await getContent(s.c.id, env.dir))!, env.dir)).toMatchObject({ ok: true });

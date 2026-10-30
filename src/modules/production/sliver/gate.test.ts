@@ -236,7 +236,9 @@ describe("Codex 审 sliver 回归", () => {
     const sha = (await readProductionDoc(c.id, env.dir))!.facts.find((f) => f.id === cand.fact_id)!.sha256!;
     expect(await decide(c.id, "confirm_candidate", { fact_id: cand.fact_id, sha256: sha })).toMatchObject({ ok: true });
     const fact = (await readProductionDoc(c.id, env.dir))!.facts.find((f) => f.id === cand.fact_id)!;
-    expect(fact.export_mtime_ms).toBeLessThan(fact.mtime_ms!);
+    // 落位用真克隆（cp -c）会保留源文件的修改时间，所以两者可以相等；要点是导出时间被单独记下了
+    expect(fact.export_mtime_ms).toBeDefined();
+    expect(fact.export_mtime_ms).toBeLessThanOrEqual(fact.mtime_ms!);
     expect(await decide(c.id, "approve_cut", { fact_id: cand.fact_id, sha256: sha })).toMatchObject({ ok: false, code: "sliver_blocked", error: expect.stringContaining("导出后时间线又保存过") });
   });
 
