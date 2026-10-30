@@ -20,7 +20,7 @@ export async function roundPublishTime(c: Content, data: string, now: number = D
   if (!(await ontologyApplies(c, data))) return c.publishedAt ?? null;
   const doc = await readProductionDocOrEmpty(c.id, data);
   const plan = await readPublishRecord(c.id, undefined, data, now);
-  const scheduled = new Map((plan.kind === "none" ? [] : plan.platforms).filter((p) => p.scheduledAt).map((p) => [canonPlatform(p.platform), Date.parse(p.scheduledAt!)]));
+  const entries = new Map((plan.kind === "none" ? [] : plan.platforms).filter((p) => p.scheduledAt).map((p) => [canonPlatform(p.platform), p]));
   const times = receiptsOfRound(doc).live.map((s) => {
     const f = s.fact_id ? doc.facts.find((x) => x.id === s.fact_id) : undefined;
     if (f?.published_at) return Date.parse(f.published_at);
@@ -28,7 +28,11 @@ export async function roundPublishTime(c: Content, data: string, now: number = D
     // 确认一条「已定时 / 审核中」的回执 ≠ 已经公开，确认时刻不能当发布时间（不然会在公开前就备份、删本机）
     if (s.by === "founder" && s.pub_state === "public" && s.seen_at) return Date.parse(s.seen_at);
     // 计划里的定时时间只给「本轮、纠正之后、由这份计划认定」的槽用：按平台去套，可能套上上一轮或被纠正掉的那次
-    if (s.source === "plan") return scheduled.get(canonPlatform(s.platform)) ?? NaN;
+    // 还要是同一次提交：计划在两次对账之间换了一条（新提交），旧观察不能借新条目的时间
+    if (s.source === "plan") {
+      const e = entries.get(canonPlatform(s.platform));
+      return e && (e.submittedAt ?? null) === (f?.submitted_at ?? null) ? Date.parse(e.scheduledAt!) : NaN;
+    }
     return NaN;
   }).filter((t) => !Number.isNaN(t));
   return times.length ? new Date(Math.min(...times)).toISOString() : null;
