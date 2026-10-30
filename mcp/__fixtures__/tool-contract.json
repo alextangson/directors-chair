@@ -81,85 +81,6 @@
    }
   },
   {
-   "name": "autocrew_research",
-   "shape": {
-    "properties": {
-     "action": {
-      "enum": [
-       "discover",
-       "session_status"
-      ],
-      "type": "string"
-     },
-     "industry": {
-      "type": "string"
-     },
-     "keyword": {
-      "type": "string"
-     },
-     "mode": {
-      "enum": [
-       "auto",
-       "browser_first",
-       "api_fallback",
-       "free",
-       "manual",
-       "overseas"
-      ],
-      "type": "string"
-     },
-     "platform": {
-      "enum": [
-       "xiaohongshu",
-       "douyin",
-       "wechat_mp",
-       "wechat_video",
-       "bilibili"
-      ],
-      "type": "string"
-     },
-     "save_topics": {
-      "type": "boolean"
-     },
-     "search_results": {
-      "items": {
-       "properties": {
-        "snippet": {
-         "type": "string"
-        },
-        "title": {
-         "type": "string"
-        },
-        "url": {
-         "type": "string"
-        }
-       },
-       "required": [
-        "title",
-        "snippet",
-        "url"
-       ],
-       "type": "object"
-      },
-      "type": "array"
-     },
-     "sources": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "topic_count": {
-      "type": "number"
-     }
-    },
-    "required": [
-     "action"
-    ],
-    "type": "object"
-   }
-  },
-  {
    "name": "autocrew_content",
    "shape": {
     "properties": {
@@ -1877,9 +1798,6 @@
       ],
       "type": "string"
      },
-     "article_path": {
-      "type": "string"
-     },
      "author": {
       "type": "string"
      },
@@ -1916,18 +1834,6 @@
       },
       "type": "array"
      },
-     "image_api_key": {
-      "type": "string"
-     },
-     "image_base_url": {
-      "type": "string"
-     },
-     "image_generator_script": {
-      "type": "string"
-     },
-     "image_model": {
-      "type": "string"
-     },
      "image_size": {
       "type": "string"
      },
@@ -1957,10 +1863,7 @@
      "theme": {
       "type": "string"
      },
-     "value": {},
-     "wechat_publish_script": {
-      "type": "string"
-     }
+     "value": {}
     },
     "required": [
      "action"
@@ -2556,11 +2459,11 @@
      },
      "kit": {
       "properties": {
+       "ai_disclosure": {},
        "caption": {
         "type": "string"
        },
        "chapters": {},
-       "ai_disclosure": {},
        "cover_text": {
         "type": "string"
        },
@@ -3113,85 +3016,6 @@
      },
      "title": {
       "type": "string"
-     }
-    },
-    "required": [
-     "action"
-    ],
-    "type": "object"
-   }
-  },
-  {
-   "name": "autocrew_research",
-   "shape": {
-    "properties": {
-     "action": {
-      "enum": [
-       "discover",
-       "session_status"
-      ],
-      "type": "string"
-     },
-     "industry": {
-      "type": "string"
-     },
-     "keyword": {
-      "type": "string"
-     },
-     "mode": {
-      "enum": [
-       "auto",
-       "browser_first",
-       "api_fallback",
-       "free",
-       "manual",
-       "overseas"
-      ],
-      "type": "string"
-     },
-     "platform": {
-      "enum": [
-       "xiaohongshu",
-       "douyin",
-       "wechat_mp",
-       "wechat_video",
-       "bilibili"
-      ],
-      "type": "string"
-     },
-     "save_topics": {
-      "type": "boolean"
-     },
-     "search_results": {
-      "items": {
-       "properties": {
-        "snippet": {
-         "type": "string"
-        },
-        "title": {
-         "type": "string"
-        },
-        "url": {
-         "type": "string"
-        }
-       },
-       "required": [
-        "title",
-        "snippet",
-        "url"
-       ],
-       "type": "object"
-      },
-      "type": "array"
-     },
-     "sources": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "topic_count": {
-      "type": "number"
      }
     },
     "required": [
@@ -4918,9 +4742,6 @@
       ],
       "type": "string"
      },
-     "article_path": {
-      "type": "string"
-     },
      "author": {
       "type": "string"
      },
@@ -4957,18 +4778,6 @@
       },
       "type": "array"
      },
-     "image_api_key": {
-      "type": "string"
-     },
-     "image_base_url": {
-      "type": "string"
-     },
-     "image_generator_script": {
-      "type": "string"
-     },
-     "image_model": {
-      "type": "string"
-     },
      "image_size": {
       "type": "string"
      },
@@ -4998,10 +4807,7 @@
      "theme": {
       "type": "string"
      },
-     "value": {},
-     "wechat_publish_script": {
-      "type": "string"
-     }
+     "value": {}
     },
     "required": [
      "action"
@@ -5465,11 +5271,11 @@
      },
      "kit": {
       "properties": {
+       "ai_disclosure": {},
        "caption": {
         "type": "string"
        },
        "chapters": {},
-       "ai_disclosure": {},
        "cover_text": {
         "type": "string"
        },

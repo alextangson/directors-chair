@@ -6,6 +6,7 @@
  * - Unified tool registration (eliminates copy-paste in index.ts)
  * - Pre/Post hook integration points
  */
+import { isModelCall } from "../storage/stage-guard.js";
 import {
   type ToolContext,
   type AuditEntry,
@@ -71,9 +72,10 @@ const PUBLISH_GATE_EXEMPT_ACTIONS = new Set(["confirm_published", "check", "prop
 const prePublishGateMiddleware: Middleware = async (ctx, toolName, params, next) => {
   if (toolName !== "autocrew_publish") return next();
   if (PUBLISH_GATE_EXEMPT_ACTIONS.has(params.action as string)) return next();
-  if (params.force === true) return next();
+  // 模型调用的 force 对公众号草稿不算数（只有创始人能越过发布前检查）
+  if (params.force === true && !(params.action === "wechat_mp_draft" && isModelCall(params))) return next();
 
-  // Unmanaged content (wechat_mp_draft via article_path) has no checklist to run
+  // 没有 content_id 的调用由工具自己拒绝（wechat_mp_draft 只推资料库里的稿）
   const contentId = params.content_id as string | undefined;
   if (!contentId) return next();
   // 启用本体的稿出包：旧预检照跑内容审核 / 平台 / 登记出口 / 阶段门；封面、标题、标签、字数交给登记 + 发布计划检查（不重复拦）

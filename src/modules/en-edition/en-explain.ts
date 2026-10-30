@@ -22,7 +22,7 @@ function reasonOf(missing: string[], cutApproved: boolean): string {
 export async function withEnNeeds(content: Pick<Content, "id" | "derivedFrom">, exp: Explanation, dataDir: string): Promise<Explanation> {
   if (content.derivedFrom?.kind !== "en_edition" || exp.phase !== "production" || exp.stage === "已发布") return exp;
   const base = exp.missing.filter((m) => !ZH_COVER.has(m) && !(isFounderAsk(m) && m.includes("封面")));
-  const s = await enPackageState(content.id, dataDir).catch((e: unknown) => ({ code: "unreadable", error: e instanceof Error ? e.message : String(e) }));
+  const s = await enPackageState(content.id, dataDir, { fresh: false }).catch((e: unknown) => ({ code: "unreadable", error: e instanceof Error ? e.message : String(e) }));
   if ("error" in s) return { ...exp, missing: base, alerts: [...exp.alerts, `英文发布包读不出来：${s.error}`], reason: reasonOf(base, false) };
   if (s.cut && s.file.approval && s.approval.ok) {
     return { ...exp, column: "待发布", stage: "待发布", status: STAGE_STATUS["待发布"], missing: [], publishable: true, reason: "英文成片和英文发布包都批过了，可以发" };

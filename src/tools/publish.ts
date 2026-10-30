@@ -36,18 +36,12 @@ export const publishSchema = Type.Object({
     enum: ["wechat_mp_draft", "clipboard", "ego_lite_prepare", "confirm_published", "digest", "check", "propose_preference", "activities", "activity_record"],
     description: "Publish action. 'activities' reads the platform activity ledger (活动台账; optional platform filter) with computed freshness: fresh = only re-check key fields on the detail page, recheck = full re-verification, not_open = submission window not open yet (listed with opens_at; usable only if the scheduled time falls after it), expired = not a candidate; not_for_us rows come last with their reason; without platform it also returns empty_platforms (no entries yet → full check there). 'activity_record' merges one verified activity into the ledger (pass it as `value`; only changed fields needed) and returns the rule-field changes vs the previous version plus how many other scheduled videos use it. 'check' reviews a video publish plan per platform before the one-time founder confirmation (deterministic cover/cut/text rules + TypeSafe semantic warnings); paste its summary_table verbatim and never submit a blocked platform. 'propose_preference' proposes a new cover-ratio or publish rule the founder confirms in the workbench. 'ego_lite_prepare' resolves a browser upload package for 视频号/小红书/抖音/Bilibili without clicking Publish; 'wechat_mp_draft' for WeChat MP; 'clipboard' for copy-paste; 'confirm_published' marks a live result; 'digest' generates/saves a ≤20-char WeChat 摘要.",
   }),
-  article_path: Type.Optional(Type.String({ description: "Absolute or relative path to the markdown article file." })),
   content_id: Type.Optional(Type.String({ description: "AutoCrew content id. If provided, draft.md will be used." })),
   theme: Type.Optional(Type.String({ description: "WeChat formatting theme. Default: newspaper." })),
   dry_run: Type.Optional(Type.Boolean({ description: "Generate assets and show the publish command without pushing." })),
   skip_images: Type.Optional(Type.Boolean({ description: "Skip image generation if images already exist." })),
   author: Type.Optional(Type.String({ description: "Displayed author name for the WeChat publish script." })),
   image_size: Type.Optional(Type.String({ description: "Image ratio for generated images. Default: 16:9." })),
-  image_generator_script: Type.Optional(Type.String({ description: "Override path to the image generation script." })),
-  image_api_key: Type.Optional(Type.String({ description: "Override image generation API key." })),
-  image_base_url: Type.Optional(Type.String({ description: "OpenAI-compatible relay base URL for image generation (must pair with the api key)." })),
-  image_model: Type.Optional(Type.String({ description: "Image model id, e.g. gpt-image-2 for relays. Default: script's built-in (doubao-seedream)." })),
-  wechat_publish_script: Type.Optional(Type.String({ description: "Override path to the WeChat publish.py script." })),
   hashtags: Type.Optional(Type.Array(Type.String(), { description: "Hashtags for the content. Overrides content hashtags if provided." })),
   publish_url: Type.Optional(Type.String({ description: "The URL where content was published (for confirm_published action)." })),
   round: Type.Optional(Type.Integer({ description: "confirm_published：这条稿当前轮次（卡上给的）；对不上 = 已重开，拒。" })),
@@ -298,14 +292,19 @@ export async function executePublish(
 
   const publishImpl = deps?.publishImpl ?? publishWechatMpDraft;
   const contentId = params.content_id as string | undefined;
+  // 只推资料库里的稿：脚本路径、生图端点 / 密钥、代理一律只从设置（publish.json）读，单次调用不能覆盖——
+  // 不然一次工具调用就能把已存的密钥发到任意地址、或让守护进程执行任意脚本（2026-10-30 审查）
+  if (!contentId) return { ok: false, error: "wechat_mp_draft 需要 content_id（只推资料库里的稿）" };
+  // 模型调用不能 force 越过违禁词闸门（force 只给创始人在工作台用）
+  const force = Boolean(params.force) && !isModelCall(params);
   // 派生公众号文章（含桌面端推送按钮）一律走按批过整包推送的那一条路：选定标题、主图 + 裁切、web 图署名都在包里
-  if (await isDerivedArticleId(contentId, dataDir)) return pushApprovedArticle(String(contentId).trim(), dataDir, { publishImpl }, { force: Boolean(params.force), dryRun: Boolean(params.dry_run) });
+  if (await isDerivedArticleId(contentId, dataDir)) return pushApprovedArticle(String(contentId).trim(), dataDir, { publishImpl }, { force, dryRun: Boolean(params.dry_run) });
   let articlePath: string;
   let gateText: string;
   let preparedImages: string[] | undefined;
   let digest: string | undefined;
 
-  if (contentId) {
+  {
     const content = await getContent(contentId, dataDir);
     if (!content) return { ok: false, error: `Content not found: ${contentId}` };
     // 发布时从 store 新鲜落盘 draft.md——工作台编辑只更新 store，旧 draft.md 不得被推送
@@ -318,22 +317,13 @@ export async function executePublish(
     const bodyImages = await preparedArticleImages(contentId, dataDir);
     if (!bodyImages.ok) return bodyImages;
     preparedImages = bodyImages.paths;
-  } else if (params.article_path) {
-    articlePath = path.resolve(params.article_path as string);
-    try {
-      gateText = await fs.readFile(articlePath, "utf-8");
-    } catch {
-      return { ok: false, error: `Article not found: ${articlePath}` };
-    }
-  } else {
-    return { ok: false, error: "article_path or content_id is required" };
   }
 
   // 审核员发布门（同步阻断）：违禁词未清零禁止推送；force 放行但违规照样透出——
   // 最终决定权在人，系统保持透明（禁止静默）
   const scan = await scanText(gateText, "wechat_mp", dataDir);
   const violations = scan.hits.map((h) => h.word);
-  if (violations.length > 0 && !params.force) {
+  if (violations.length > 0 && !force) {
     return {
       ok: false,
       violations,
@@ -369,12 +359,12 @@ export async function executePublish(
     skipImages: Boolean(params.skip_images),
     author: (params.author as string) || cfg.author || undefined,
     imageSize: (params.image_size as string) || "16:9",
-    imageGeneratorScript: (params.image_generator_script as string) || cfg.imageGeneratorScript,
-    imageApiKey: (params.image_api_key as string) || cfg.imageApiKey,
-    imageBaseUrl: (params.image_base_url as string) || cfg.imageBaseUrl,
-    imageModel: (params.image_model as string) || cfg.imageModel,
-    wechatPublishScript: (params.wechat_publish_script as string) || cfg.wechatPublishScript,
-    apiProxy: (params.api_proxy as string) || cfg.apiProxy,
+    imageGeneratorScript: cfg.imageGeneratorScript,
+    imageApiKey: cfg.imageApiKey,
+    imageBaseUrl: cfg.imageBaseUrl,
+    imageModel: cfg.imageModel,
+    wechatPublishScript: cfg.wechatPublishScript,
+    apiProxy: cfg.apiProxy,
     digest,
     preparedImages,
   });

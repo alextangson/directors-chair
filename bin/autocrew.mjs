@@ -155,9 +155,26 @@ async function runCommand(cmd, args, options) {
   });
 }
 
+/**
+ * 前端依赖不在根目录的 npm ci 里：照 README 首次安装、或新 worktree 第一次 start，构建前先装上，
+ * 不然前端 tsc 找不到 react，报一墙 TS7026 起不来（2026-10-30 审查复现）。
+ * 更新进程（AUTOCREW_UPDATER=1）自己装依赖、管备份和回滚，这里不插手。
+ */
+async function ensureFrontendDeps(npm) {
+  if (process.env.AUTOCREW_UPDATER === "1") return;
+  if (fs.existsSync(path.join(ROOT, "frontend", "node_modules", ".bin", "vite"))) return;
+  console.log("正在安装前端依赖（首次约 1 分钟，需要联网）…");
+  const code = await runCommand(npm, ["ci", "--prefer-offline", "--no-audit", "--no-fund"], { cwd: path.join(ROOT, "frontend"), stdio: "inherit" });
+  if (code !== 0) {
+    console.error("前端依赖没装上，上面是 npm 的报错；修好网络或权限后重试 `npm start`。");
+    process.exit(code);
+  }
+}
+
 async function runBuild() {
-  console.log("导演椅正在构建前端…");
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  await ensureFrontendDeps(npm);
+  console.log("导演椅正在构建前端…");
   const code = await runCommand(npm, ["run", "fe:build"], { cwd: ROOT, stdio: "inherit" });
   if (code !== 0) process.exit(code);
 }

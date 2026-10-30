@@ -35,8 +35,8 @@ export async function enCutDurationS(contentId: string, dataDir: string): Promis
   return { durationS: "error" in r || !(r.durationMs > 0) ? null : r.durationMs / 1000, source: "approved_cut" };
 }
 
-export async function enKitBinding(contentId: string, dataDir: string): Promise<{ binding: EnKitBinding; durationS: number | null; durationSource: "approved_cut" | "dub_manifest" } | { no: Refusal }> {
-  const a = await approvedEnState(contentId, dataDir);
+export async function enKitBinding(contentId: string, dataDir: string, opts: { fresh?: boolean } = {}): Promise<{ binding: EnKitBinding; durationS: number | null; durationSource: "approved_cut" | "dub_manifest" } | { no: Refusal }> {
+  const a = await approvedEnState(contentId, dataDir, opts);
   if ("no" in a) return a;
   const cm = await currentEnManifest(contentId, a.s, dataDir);
   if ("no" in cm) return cm;

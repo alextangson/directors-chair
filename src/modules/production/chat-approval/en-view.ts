@@ -25,7 +25,7 @@ export async function enDraftView(item: InboxItem, dataDir: string, openIt: bool
 /** 「英文发布包」那件：审阅页（缩略图、各平台文案、章节、成片）+ 还差什么 / 为什么重新出现 */
 export async function enPackageView(item: InboxItem, dataDir: string, openIt: boolean): Promise<ArticleView | null> {
   if (item.type !== "en_package" || !item.content_id) return null;
-  const s = await enPackageState(item.content_id, dataDir);
+  const s = await enPackageState(item.content_id, dataDir, { fresh: false });
   if ("error" in s) return { lines: [`英文发布包审阅页没生成：${s.error}`], page: { name: "英文发布包", path: "", opened: false, reason: s.error } };
   const file = await writeEnPackagePreview(s, enPackageApprovalText(s), dataDir);
   const page = openIt ? await openPage(file) : { path: file, opened: false, reason: "没打开；要看就 list{item_id} 单看这一件，会用默认浏览器打开它" };

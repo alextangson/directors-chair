@@ -96,7 +96,7 @@ async function enScriptHashOf(id: string, dataDir: string): Promise<string> {
 
 /** 英文发布包现状（批过之后进了制作段才算）；读不出来照样出那件，原因写进 problems */
 async function enPackageOf(id: string, dataDir: string): Promise<ContentInput["enPackage"]> {
-  const s = await enPackageState(id, dataDir).catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
+  const s = await enPackageState(id, dataDir, { fresh: false }).catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
   if ("error" in s) return { hash: `unreadable:${s.error}`, problems: [s.error], approved: false, reopen: s.error, revisions: 0 };
   // 英文平台全取消勾选（spec §9.2）：线停了，不拿一个空包请他重批
   if (!s.platforms.length) return { hash: s.hash, problems: s.problems, approved: false, reopen: null, revisions: s.file.revisions?.length ?? 0 };

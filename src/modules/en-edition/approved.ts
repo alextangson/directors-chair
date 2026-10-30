@@ -9,8 +9,9 @@ import { scriptBody } from "./script.js";
 export type Refusal = { ok: false; code: string; error: string };
 const no = (code: string, error: string): { no: Refusal } => ({ no: { ok: false, code, error } });
 
-export async function approvedEnState(id: string, dataDir: string): Promise<{ s: EnReviewState } | { no: Refusal }> {
-  const s = await enReviewState(id, dataDir, { fresh: true });
+/** fresh=false 只给纯读路径（「等你拍板」、看板）：按文件大小 / 修改时间失效的缓存，不整片重算哈希；批准、导出、发布照旧现算 */
+export async function approvedEnState(id: string, dataDir: string, opts: { fresh?: boolean } = {}): Promise<{ s: EnReviewState } | { no: Refusal }> {
+  const s = await enReviewState(id, dataDir, { fresh: opts.fresh ?? true });
   if ("error" in s) return no(s.code, s.error);
   if (s.stale) return no("derived_stale", `这条英文版过期了：${s.stale}`);
   if (!s.approval.ok) return no("script_not_approved", `英文脚本${s.script.approval ? `的批准已失效：${s.approval.reason}` : "还没批"}：先在「等你拍板」里请创始人批`);

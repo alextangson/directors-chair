@@ -13,7 +13,6 @@ const GUIDE = (name: string) => `完整用法：${TOOL_GUIDE_PREFIX}${name}`;
 
 export const MCP_TOOL_DOCS: Readonly<Record<string, string>> = {
   autocrew_topic: "选题库。create 建选题；list 列选题；radar_pool 冻结雷达候选池给你打分；radar_score 交分（≥70 入库，同一池重交幂等）；delete 删选题（有稿件时拒绝，需审批）。",
-  autocrew_research: "找新选题（不是给写作需求做调研，那个用 autocrew_workflow prepare）。discover 发现并可存选题；session_status 查浏览器登录。",
   autocrew_content: "管理已有稿件。list / get / siblings / allowed_transitions 查询；summary 看进度、请示答复、创始人修改意见 rejections；derivative_status 只读后台派生任务；update 改稿；transition 推进；create_variant 派生平台版；adoption 仅工作台；delete / restore；save 仅手动导入；record 报制作事实；check_slivers 自查抽帧缝；mark_ready 成片可以审了；ask / answer_ask / withdraw_ask 请示创始人（进「等你拍板」，别在聊天里问）。批准只归创始人。新 AI 稿走 workflow → writer。",
   autocrew_workflow: "创作统一入口。prepare 开选题会（可只给 inspiration）；select_angle 须带创始人原话 founder_words；新稿没定角度会回 needs_founder_angle；research 领调研任务；status 查进度；select_angle 选定角度（带 brief_revision）；write / draft 由 next_action 引导；doctor 自检。每步按返回的 next_action 走。",
   autocrew_draft: "抖音口播新稿（write-script 技能）。start 建稿或接手；exemplars 按体裁预览范文；angle 记立意并锁手册、范文、写法版本；opening 先磨开头（选了才收第一版）；save 存一版（可附 test_read 观众试读、feedback 原话）；prepare_final 出出处清单，「定了」只由创始人点；feedback_history 跨稿读意见，propose_promotion 两篇稿都出现过才提升级。写入带 base_version。",

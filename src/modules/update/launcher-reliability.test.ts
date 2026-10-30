@@ -232,6 +232,9 @@ describe("launcher reliability regressions", () => {
     for (const folder of ["bin", "scripts", "desktop", "frontend/dist"]) fs.mkdirSync(path.join(install, folder), { recursive: true });
     fs.copyFileSync(CLI, path.join(install, "bin/autocrew.mjs"));
     fs.symlinkSync(path.join(REPO, "node_modules"), path.join(install, "node_modules"), "dir");
+    // 前端依赖已装好（启动器缺它会先 npm ci，见 launcher-frontend-deps.test）：这条只测构建期间的锁
+    fs.mkdirSync(path.join(install, "frontend/node_modules/.bin"), { recursive: true });
+    fs.writeFileSync(path.join(install, "frontend/node_modules/.bin/vite"), "");
     fs.writeFileSync(path.join(install, "package.json"), JSON.stringify({ type: "module", scripts: { "fe:build": "node build.mjs" } }));
     fs.writeFileSync(path.join(install, "scripts/storage.mts"), "process.exit(0);\n");
     fs.writeFileSync(path.join(install, "build.mjs"), `import fs from "node:fs";

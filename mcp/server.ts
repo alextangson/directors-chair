@@ -1,3 +1,4 @@
+import { sanitizePayload } from "../src/desktop/ipc-guard.js";
 import { contentFile } from "../src/storage/content-project.js";
 /**
  * AutoCrew — MCP 协议处理器（纯 JSON-RPC，无传输层）。
@@ -182,7 +183,8 @@ async function callTool(
   runtime: ReturnType<typeof runtimeFor>,
 ): Promise<Record<string, unknown>> {
   const toolName = String(params?.name ?? "");
-  const rawArgs = params?.arguments && typeof params.arguments === "object" ? params.arguments as Record<string, unknown> : {};
+  // 客户端传来的 `_` 前缀参数（_host、_dataDir、_modelCall…）一律剥掉，只认下面服务端注入的（与 /api/invoke 同一条规矩）
+  const rawArgs = sanitizePayload(params?.arguments && typeof params.arguments === "object" ? params.arguments : {}) as Record<string, unknown>;
   // 宿主归因（§4.1）：客户端自报的 `_host` 一律丢弃，只认认证时定下的主体；
   // 会话归因（P6 §3.8）同一条规矩，`_session` 只认传输层带来的那个。
   const host = access?.host ?? DEFAULT_HOST;

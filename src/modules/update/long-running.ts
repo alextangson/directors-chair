@@ -98,7 +98,6 @@ export const LONG_RUNNING_TOOL_ACTIONS: Readonly<Record<string, "*" | ReadonlySe
   autocrew_cover_review: new Set(["create_candidates", "revise", "platform_ratios", "draft_ratios", "generate_ratios"]),
   autocrew_style: new Set(["distill", "absorb_samples"]),
   // 选题与调研：抓源、外网搜索与读页
-  autocrew_research: new Set(["discover"]),
   autocrew_topic: new Set(["radar_pool"]),
   autocrew_scout: new Set(["read_page"]),
   // 薄路径：verify_quote 抓外网
@@ -126,7 +125,6 @@ export const LONG_RUNNING_TOOL_ACTIONS: Readonly<Record<string, "*" | ReadonlySe
  * 先按它补齐再分类，否则「省略 action」就能绕过长动作登记。
  */
 export const TOOL_DEFAULT_ACTIONS: Readonly<Record<string, string>> = {
-  autocrew_research: "discover",
   autocrew_insights: "prepare",
   autocrew_topic: "create",
   autocrew_review: "full_review",

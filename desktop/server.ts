@@ -45,7 +45,7 @@ import { fileURLToPath } from "node:url";
 import { IPC_CHANNELS, chToMethod } from "../src/desktop/channels.js";
 import { getDataDir } from "../src/storage/local-store.js";
 import { buildIpcHandlers, type IpcHandlerContext } from "../src/desktop/ipc.js";
-import { sanitizePayload } from "../src/desktop/ipc-guard.js";
+import { sanitizePayload, stampCaller } from "../src/desktop/ipc-guard.js";
 import { validatePayload } from "../src/desktop/channel-contracts.js";
 import { activeWorkspaceDataDir } from "../src/desktop/workspace-store.js";
 import { resolveServerToken, resolveSessionSecret } from "../src/desktop/server-token.js";
@@ -468,7 +468,8 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
     try { parsed = JSON.parse(await readBody(req)); } catch { res.writeHead(400).end(JSON.stringify({ ok: false, error: "bad json" })); return; }
     const channel = parsed.channel;
     if (!channel || !CHANNELS.has(channel)) { res.writeHead(404).end(JSON.stringify({ ok: false, error: `unknown channel: ${channel}` })); return; }
-    const clean = sanitizePayload(parsed.payload ?? {}) as Record<string, unknown>;
+    // 令牌 ≠ 创始人：bearer 一律按模型调用算（见 stampCaller）
+    const clean = stampCaller(sanitizePayload(parsed.payload ?? {}) as Record<string, unknown>, authMethod);
     // 契约校验（channel-contracts 是通道形状的单一事实源）:必填缺失在边界拒,不进 handler
     const contractError = validatePayload(channel, clean);
     if (contractError) { res.writeHead(200, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: false, error: contractError })); return; }

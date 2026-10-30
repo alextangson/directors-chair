@@ -7,7 +7,6 @@
  * - CLI commands call ToolRunner.execute() for consistent middleware behavior
  */
 import { topicCreateSchema, executeTopicCreate } from "./src/tools/topic-create.js";
-import { researchSchema, executeResearch } from "./src/tools/research.js";
 import { contentSaveSchema, executeContentSave } from "./src/tools/content-save.js";
 import { statusSchema, executeStatus } from "./src/tools/status.js";
 import { assetSchema, executeAsset } from "./src/tools/asset.js";
@@ -58,16 +57,6 @@ export function registerAutocrewCapabilities(runner: ToolRunner): void {
       "score them on your own quota, then radar_score{pool_id, results} saves ≥70 (max 3 per pool) and returns a receipt — retrying the same results returns the same receipt.",
     parameters: topicCreateSchema,
     execute: executeTopicCreate,
-  });
-
-  runner.register({
-    name: "autocrew_research",
-    label: "AutoCrew Research",
-    description:
-      "Discover NEW topic candidates, not deep research for an existing writing request (use autocrew_workflow prepare for that). Modes: browser-first (Pro), API fallback, free (web search + viral scoring), or manual. " +
-      "Supports action='discover' to generate/save topics and action='session_status' to inspect browser login readiness.",
-    parameters: researchSchema,
-    execute: executeResearch,
   });
 
   runner.register({
@@ -402,7 +391,7 @@ const autocrewPlugin = {
             const result = await runner.execute("autocrew_topic", { action: "list" });
             const topics = (result.topics || []) as any[];
             if (topics.length === 0) {
-              console.log("No topics yet. Use 'autocrew_topic' tool or 'openclaw crew research' to create some.");
+              console.log("No topics yet. Use the 'autocrew_topic' tool to create some.");
               return;
             }
             for (const t of topics) {
@@ -422,35 +411,6 @@ const autocrewPlugin = {
             }
             for (const c of items) {
               console.log(`[${c.id}] ${c.title} — ${c.status} (${c.platform || "general"})`);
-            }
-          });
-
-        crew
-          .command("research")
-          .description("Discover browser-first topic candidates and save them into AutoCrew")
-          .requiredOption("--keyword <keyword>", "Research keyword or angle")
-          .option("--industry <industry>", "Industry or niche")
-          .option("--platform <platform>", "Target platform", "xiaohongshu")
-          .option("--count <count>", "Number of topics", "3")
-          .action(async (options: Record<string, unknown>) => {
-            const result = await runner.execute("autocrew_research", {
-              action: "discover",
-              keyword: options.keyword,
-              industry: options.industry,
-              platform: options.platform,
-              topic_count: Number(options.count || 3),
-            });
-
-            if (!result.ok) {
-              console.error(`Research failed: ${result.error || "unknown error"}`);
-              process.exitCode = 1;
-              return;
-            }
-
-            console.log(`Research complete. Mode: ${result.mode}`);
-            const topics = (result.topics || []) as any[];
-            for (const t of topics) {
-              console.log(`  [${t.id}] ${t.title} — score: ${t.viralScore ?? "?"}`);
             }
           });
 

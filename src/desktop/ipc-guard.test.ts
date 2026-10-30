@@ -89,3 +89,18 @@ describe("createPickedFileRegistry", () => {
     expect(reg.isAllowed("/b/2.csv")).toBe(true);
   });
 });
+
+describe("stampCaller（审查 10-30：令牌 ≠ 创始人）", () => {
+  it("bearer 调用一律带模型标记，创始人专属决定会被拒", async () => {
+    const { stampCaller } = await import("./ipc-guard.js");
+    const { isModelCall } = await import("../storage/stage-guard.js");
+    expect(isModelCall(stampCaller({ content_id: "c1" }, "bearer"))).toBe(true);
+  });
+  it("浏览器会话不打标记；客户端自己塞的 _modelCall:false 先被 sanitize 剥掉，翻不了案", async () => {
+    const { stampCaller, sanitizePayload } = await import("./ipc-guard.js");
+    const { isModelCall } = await import("../storage/stage-guard.js");
+    expect(isModelCall(stampCaller({ content_id: "c1" }, "session"))).toBe(false);
+    const forged = sanitizePayload({ content_id: "c1", _modelCall: false, _host: "x" }) as Record<string, unknown>;
+    expect(isModelCall(stampCaller(forged, "bearer"))).toBe(true);
+  });
+});

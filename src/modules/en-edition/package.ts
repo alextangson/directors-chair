@@ -59,7 +59,7 @@ const acceptedFact = (doc: ProductionDoc, kind: Fact["kind"], sha?: string) =>
   doc.facts.find((f) => f.round === doc.round && f.kind === kind && f.state === "accepted" && f.sha256 === sha && !f.replaced_at);
 
 /** 英文版这条稿自己审过的成片 + 它的字幕（字节现算） */
-async function approvedCut(content: Content, dataDir: string): Promise<EnCut | string> {
+async function approvedCut(content: Content, dataDir: string, fresh: boolean): Promise<EnCut | string> {
   const doc = await readProductionDocOrEmpty(content.id, dataDir);
   // 认稿要现在仍有效：撤批 / 重开（回到待认稿）之后，哪怕各项指纹都没变也不能发
   if (!scriptApprovalFor(doc, content.body ?? "") || content.status === "draft_ready" || content.status === "revision") return "英文脚本的认稿现在不是有效的（被撤了或重开了）：重新认稿后再批发布包";
@@ -67,11 +67,11 @@ async function approvedCut(content: Content, dataDir: string): Promise<EnCut | s
   if (!cut?.sha256) return "英文成片还没在「等你拍板」里审过（创始人要亲耳听）";
   const root = contentRoot(content.id, dataDir);
   const fact = acceptedFact(doc, "cut", cut.sha256);
-  const video = await fileOf(root, fact, "英文成片", true);
+  const video = await fileOf(root, fact, "英文成片", fresh);
   if (typeof video !== "string") return video.error;
   const srtFact = srtFor(doc, cut.sha256);
   if (!srtFact) return "审过的英文成片没有登记字幕：record kind:srt 绑这版成片";
-  const srt = await fileOf(root, srtFact, "英文字幕", true);
+  const srt = await fileOf(root, srtFact, "英文字幕", fresh);
   if (typeof srt !== "string") return srt.error;
   return { path: video, sha256: cut.sha256, durationMs: fact?.duration_ms ?? null, srtPath: srt, srtSha: srtFact.sha256! };
 }
@@ -91,14 +91,16 @@ function kitProblems(content: Content, platforms: string[], binding: { enScriptH
 
 const kitView = (k: VideoKit) => ({ postTitle: k.postTitle, caption: k.caption, tags: k.tags ?? [], chapters: k.chapters ?? [], enScriptHash: k.enScriptHash ?? null, enDubHash: k.enDubHash ?? null, ...(k.aiDisclosure ? { aiDisclosure: k.aiDisclosure } : {}) });
 
-export async function enPackageState(id: string, dataDir: string): Promise<EnPackageState | { code: string; error: string }> {
+/** fresh=false 只给纯读路径（「等你拍板」、对话审批视图、看板状态）；批准、导出、发布照旧现算哈希（默认） */
+export async function enPackageState(id: string, dataDir: string, opts: { fresh?: boolean } = {}): Promise<EnPackageState | { code: string; error: string }> {
+  const fresh = opts.fresh ?? true;
   const content = await getContent(id, dataDir).catch(missingAsNull);
   if (!content || content.derivedFrom?.kind !== "en_edition") return { code: "not_en_edition", error: "这条不是由视频派生的英文版" };
   const [file, thumbnail, profile] = await Promise.all([readEnPackageFile(id, dataDir), readEnThumbnail(id, dataDir), loadProfile(dataDir)]);
   const platforms = enKitPlatforms(profile) as string[];
-  const b = await enKitBinding(id, dataDir);
+  const b = await enKitBinding(id, dataDir, { fresh });
   const binding = "no" in b ? null : b.binding;
-  const cut = await approvedCut(content, dataDir);
+  const cut = await approvedCut(content, dataDir, fresh);
   const thumb = await thumbnailProblem(thumbnail);
   const k = kitProblems(content, platforms, binding);
   const stopped = lineStoppedReason(profile, "en_edition");

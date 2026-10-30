@@ -45,3 +45,11 @@ export function createPickedFileRegistry(): PickedFileRegistry {
     },
   };
 }
+
+/**
+ * /api/invoke 的调用方身份：bearer（server-token，`autocrew call` 和任何读得到它的 agent）一律按模型调用算，
+ * 创始人专属的决定（审片通过、封面定稿、「我发了」、认稿…）只认浏览器会话。payload 须先经 sanitizePayload。
+ */
+export function stampCaller(clean: Record<string, unknown>, method: "session" | "bearer"): Record<string, unknown> {
+  return method === "bearer" ? { ...clean, _modelCall: true } : clean;
+}
