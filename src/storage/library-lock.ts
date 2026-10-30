@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, rmSync, renameSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, rmSync, renameSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { readLibraryLocation, assertLibraryAvailable } from "./storage-roots.js";
@@ -44,15 +44,27 @@ function reclaimStale(dir: string, old: Partial<Owner>, deps?: Parameters<typeof
   const me = machineId();
   if (!me || old.machine !== me || typeof old.pid !== "number" || typeof old.start !== "number" || !old.nonce) return false;
   if (!provablyDead({ pid: old.pid, start: old.start }, deps)) return false;
-  const aside = `${dir}-reclaimed-${old.nonce}`;
-  try { renameSync(dir, aside); } catch { return false; }
+  // 接管互斥：同一时刻只有一个进程在接管。没有它，两个都看见同一把陈旧锁时，后到的会把先到者刚建的新锁挪走（Codex 审）
+  const mutex = `${dir}.reclaiming`;
+  try { mkdirSync(mutex); }
+  catch {
+    // 接管只要几毫秒：互斥目录放了超过 60 秒，是上次接管途中崩溃留下的，清掉；这一轮照样不接管，下次启动再来
+    try { if (Date.now() - statSync(mutex).mtimeMs > 60_000) rmSync(mutex, { recursive: true, force: true }); } catch { /* 别人刚删 */ }
+    return false;
+  }
   try {
-    const moved = JSON.parse(readFileSync(path.join(aside, "owner.json"), "utf8")) as Partial<Owner>;
-    if (moved.nonce !== old.nonce) { renameSync(aside, dir); return false; }
-  } catch { return false; }
-  rmSync(aside, { recursive: true, force: true });
-  console.warn(`[library-lock] 接管了上次异常退出留下的资料库写锁（${old.host} pid ${old.pid}，${old.startedAt}）`);
-  return true;
+    // 拿到互斥后再读一次：锁必须还是刚才判定为陈旧的那一把（别人可能已经接管并建了新锁）
+    let current: Partial<Owner>;
+    try { current = JSON.parse(readFileSync(path.join(dir, "owner.json"), "utf8")); } catch { return false; }
+    if (current.nonce !== old.nonce) return false;
+    const aside = `${dir}-reclaimed-${old.nonce}`;
+    try { renameSync(dir, aside); } catch { return false; }
+    rmSync(aside, { recursive: true, force: true });
+    console.warn(`[library-lock] 接管了上次异常退出留下的资料库写锁（${old.host} pid ${old.pid}，${old.startedAt}）`);
+    return true;
+  } finally {
+    rmSync(mutex, { recursive: true, force: true });
+  }
 }
 
 export const WRITER_LOCK = ".autocrew-writer";

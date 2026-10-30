@@ -43,6 +43,24 @@ describe("资料库写锁的陈旧接管（审查 10-30）", () => {
     expect(() => acquireLibraryLock(root, { kill: alive, start: () => null })).toThrow(/占用/);
   });
 
+  it.runIf(me)("[Codex P1] 判定陈旧之后锁被别人接管了：不挪别人的新锁", () => {
+    staleLock({ machine: me, pid: 999_999, start: 1 });
+    const takeover = () => {
+      // 判定途中另一个进程完成了接管：锁目录还在，但已经是它的新锁
+      fs.writeFileSync(path.join(lockDir(), "owner.json"), JSON.stringify({ host: "h", nonce: "someone-else", pid: 4242, machine: me, start: 9 }));
+      esrch();
+    };
+    expect(() => acquireLibraryLock(root, { kill: takeover })).toThrow(/占用/);
+    expect(JSON.parse(fs.readFileSync(path.join(lockDir(), "owner.json"), "utf8")).nonce).toBe("someone-else");
+  });
+
+  it.runIf(me)("别的进程正在接管（互斥目录在）：这一轮不接管", () => {
+    staleLock({ machine: me, pid: 999_999, start: 1 });
+    fs.mkdirSync(`${lockDir()}.reclaiming`);
+    expect(() => acquireLibraryLock(root, { kill: esrch })).toThrow(/占用/);
+    expect(JSON.parse(fs.readFileSync(path.join(lockDir(), "owner.json"), "utf8")).nonce).toBe("old-nonce");
+  });
+
   it("别的机器的锁：永不接管", () => {
     staleLock({ machine: "another-machine", pid: 999_999, start: 1 });
     expect(() => acquireLibraryLock(root, { kill: esrch })).toThrow(/old-host/);
