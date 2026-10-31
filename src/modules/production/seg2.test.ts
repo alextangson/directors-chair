@@ -92,8 +92,15 @@ describe("批准即登记（§5）", () => {
   it("两个批准齐 → 自动登记：不可变登记记录、登记成片 / 封面副本、video.final、实拍版口播；进待发布", async () => {
     const s = await edited();
     await decide(s.c.id, "approve_cut", s.cut);
+    // 混音检查的中间件：登记之后清掉音频、留报告（2026-10-30 存储审查）
+    const mixDir = path.join(projectRoot(env, s.c.id), "99-cache/audio/mix-v001");
+    await fs.mkdir(mixDir, { recursive: true });
+    await fs.writeFile(path.join(mixDir, "mix.flac"), "audio");
+    await fs.writeFile(path.join(mixDir, "report.json"), "{}");
     const r = await pick(s, "AI 又忘了？");
     expect(r).toMatchObject({ ok: true, stage: "待发布" });
+    expect(await exists(path.join(mixDir, "mix.flac"))).toBe(false);
+    expect(await exists(path.join(mixDir, "report.json"))).toBe(true);
     const doc = (await readProductionDoc(s.c.id, env.dir))!;
     expect(doc.registrations).toMatchObject([{ source: "commit", cut_sha: s.cut.sha256, cover_text: "AI 又忘了？", srt_for_cut: s.cut.sha256 }]);
     const content = (await getContent(s.c.id, env.dir))!;

@@ -29,6 +29,8 @@ import { commitSha, metaKey, STILL_SETTLING } from "./hash-cache.js";
 import { checkTargetDir } from "./record-plan.js";
 import { isWithin } from "../../storage/storage-roots.js";
 import { cloneFile } from "../../storage/clone-file.js";
+import { purgeMixAudio } from "../../storage/mix-audio-purge.js";
+import { recordedRels } from "../../storage/recorded-files.js";
 import { mutateProduction, refreshContent } from "./service.js";
 import { dropBackups, dropTxn, isCommitted, rollbackTxn, saveTxn, type Txn, type TxnOp } from "./txn.js";
 
@@ -155,6 +157,16 @@ async function sideProducts(content: Content, root: string, p: Picked, n: number
   }
 }
 
+/** 成片登记了：这一条的混音检查音频（99-cache/audio）没用了，清掉；登记过的文件不动。失败只报 warning（登记已提交） */
+async function purgeMixAudioAfter(content: Content, root: string, dataDir: string): Promise<string[]> {
+  try {
+    await purgeMixAudio(root, await recordedRels(content, dataDir, root));
+    return [];
+  } catch (e) {
+    return [`登记已完成，但混音中间件（99-cache/audio）没清掉：${e instanceof Error ? e.message : String(e)}`];
+  }
+}
+
 /** 调用方持有文件归属事务（决定、record、对账三处触发）。按本体走的视频稿才会登记 */
 /** `backoff`：只给对账循环——上次核失败、相关文件元数据都没变时不再重算 */
 export async function commitRegistration(contentId: string, dataDir: string, opts: { backoff?: boolean } = {}): Promise<CommitResult> {
@@ -212,6 +224,7 @@ async function landRegistration(content: Content, root: string, picked: Picked, 
   await dropBackups(txn);
   await dropTxn(dataDir, txn.id);
   warnings.push(...(await sideProducts(content, root, picked, n, dataDir)));
+  warnings.push(...(await purgeMixAudioAfter(content, root, dataDir)));
   return { ok: true, registration: reg, ...(warnings.length ? { warnings } : {}) };
 }
 

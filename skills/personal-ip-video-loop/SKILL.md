@@ -109,6 +109,8 @@ After final-cut and paired-cover approval, “归档这条” means **backup onl
 
 中间产物生成时就放进 `99-cache/`，不要事后再挑：配乐混音检查导出和分轨（`99-cache/audio/mix-vNNN/`）、剪辑软件未做响度标准化的原始导出（`99-cache/edit/raw-export/`）、Remotion 工程的 node_modules 与缓存（见 [opus-motion-delegation.md](references/opus-motion-delegation.md)）。正式件——选定的配乐床、音效、成片、字幕、封面、批准记录——仍放原阶段目录。预览片和中间片（看片预览、口型对齐后的无字幕片等）放 `04-edit/review/`，不放 `04-edit` 顶层：AutoCrew 对账会把 `04-edit` 顶层的视频自动收成新的成片版本；文件名带「预览 / preview / 无字幕 / review」的不收。正式成片仍然 `record kind=cut` 登记。
 
+ChatCut `export` 一律带**绝对** `outputPath`，用 `autocrew_content get` 返回的 `project.project_root` 拼，禁止省略或传相对路径（会落到 `~/Movies/ChatCut`，那里攒过 15G 没人管的逐轮导出）。去处：未做响度标准化的原始导出 → `99-cache/edit/raw-export/`；混音检查的两条 FLAC → `99-cache/audio/mix-vNNN/`（见 [sound-design.md](references/sound-design.md)「做完」）；看片预览 → `04-edit/review/`；标准化后的成片 → `07-delivery/`。响度标准化成功、核过时长和音轨后，删掉对应的原始导出。
+
 Record separately: actual paid API/media charges in `spend`, and subscription generation count/observed quota state in `quota_usage`. Subscription covers do not need a cash cap or a fictional zero-dollar API entry; unknown quota is not unlimited quota. Paid H3/API allowances still apply. Retry limits do not reset when an authorization or prompt version changes. Missing authority, paid budget or actual runtime capability is a real exception to the four-review ideal; batch it into the earliest appropriate review instead of bypassing it.
 
 Do not publish, register accounts, change payments or send assets to an unrelated service under a generic production goal. Do not claim monitoring is active without an actual host-created monitor ID.

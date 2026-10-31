@@ -10,7 +10,7 @@
 
 - 本条的配乐表，以及执行记录（每段音乐、每个音效实际放在哪里、增益多少）。
 - 与当前剪辑同步的文字稿（SRT，或 ChatCut 的 transcript）。
-- 导出的混音 wav，以及 `scripts/sound_mix_check.py` 的报告。审核者可以自己重跑。
+- 本轮的 `mix.flac`、`voice.flac` 和 `scripts/sound_mix_check.py` 的报告，都在 `99-cache/audio/mix-vNNN/`。审核者可以自己重跑脚本，但不写任何音频文件。
 - 同一系列之前 2–3 条视频的配乐表（在各项目的 `05-audio/`），用来查套模板。
 - [sound-design.md](sound-design.md) 本身。
 

@@ -6,12 +6,17 @@ ffmpeg ebur128) of each stem, voice minus music. Target 12 LU, every stretch wit
 RMS is used only for sub-second checks (spikes, dead air, loud hits) and SFX.
 
 Usage:
-  sound_mix_check.py MIX.wav --stems DIR            # DIR holds vocals.wav + no_vocals.wav
-  sound_mix_check.py MIX.wav --demucs-python PY     # separate first with demucs (htdemucs)
+  sound_mix_check.py --mix MIX.flac --voice VOICE.flac
+    MIX   = the full mix exported from ChatCut (what the viewer hears)
+    VOICE = the same timeline exported with only the narration track audible
+            (mute music/SFX tracks, never the narration: ducking follows the narration track)
+    Music + SFX = MIX - VOICE, computed in memory. Any format ffmpeg decodes (FLAC preferred, lossless).
+    For a cut that cannot export stems (e.g. JianYing), separate vocals with demucs into a temp dir
+    and pass that file as --voice; delete the temp dir after measuring.
   add --sfx SFX.json to judge each sound effect against the voice around it:
     [{"at_s": 20.5, "file": "/abs/slide.mp3", "gain_db": -31.7, "dur_s": 1.2, "kind": "punch"}, ...]
     kind: "sfx" (default) | "punch" (comedic sting) | "accent" (key-line hit)
-Writes a JSON report to stdout (or --out). Numbers are measurements, not listening.
+Writes a JSON report to stdout (or --out); never writes audio. Numbers are measurements, not listening.
 """
 import argparse
 import json
@@ -19,7 +24,6 @@ import math
 import pathlib
 import subprocess
 import sys
-import wave
 
 import numpy as np
 
@@ -41,13 +45,29 @@ SFX_UNDER_VOICE_DB = {"sfx": 12.0, "punch": 10.0, "accent": 9.0}
 SFX_TOLERANCE_DB = 1.0  # measurement noise; within this of the margin passes
 
 
-def read_mono(path):
-    with wave.open(str(path), "rb") as w:
-        n, ch, sw, sr = w.getnframes(), w.getnchannels(), w.getsampwidth(), w.getframerate()
-        raw = w.readframes(n)
-    dtype = {2: np.int16, 4: np.int32}[sw]
-    x = np.frombuffer(raw, dtype=dtype).astype(np.float64) / float(np.iinfo(dtype).max)
+DECODE_SR = 48000
+
+
+def read_mono(path, sr=DECODE_SR):
+    """Decode any ffmpeg-readable file (FLAC/WAV of any bit depth/float/AAC) to mono float64 at sr.
+
+    Channels are averaged here, not by ffmpeg's -ac 1 (which sums stereo at -3 dB per channel).
+    Both inputs are resampled to the same rate so MIX - VOICE lines up sample for sample.
+    """
+    ch = int(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+                             "stream=channels", "-of", "csv=p=0", str(path)],
+                            check=True, capture_output=True, text=True).stdout.split()[0])
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-ar", str(sr), "-f", "f32le", "-"],
+                         check=True, capture_output=True).stdout
+    x = np.frombuffer(raw, dtype=np.float32).astype(np.float64)
+    x = x[: len(x) // ch * ch]
     return x.reshape(-1, ch).mean(axis=1), sr
+
+
+def music_from_mix(mix, voice):
+    """Music + SFX = full mix minus the narration-only export (same timeline, same gain staging)."""
+    n = min(len(mix), len(voice))
+    return mix[:n] - voice[:n], voice[:n]
 
 
 def window_db(x, sr, win_s, stat="rms"):
@@ -63,6 +83,16 @@ def short_term_lufs(path):
     out = subprocess.run(["ffmpeg", "-nostats", "-v", "error", "-i", str(path), "-af",
                           "ebur128=metadata=1,ametadata=mode=print:key=lavfi.r128.S:file=-",
                           "-f", "null", "-"], check=True, capture_output=True, text=True).stdout
+    vals = [float(line.split("=", 1)[1]) for line in out.splitlines() if line.startswith("lavfi.r128.S=")]
+    return np.array(vals, dtype=np.float64)
+
+
+def short_term_lufs_samples(x, sr):
+    """short_term_lufs for in-memory mono samples (piped to ffmpeg, nothing written to disk)."""
+    out = subprocess.run(["ffmpeg", "-nostats", "-v", "error", "-f", "f32le", "-ar", str(sr), "-ac", "1", "-i", "-",
+                          "-af", "ebur128=metadata=1,ametadata=mode=print:key=lavfi.r128.S:file=-",
+                          "-f", "null", "-"], input=np.asarray(x, dtype=np.float32).tobytes(),
+                         check=True, capture_output=True).stdout.decode()
     vals = [float(line.split("=", 1)[1]) for line in out.splitlines() if line.startswith("lavfi.r128.S=")]
     return np.array(vals, dtype=np.float64)
 
@@ -236,31 +266,24 @@ def sfx_report(sfx, voice, sr):
     return out
 
 
-def separate(mix, py):
-    outdir = mix.parent / "sep"
-    subprocess.run([py, "-m", "demucs", "--two-stems=vocals", "-n", "htdemucs", "-o", str(outdir), str(mix)],
-                   check=True, capture_output=True)
-    return outdir / "htdemucs" / mix.stem
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("mix", type=pathlib.Path)
-    ap.add_argument("--stems", type=pathlib.Path)
-    ap.add_argument("--demucs-python")
+    ap.add_argument("--mix", type=pathlib.Path, required=True, help="full mix export (FLAC preferred)")
+    ap.add_argument("--voice", type=pathlib.Path, required=True, help="narration-only export of the same timeline")
     ap.add_argument("--out", type=pathlib.Path)
     ap.add_argument("--sfx", type=pathlib.Path, help="JSON list of placed sound effects (see top)")
     a = ap.parse_args(argv)
-    stems = a.stems or (separate(a.mix, a.demucs_python) if a.demucs_python else None)
-    if stems is None:
-        sys.exit("need --stems or --demucs-python")
-    voice, sr = read_mono(stems / "vocals.wav")
-    music, _ = read_mono(stems / "no_vocals.wav")
+    for f in (a.mix, a.voice):
+        if not f.is_file():
+            sys.exit(f"not found: {f}")
+    mix, sr = read_mono(a.mix)
+    voice, _ = read_mono(a.voice)
+    music, voice = music_from_mix(mix, voice)
     v5, m5 = window_db(voice, sr, 0.5), window_db(music, sr, 0.5)
     v01, m01 = window_db(voice, sr, 0.1), window_db(music, sr, 0.1)
     sfx = json.loads(a.sfx.read_text()) if a.sfx else None
     ref, hits = loud_hits(window_db(music, sr, 0.05, "peak"), window_db(voice, sr, 0.05, "peak"), 0.05)
-    gaps = gap_windows(short_term_lufs(stems / "vocals.wav"), short_term_lufs(stems / "no_vocals.wav"))
+    gaps = gap_windows(short_term_lufs_samples(voice, sr), short_term_lufs_samples(music, sr))
     gap = voice_music_gap(gaps)
     report = {
         "gap_metric": "short-term LUFS (EBU R128 S, 3 s), voice minus music, median",
@@ -277,7 +300,7 @@ def main(argv=None):
         "loud_hits": hits,
         "sfx_too_loud": sfx_report(sfx, voice, sr) if sfx else None,
         "note": ("Measured, not heard. level_jumps also fire on intended cue entries; judge each against the "
-                 "cue sheet. loud_hits is peak-only and demucs splits short SFX between stems: pass --sfx."),
+                 "cue sheet. loud_hits is peak-only: pass --sfx to judge placed effects."),
     }
     text = json.dumps(report, ensure_ascii=False, indent=1)
     (a.out.write_text(text) if a.out else print(text))

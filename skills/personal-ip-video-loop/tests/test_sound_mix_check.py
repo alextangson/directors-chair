@@ -196,3 +196,53 @@ class FineSilenceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MixVoiceInputTests(unittest.TestCase):
+    """2026-10-30 存储审查：只读两条导出（整混 + 只留人声），任何格式，音乐在内存里算，不落音频。"""
+
+    def _encode(self, path, x, sr=48000, codec=None):
+        import subprocess
+        args = ["ffmpeg", "-v", "error", "-y", "-f", "f32le", "-ar", str(sr), "-ac", "1", "-i", "-"]
+        if codec:
+            args += codec
+        subprocess.run(args + [str(path)], input=np.asarray(x, dtype=np.float32).tobytes(), check=True)
+
+    def test_reads_24bit_flac_and_float_wav(self):
+        import tempfile
+        x = 0.2 * np.sin(2 * np.pi * 440 * np.arange(48000) / 48000)
+        with tempfile.TemporaryDirectory() as d:
+            self._encode(Path(d) / 'a.flac', x, codec=["-sample_fmt", "s32", "-bits_per_raw_sample", "24"])
+            self._encode(Path(d) / 'b.wav', x, codec=["-c:a", "pcm_f32le"])
+            for f in ('a.flac', 'b.wav'):
+                y, sr = m.read_mono(Path(d) / f)
+                self.assertEqual(sr, 48000)
+                self.assertLess(float(np.abs(y[:48000] - x[:len(y)]).max()), 1e-3, f)
+
+    def test_music_is_mix_minus_voice(self):
+        rng = np.random.default_rng(1)
+        voice, music = 0.1 * rng.standard_normal(1000), 0.02 * rng.standard_normal(1000)
+        got, v = m.music_from_mix(voice + music, voice)
+        self.assertTrue(np.allclose(got, music))
+        self.assertEqual(len(v), 1000)
+
+    def test_end_to_end_reports_gap_and_writes_no_audio(self):
+        import tempfile
+        sr, t = 48000, 12
+        rng = np.random.default_rng(0)
+        voice = 0.1 * rng.standard_normal(sr * t)
+        music = voice[::-1] * 10 ** (-12 / 20)
+        with tempfile.TemporaryDirectory() as d:
+            self._encode(Path(d) / 'mix.flac', voice + music)
+            self._encode(Path(d) / 'voice.flac', voice)
+            out = Path(d) / 'report.json'
+            m.main(['--mix', str(Path(d) / 'mix.flac'), '--voice', str(Path(d) / 'voice.flac'), '--out', str(out)])
+            import json
+            report = json.loads(out.read_text())
+            self.assertAlmostEqual(report['voice_minus_music_lu'], 12.0, delta=0.5)
+            self.assertEqual(sorted(p.name for p in Path(d).iterdir()), ['mix.flac', 'report.json', 'voice.flac'])
+
+    def test_missing_input_exits_with_the_path(self):
+        with self.assertRaises(SystemExit) as cm:
+            m.main(['--mix', '/nope/mix.flac', '--voice', '/nope/voice.flac'])
+        self.assertIn('/nope/mix.flac', str(cm.exception))
