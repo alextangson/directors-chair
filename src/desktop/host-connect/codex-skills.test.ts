@@ -30,10 +30,24 @@ describe("linkCodexSkills", () => {
     fs.writeFileSync(path.join(dest("personal-ip-video-loop"), "SKILL.md"), "old");
     const r = linkCodexSkills(codexHome, skillsRoot, NOW);
     const backup = r.backedUp[0].backup;
-    expect(path.dirname(backup).startsWith(path.join(codexHome, "autocrew-skill-backups", "personal-ip-video-loop-20261025-0907-"))).toBe(true);
+    expect(path.dirname(backup).startsWith(path.join(fs.realpathSync(codexHome), "autocrew-skill-backups", "personal-ip-video-loop-20261025-0907-"))).toBe(true);
     expect(fs.readdirSync(path.join(codexHome, "skills")).filter((n) => n.startsWith("personal-ip-video-loop"))).toEqual(["personal-ip-video-loop"]);
     expect(fs.readFileSync(path.join(backup, "SKILL.md"), "utf8")).toBe("old");
     expect(fs.lstatSync(dest("personal-ip-video-loop")).isSymbolicLink()).toBe(true);
+  });
+
+  it("[Codex 审] skills 目录软链到别处：备份放在它真实位置的旁边（同卷），仍不在 skills 里", () => {
+    const real = path.join(root, "other-volume-skills");
+    fs.mkdirSync(real, { recursive: true });
+    fs.rmSync(path.join(codexHome, "skills"), { recursive: true, force: true });
+    fs.mkdirSync(codexHome, { recursive: true });
+    fs.symlinkSync(real, path.join(codexHome, "skills"), "dir");
+    fs.mkdirSync(path.join(real, "cover-generator"));
+    fs.writeFileSync(path.join(real, "cover-generator", "SKILL.md"), "old");
+    const r = linkCodexSkills(codexHome, skillsRoot, NOW);
+    const backup = r.backedUp.find((b) => b.name === "cover-generator")!.backup;
+    expect(backup.startsWith(path.join(fs.realpathSync(root), "autocrew-skill-backups"))).toBe(true);
+    expect(fs.readFileSync(path.join(backup, "SKILL.md"), "utf8")).toBe("old");
   });
 
   it("P2-1 同一分钟两次备份（并发 connect 的情形）：各自唯一，谁也不盖谁", () => {

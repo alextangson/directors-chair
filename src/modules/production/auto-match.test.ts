@@ -80,6 +80,24 @@ describe("对账里自动对上", () => {
     expect((await explainContent((await getContent(r.id, env.dir))!, env.dir)).stage).toBe("已发布");
   });
 
+  it("[Codex 审] 计划里没时间、AI 报过定时（已过 24 小时）：用那次定时当对照时间", async () => {
+    const r = await registeredVideo(env);
+    const { mutateProduction } = await import("./service.js");
+    await mutateProduction(r.id, env.dir, (d) => {
+      d.facts.push({ id: "claim-sched", kind: "publish", round: d.round, state: "accepted", availability: "present", source: "record", at: at(-5), seen_at: at(-5),
+        platform: "douyin", pub_state: "scheduled", published_at: T0, obs_source: "claim", claim_accepted: true, verified: false, evidence: "AI 说定时了" } as never);
+      return { value: null, events: [] };
+    });
+    const c = (await getContent(r.id, env.dir))!;
+    await appendOutcomes([{ contentId: r.id, platform: "douyin", platformTitle: c.title, publishedAt: at(0.5), metricDate: T0.slice(0, 10), platformItemId: "7001",
+      metrics: { views: 10 }, source: "auto", recordedAt: new Date().toISOString(), needsReview: false, reviewReasons: [] }], env.dir);
+    await commitBindings([{ platform: "douyin", itemId: "7001", contentId: r.id, via: "title" }], env.dir);
+    await reconcileContent(r.id, env.dir);
+    const ds = await confirms(r.id);
+    expect(ds).toHaveLength(1);
+    expect(ds[0]).toMatchObject({ source: "auto", auto_match: { expected_at: T0, expected_kind: "plan_slot" } });
+  });
+
   it("[2026-10-30] 定时已过点但回流播放为 0：不自动对上", async () => {
     const r = await registeredVideo(env);
     await scenario(r, at(0.5), T0, { publication: scheduledPast, views: 0 });

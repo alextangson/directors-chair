@@ -34,9 +34,12 @@ function exists(file: string): boolean {
   try { fs.lstatSync(file); return true; } catch { return false; }
 }
 
-/** 备份根：和 skills 目录同在 codexHome 下（同一卷，rename 不跨盘），但不在 Codex 扫技能的范围里 */
+/**
+ * 备份根：放在 skills 目录**真实位置**的旁边——同一卷（skills 软链到别的盘时 rename 也不跨盘，Codex 审），
+ * 又不在 Codex 扫技能的 skills 目录里面
+ */
 export function skillBackupRoot(dest: string): string {
-  return path.join(path.dirname(path.dirname(dest)), "autocrew-skill-backups");
+  return path.join(path.dirname(fs.realpathSync(path.dirname(dest))), "autocrew-skill-backups");
 }
 
 /**

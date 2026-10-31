@@ -111,7 +111,9 @@ export async function planAutoMatches(content: Content, doc: ProductionDoc, data
     const candidates = row ? (await titleCandidates(row.platform, row.platformTitle, dataDir)).map((c) => ({ id: c.content.id, score: c.score })) : [];
     const verdict = judgeAutoMatch({
       platform: s.platform, item_id: itemId, work_published_at: row?.publishedAt ?? null, work_title: row?.platformTitle ?? "",
-      plan_at: plan?.scheduledAt ?? plan?.publishedAt ?? null, content_published_at: content.publishedAt ?? null, candidates, content_id: content.id,
+      // 计划里没写时间、但 AI 报过定时的槽：用那次定时当对照时间（Codex 审）
+      plan_at: plan?.scheduledAt ?? plan?.publishedAt ?? overdueSchedule(doc, s.round, s.platform)?.published_at ?? null,
+      content_published_at: content.publishedAt ?? null, candidates, content_id: content.id,
       recorded_at: row?.recordedAt ?? null, views: typeof row?.metrics?.views === "number" ? row.metrics.views : null,
     });
     const gate = verdict.ok ? slotGate(doc, s.round, s.platform) ?? await gateFromPlan(content.id, s.platform, dataDir) : undefined;
