@@ -3,7 +3,7 @@ import { draftHash as contentDraftHash } from "./draft-hash.js";
 import type { Outline, TechniqueRef, GapRecord, SeriesReview } from "../modules/writing/series-memory.js";
 import { assertManagedPathAvailable } from "./storage-roots.js";
 import { portableProjectRecord } from "./project-record.js";
-import { contentRoot, isLayoutV2, projectFile, contentFile, ensureContentProject, readProjectRegistry, contentIds } from "./content-project.js";
+import { contentRoot, isLayoutV2, projectFile, contentFile, ensureContentProject, readProjectRegistry, contentIds, noteMissingProject } from "./content-project.js";
 import { commitProjectContent, recoverProjectContent } from "./project-commit.js";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -925,7 +925,12 @@ export async function listContents(dataDir?: string): Promise<Content[]> {
 /** 读全量含已删(回收站专用)。日常读侧一律走 listContents(已过滤) */
 async function listContentsRaw(dataDir?: string): Promise<Content[]> {
   if (readProjectRegistry(dataDir)) {
-    const all = await Promise.all((await contentIds(dataDir)).map(id => getContent(id, dataDir)));
+    // 项目文件夹被手动删掉的稿（创始人删已发布的稿，2026-10-31）：展示列表跳过它，不让一条拖垮整张列表；
+    // 别的读错照旧抛。严格读走 listContentsStrict
+    const all = await Promise.all((await contentIds(dataDir)).map(id => getContent(id, dataDir).catch((e: unknown) => {
+      if (e instanceof Error && e.message.startsWith("project_missing:")) { noteMissingProject(id); return null; }
+      throw e;
+    })));
     return all.filter((c): c is Content => c !== null).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   const dir = path.join(getDataDir(dataDir), "contents");

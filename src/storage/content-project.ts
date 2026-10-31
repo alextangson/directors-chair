@@ -118,23 +118,20 @@ export async function contentIds(dataDir?: string): Promise<string[]> {
       await ensureContentProject(reservation.content.id, reservation.content.title, data, reservation.content);
     }
     reg = readProjectRegistry(data)!;
-    // 项目文件夹已经被删掉的稿（创始人手动删已发布的稿，2026-10-31）：不再算在库里。
-    // 不然任何「列全部稿」的地方（管线、收件箱、归属校验、归档）读到它就整个失败
-    const ids = Object.keys(reg.projects);
-    const present = ids.filter((id) => existsSync(safeProjectPath(data, reg!.projects[id].project_relpath)));
-    if (present.length !== ids.length) warnMissingOnce(ids.filter((id) => !present.includes(id)));
-    return present;
+    return Object.keys(reg.projects);
   }
   try { return (await fs.readdir(path.join(resolveDataDir(dataDir), "contents"), { withFileTypes: true })).filter(e => e.isDirectory()).map(e => e.name); }
   catch (e) { if (isMissing(e)) return []; throw e; }
 }
 const warnedMissing = new Set<string>();
-/** 每个被删掉的项目只在服务日志里提一次（看得见，不刷屏） */
-function warnMissingOnce(ids: string[]): void {
-  const fresh = ids.filter((id) => !warnedMissing.has(id));
-  if (!fresh.length) return;
-  fresh.forEach((id) => warnedMissing.add(id));
-  console.warn(`[content-project] ${fresh.length} 条稿的项目文件夹不在了，不再算在库里：${fresh.join("、")}`);
+/**
+ * 展示类列表（管线、收件箱、原片索引、归档）跳过项目文件夹已被删掉的稿时调：每条只在服务日志里提一次。
+ * 严格读（listContentsStrict、启用本体）不走这里，照旧一条读不出就拒绝。
+ */
+export function noteMissingProject(id: string): void {
+  if (warnedMissing.has(id)) return;
+  warnedMissing.add(id);
+  console.warn(`[content-project] 稿 ${id} 的项目文件夹不在了（手动删掉？），列表里不再显示`);
 }
 let creationQueue: Promise<unknown> = Promise.resolve();
 interface CreationReservation { binding: ProjectBinding; content: Content }

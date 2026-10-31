@@ -10,7 +10,7 @@
 import { isImportedHistory } from "../../storage/imported-history.js";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { contentRoot, ONTOLOGY_PROJECT_RULES, PROJECT_RULES } from "../../storage/content-project.js";
+import { contentIds, contentRoot, ONTOLOGY_PROJECT_RULES, PROJECT_RULES, resolveContentProject } from "../../storage/content-project.js";
 import { listContents } from "../../storage/local-store.js";
 import { DERIVE_VERSION, isOntologyEnabled, productionServiceDir, readEnabledMarker, writeEnabledVersion } from "../../storage/production-store.js";
 import { writeJsonAtomicMkdir } from "../../storage/json-atomic.js";
@@ -75,6 +75,13 @@ async function run(dataDir: string, exclude: string[]): Promise<EnableResult> {
   const failures: EnableFailure[] = [];
   const done = (ok: boolean, report: ReconcileReport | null): EnableResult =>
     ({ ok, version: DERIVE_VERSION, report, failures, excluded: exclude, errors: failures.map((f) => `${f.title}（${f.id}）${f.step}失败：${f.error}`) });
+  // 展示列表会跳过项目文件夹不在了的稿；启用要迁移每一条，所以先把它们点名出来，不默默漏掉（Codex 审）
+  for (const id of await contentIds(dataDir)) {
+    if (skip.has(id)) continue;
+    try { resolveContentProject(id, dataDir); }
+    catch (e) { if (e instanceof Error && e.message.startsWith("project_missing:")) failures.push({ id, title: id, step: "对账", error: "项目文件夹不在了：恢复它，或把它放进排除清单再启用" }); }
+  }
+  if (failures.length) return done(false, null);
   await writeJsonAtomicMkdir(txnFile(dataDir), { state: "running", startedAt: new Date().toISOString(), exclude } satisfies EnableTxn);
   const report = await reconcileAll(dataDir, { write: true, exclude: skip });
   failures.push(...report.errors.map((e) => ({ id: e.id, title: e.title, step: "对账" as const, error: e.error })));

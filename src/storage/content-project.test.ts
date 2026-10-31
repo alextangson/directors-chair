@@ -196,3 +196,14 @@ describe("创始人在访达里删掉已发布稿的项目文件夹（2026-10-31
     expect((await getContent(keep.id, data))?.title).toBe("留着的");
   });
 });
+
+describe("[Codex 审] 严格读不跳过被删掉的项目", () => {
+  it("listContentsStrict 遇到项目文件夹不在了照旧拒绝", async () => {
+    const { listContentsStrict } = await import("./local-store.js");
+    await initializeProjectLayout(data, "lib-deadbeef", "default");
+    await saveContent({ ...draft, title: "留着的" }, data);
+    const gone = await saveContent({ ...draft, title: "删掉的" }, data);
+    await fs.rm(resolveContentProject(gone.id, data)!.project_root, { recursive: true, force: true });
+    await expect(listContentsStrict(data)).rejects.toThrow(/project_missing/);
+  });
+});

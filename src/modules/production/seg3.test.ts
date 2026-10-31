@@ -59,6 +59,17 @@ describe("说明跟着启用状态走（§8 同步改口）", () => {
     expect(mcpToolView(tool, true).description).toContain("autocrew_content record");
   });
 
+  it("[2026-10-31 Codex 审] 有稿的项目文件夹不在了：启用不默默漏掉它，点名拒绝；排除它之后照常启用", async () => {
+    const keep = await videoContent(env, TITLE, "approved");
+    const gone = await videoContent(env, "已经删掉的稿", "published");
+    await fs.rm(projectRoot(env, gone.id), { recursive: true, force: true });
+    const r = await enableOntology(env.dir);
+    expect(r.ok).toBe(false);
+    expect(r.failures).toEqual([expect.objectContaining({ id: gone.id, error: expect.stringContaining("项目文件夹不在了") })]);
+    expect((await enableOntology(env.dir, { exclude: [gone.id] })).ok).toBe(true);
+    expect(keep.id).toBeTruthy();
+  });
+
   it("项目 AGENTS.md：启用时没手改过的旧约定换成一行指向", async () => {
     const c = await videoContent(env, TITLE, "approved");
     const file = path.join(projectRoot(env, c.id), "AGENTS.md");
