@@ -23,7 +23,7 @@ const at = (hours: number) => new Date(Date.parse(T0) + hours * H).toISOString()
 
 describe("judgeAutoMatch（纯判定）", () => {
   const base: AutoMatchFacts = { platform: "douyin", item_id: "7001", work_published_at: at(1), work_title: "t", plan_at: T0, content_published_at: null,
-    candidates: [{ id: "c1", score: 1 }], content_id: "c1" };
+    candidates: [{ id: "c1", score: 1 }], content_id: "c1", recorded_at: at(3), views: 10 };
   it("计划时间 ±2 小时内、唯一候选：对上，证据齐", () => {
     expect(judgeAutoMatch(base)).toEqual({ ok: true, evidence: { platform: "douyin", item_id: "7001", work_published_at: at(1), expected_at: T0, expected_kind: "plan_slot", title_score: 1 } });
     expect(judgeAutoMatch({ ...base, work_published_at: at(-2) }).ok).toBe(true);
@@ -33,6 +33,12 @@ describe("judgeAutoMatch（纯判定）", () => {
     expect(judgeAutoMatch({ ...base, candidates: [{ id: "c1", score: 1 }, { id: "c2", score: 0.7 }] })).toMatchObject({ ok: false, reason: "够像的候选稿有 2 篇" });
     expect(judgeAutoMatch({ ...base, candidates: [{ id: "c2", score: 1 }] }).ok).toBe(false);
     expect(judgeAutoMatch({ ...base, work_published_at: null }).ok).toBe(false);
+  });
+  it("[2026-10-30] 回流快照播放为 0、或记录在计划时间之前：不对上（抖音定时帖公开前就出现在后台）", () => {
+    expect(judgeAutoMatch({ ...base, views: 0 })).toMatchObject({ ok: false, reason: "回流快照播放为 0（可能还没公开）" });
+    expect(judgeAutoMatch({ ...base, views: null }).ok).toBe(false);
+    expect(judgeAutoMatch({ ...base, recorded_at: at(-1) })).toMatchObject({ ok: false });
+    expect(judgeAutoMatch({ ...base, recorded_at: null }).ok).toBe(false);
   });
   it("计划没时间：稿件发布后 24 小时内才对上；之前、超过都不对上；两样都没有 = 只有标题", () => {
     const noPlan = { ...base, plan_at: null, content_published_at: T0 };
@@ -48,12 +54,13 @@ beforeEach(async () => { env = await makeEnv({ enabled: true }); });
 afterEach(async () => { await env.cleanup(); });
 
 /** 计划里写了抖音定时但没投出（不是可信观察）；回流按标题绑上了作品 7001 */
-async function scenario(r: Reg, workAt: string, planAt = T0) {
+async function scenario(r: Reg, workAt: string, planAt = T0, opts: { publication?: Record<string, unknown>; views?: number; recordedAt?: string } = {}) {
   await fs.mkdir(path.join(r.root, "06-publish"), { recursive: true });
-  await fs.writeFile(path.join(r.root, "06-publish/publish-plan.json"), JSON.stringify(planOf(r, [planEntry(r, "douyin", ["3:4", "4:3"], { scheduled_at: planAt })])));
+  const entry = opts.publication ? { publication: opts.publication } : { scheduled_at: planAt };
+  await fs.writeFile(path.join(r.root, "06-publish/publish-plan.json"), JSON.stringify(planOf(r, [planEntry(r, "douyin", ["3:4", "4:3"], entry)])));
   const c = (await getContent(r.id, env.dir))!;
   await appendOutcomes([{ contentId: r.id, platform: "douyin", platformTitle: c.title, publishedAt: workAt, metricDate: workAt.slice(0, 10), platformItemId: "7001",
-    metrics: { views: 10 }, source: "auto", recordedAt: new Date().toISOString(), needsReview: false, reviewReasons: [] }], env.dir);
+    metrics: { views: opts.views ?? 10 }, source: "auto", recordedAt: opts.recordedAt ?? new Date().toISOString(), needsReview: false, reviewReasons: [] }], env.dir);
   await commitBindings([{ platform: "douyin", itemId: "7001", contentId: r.id, via: "title" }], env.dir);
   await reconcileContent(r.id, env.dir);
 }
@@ -61,6 +68,30 @@ const confirms = async (id: string) => (await readProductionDoc(id, env.dir))!.d
 const claims = async (id: string) => (await readInbox(env.dir, { contentId: id, withDrafts: true })).items.filter((i) => i.type === "publish_claim");
 
 describe("对账里自动对上", () => {
+  // 真实形状（Codex 写的计划）：publication.status=scheduled + submitted_at，定时已过点 → 可信的「应已公开」槽
+  const scheduledPast = { status: "scheduled", scheduled_at: T0, submitted_at: at(-5) };
+
+  it("[2026-10-30] 计划定时已过点、回流按标题看到作品且有播放：自动对上，转成已发布", async () => {
+    const r = await registeredVideo(env);
+    await scenario(r, at(0.5), T0, { publication: scheduledPast });
+    const ds = await confirms(r.id);
+    expect(ds).toHaveLength(1);
+    expect(ds[0]).toMatchObject({ source: "auto", platform: "douyin", auto_match: { item_id: "7001", expected_kind: "plan_slot" } });
+    expect((await explainContent((await getContent(r.id, env.dir))!, env.dir)).stage).toBe("已发布");
+  });
+
+  it("[2026-10-30] 定时已过点但回流播放为 0：不自动对上", async () => {
+    const r = await registeredVideo(env);
+    await scenario(r, at(0.5), T0, { publication: scheduledPast, views: 0 });
+    expect(await confirms(r.id)).toEqual([]);
+  });
+
+  it("[2026-10-30] 回流快照记录在定时时间之前：不自动对上", async () => {
+    const r = await registeredVideo(env);
+    await scenario(r, at(0.5), T0, { publication: scheduledPast, recordedAt: at(-1) });
+    expect(await confirms(r.id)).toEqual([]);
+  });
+
   it("全对上：记 publish_confirm（来源 auto + 证据），已发布，卡上有「自动对上」，不进收件箱；重复对账不重写", async () => {
     const r = await registeredVideo(env);
     await scenario(r, at(1));

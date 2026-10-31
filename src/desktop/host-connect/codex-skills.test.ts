@@ -25,12 +25,13 @@ describe("linkCodexSkills", () => {
     expect(checkCodexSkills(codexHome, skillsRoot).every((s) => s.ok)).toBe(true);
   });
 
-  it("原来是真目录：挪进唯一的 .bak-时间戳 目录再链，内容不丢", () => {
+  it("原来是真目录：挪进 skills 目录外的唯一备份目录再链，内容不丢，Codex 不会看到第二个同名技能", () => {
     fs.mkdirSync(dest("personal-ip-video-loop"), { recursive: true });
     fs.writeFileSync(path.join(dest("personal-ip-video-loop"), "SKILL.md"), "old");
     const r = linkCodexSkills(codexHome, skillsRoot, NOW);
     const backup = r.backedUp[0].backup;
-    expect(path.dirname(backup).startsWith(`${dest("personal-ip-video-loop")}.bak-20261025-0907-`)).toBe(true);
+    expect(path.dirname(backup).startsWith(path.join(codexHome, "autocrew-skill-backups", "personal-ip-video-loop-20261025-0907-"))).toBe(true);
+    expect(fs.readdirSync(path.join(codexHome, "skills")).filter((n) => n.startsWith("personal-ip-video-loop"))).toEqual(["personal-ip-video-loop"]);
     expect(fs.readFileSync(path.join(backup, "SKILL.md"), "utf8")).toBe("old");
     expect(fs.lstatSync(dest("personal-ip-video-loop")).isSymbolicLink()).toBe(true);
   });

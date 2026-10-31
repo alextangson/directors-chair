@@ -1,7 +1,9 @@
 /**
  * Codex 用的 AutoCrew 技能随 AutoCrew 一起装、一起更新：`autocrew connect codex` 把它们软链进
  * `<codexHome>/skills/<name>`，指向本安装的 `skills/<name>`。
- * 原来就有的真目录或指向别处的链接先挪成 `<name>.bak-<YYYYMMDD-HHMM>`（绝不删）；断开只删指向本安装的链接。
+ * 原来就有的真目录或指向别处的链接先挪进 `<codexHome>/autocrew-skill-backups/<name>-<YYYYMMDD-HHMM>-XXXXXX/<name>`
+ *（绝不删）；断开只删指向本安装的链接。备份不放在 skills 目录里：Codex 会扫 skills 下的每个子目录，
+ * 备份会变成第二个同名技能（2026-10-30 审查：10-25 的旧版剪辑技能就这样和现行版并列了 5 天）。
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -32,12 +34,19 @@ function exists(file: string): boolean {
   try { fs.lstatSync(file); return true; } catch { return false; }
 }
 
+/** 备份根：和 skills 目录同在 codexHome 下（同一卷，rename 不跨盘），但不在 Codex 扫技能的范围里 */
+export function skillBackupRoot(dest: string): string {
+  return path.join(path.dirname(path.dirname(dest)), "autocrew-skill-backups");
+}
+
 /**
- * 备份 = 先用 mkdtemp 建一个唯一的空目录 `<name>.bak-<时间>-XXXXXX`，再把原件挪进去（`<该目录>/<name>`）。
+ * 备份 = 先用 mkdtemp 建一个唯一的空目录 `<备份根>/<name>-<时间>-XXXXXX`，再把原件挪进去（`<该目录>/<name>`）。
  * mkdtemp 是原子的独占创建，两个并发 connect 不会拿到同一个名字；挪进新建的空目录也绝不会盖掉别的东西。
  */
 function backupInto(dest: string, now: Date): string {
-  const holder = fs.mkdtempSync(`${dest}.bak-${stamp(now)}-`);
+  const root = skillBackupRoot(dest);
+  fs.mkdirSync(root, { recursive: true });
+  const holder = fs.mkdtempSync(path.join(root, `${path.basename(dest)}-${stamp(now)}-`));
   const backup = path.join(holder, path.basename(dest));
   fs.renameSync(dest, backup);
   return backup;

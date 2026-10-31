@@ -7,15 +7,19 @@
  * - 同一平台（槽本身就是按平台的）；
  * - 作品发布时间在发布计划里这个平台定时 / 公开时间的 ±2 小时内；计划里没时间就在稿件记录的发布时间之后 24 小时内；
  * - 标题由现有匹配器对上（标题绑定 = 归一化标题精确命中）；
- * - 够像的候选稿只有这一篇。
+ * - 够像的候选稿只有这一篇；
+ * - 判定用的回流快照记录在定时时间之后，且播放量 > 0（抖音定时帖公开前就会出现在后台、播放为 0；2026-10-30 审查）。
  * 任何一条不成立（两篇以上候选、时间窗外、只有标题）照旧留给创始人。
+ *
+ * 2026-10-30：除了「待核」槽，「定时已过点、还没核到公开」的槽（计划的 overdue / AI 报过定时）也走这套——
+ * 以前只看待核，回流早就看到作品、播放上万，收件箱还在问「发出去了吗」。
  */
 import type { Content } from "../../storage/local-store.js";
 import type { AutoMatchEvidence, GateStamp, ProductionDoc } from "../../storage/production-types.js";
 import { readPublishRecord } from "../../storage/publish-record.js";
 import { bindingsForContent } from "../flywheel/platform-items.js";
 import { listLatestOutcomes, titleCandidates } from "../flywheel/outcome-store.js";
-import { canonPlatform, receiptsOfRound, slotGate } from "./receipts.js";
+import { canonPlatform, observationsOf, overdueSchedule, receiptsOfRound, slotGate, type ObsFact, type Slot } from "./receipts.js";
 import { gateFromPlan } from "./publish-check-link.js";
 import { newId } from "../../storage/production-store.js";
 
@@ -35,6 +39,9 @@ export interface AutoMatchFacts {
   /** 够像的候选稿（id + 标题分） */
   candidates: Array<{ id: string; score: number }>;
   content_id: string;
+  /** 判定用的那条回流快照的记录时间和播放量 */
+  recorded_at?: string | null;
+  views?: number | null;
 }
 
 export type AutoMatchVerdict = { ok: true; evidence: AutoMatchEvidence } | { ok: false; reason: string };
@@ -48,6 +55,9 @@ export function judgeAutoMatch(f: AutoMatchFacts): AutoMatchVerdict {
   if (f.candidates.length !== 1) return { ok: false, reason: f.candidates.length ? `够像的候选稿有 ${f.candidates.length} 篇` : "标题对不上任何候选稿" };
   const only = f.candidates[0];
   if (only.id !== f.content_id) return { ok: false, reason: `唯一候选是别的稿 ${only.id}` };
+  if (!(typeof f.views === "number" && f.views > 0)) return { ok: false, reason: "回流快照播放为 0（可能还没公开）" };
+  const recorded = ms(f.recorded_at ?? null), due = ms(f.plan_at);
+  if (!Number.isNaN(due) && (Number.isNaN(recorded) || recorded < due)) return { ok: false, reason: `回流快照记录在计划时间 ${f.plan_at} 之前（可能还没公开）` };
   const base = { platform: f.platform, item_id: f.item_id, work_published_at: f.work_published_at!, title_score: Math.round(only.score * 1000) / 1000 };
   const plan = ms(f.plan_at);
   if (!Number.isNaN(plan)) {
@@ -62,26 +72,50 @@ export function judgeAutoMatch(f: AutoMatchFacts): AutoMatchVerdict {
 
 export interface AutoMatchPlan { fact_id: string; platform: string; verdict: AutoMatchVerdict; gate?: GateStamp }
 
-/** 只读：本轮待核的「数据回流按标题猜」槽逐个判；对上的附带把关结论（和创始人点确认时同一算法） */
+/**
+ * 能自动对上的槽和那条「数据回流按标题猜」的观察：
+ * - 待核槽本身就是这条观察；
+ * - 定时已过点、还没核到公开的槽（计划 overdue 且之后没人确认，或 AI 报过定时已过 24 小时）：取纠正之后槽里最近一条按标题猜的观察。
+ */
+export function autoMatchTargets(doc: ProductionDoc): Array<{ slot: Slot; obs: ObsFact }> {
+  const { live, pending } = receiptsOfRound(doc);
+  const obs = observationsOf(doc);
+  const out: Array<{ slot: Slot; obs: ObsFact }> = [];
+  for (const s of pending) {
+    const o = s.source === "metrics_title" && s.fact_id && s.item_id ? obs.find((x) => x.id === s.fact_id) : undefined;
+    if (o) out.push({ slot: s, obs: o });
+  }
+  for (const s of live) {
+    const awaiting = (s.by === "trusted" && s.pub_state === "overdue") || overdueSchedule(doc, s.round, s.platform) !== null;
+    if (!awaiting) continue;
+    const o = obs.filter((x) => s.history.includes(x.id) && x.source === "metrics_title" && x.item_id).at(-1);
+    if (o) out.push({ slot: s, obs: o });
+  }
+  return out;
+}
+
+/** 只读：能自动对上的槽逐个判；对上的附带把关结论（和创始人点确认时同一算法） */
 export async function planAutoMatches(content: Content, doc: ProductionDoc, dataDir: string): Promise<AutoMatchPlan[]> {
-  const pending = receiptsOfRound(doc).pending.filter((s) => s.source === "metrics_title" && s.fact_id && s.item_id);
-  if (!pending.length) return [];
+  const targets = autoMatchTargets(doc);
+  if (!targets.length) return [];
   const bindings = await bindingsForContent(content.id, dataDir);
   const outcomes = await listLatestOutcomes(dataDir);
   const record = await readPublishRecord(content.id, content.manualPublications, dataDir);
   const out: AutoMatchPlan[] = [];
-  for (const s of pending) {
+  for (const { slot: s, obs } of targets) {
+    const itemId = obs.item_id!;
     // 只认标题绑定（url / manual 本来就是可信观察，不会落到这里）
-    if (!bindings.some((b) => b.via === "title" && canonPlatform(b.key.split(":")[0]) === s.platform && b.key.split(":").slice(1).join(":") === s.item_id)) continue;
-    const row = outcomes.filter((o) => canonPlatform(o.platform) === s.platform && o.platformItemId === s.item_id).find((o) => o.publishedAt) ?? null;
+    if (!bindings.some((b) => b.via === "title" && canonPlatform(b.key.split(":")[0]) === s.platform && b.key.split(":").slice(1).join(":") === itemId)) continue;
+    const row = outcomes.filter((o) => canonPlatform(o.platform) === s.platform && o.platformItemId === itemId).find((o) => o.publishedAt) ?? null;
     const plan = record.kind === "none" ? undefined : record.platforms.find((p) => canonPlatform(p.platform) === s.platform);
     const candidates = row ? (await titleCandidates(row.platform, row.platformTitle, dataDir)).map((c) => ({ id: c.content.id, score: c.score })) : [];
     const verdict = judgeAutoMatch({
-      platform: s.platform, item_id: s.item_id!, work_published_at: row?.publishedAt ?? null, work_title: row?.platformTitle ?? "",
+      platform: s.platform, item_id: itemId, work_published_at: row?.publishedAt ?? null, work_title: row?.platformTitle ?? "",
       plan_at: plan?.scheduledAt ?? plan?.publishedAt ?? null, content_published_at: content.publishedAt ?? null, candidates, content_id: content.id,
+      recorded_at: row?.recordedAt ?? null, views: typeof row?.metrics?.views === "number" ? row.metrics.views : null,
     });
     const gate = verdict.ok ? slotGate(doc, s.round, s.platform) ?? await gateFromPlan(content.id, s.platform, dataDir) : undefined;
-    out.push({ fact_id: s.fact_id!, platform: s.platform, verdict, ...(gate ? { gate } : {}) });
+    out.push({ fact_id: obs.id, platform: s.platform, verdict, ...(gate ? { gate } : {}) });
   }
   return out;
 }
@@ -96,12 +130,13 @@ export function applyAutoMatches(doc: ProductionDoc, plans: AutoMatchPlan[]): Ar
   for (const p of plans) {
     const v = p.verdict;
     if (!v.ok) continue;
-    const slot = receiptsOfRound(doc).pending.find((s) => s.source === "metrics_title" && s.platform === p.platform && s.item_id === v.evidence.item_id && s.fact_id);
-    if (!slot) continue;
+    // 在事务里的 doc 上按（平台, 作品 id）重新认：槽已经被确认 / 纠正 / 顶掉就不写
+    const target = autoMatchTargets(doc).find((t) => t.slot.platform === p.platform && t.obs.item_id === v.evidence.item_id);
+    if (!target) continue;
     const id = newId("dec");
-    doc.decisions.push({ id, type: "publish_confirm", round: doc.round, at: new Date().toISOString(), source: "auto", fact_id: slot.fact_id!, platform: slot.platform,
+    doc.decisions.push({ id, type: "publish_confirm", round: doc.round, at: new Date().toISOString(), source: "auto", fact_id: target.obs.id, platform: target.slot.platform,
       auto_match: v.evidence, ...(p.gate ? { gate: p.gate } : {}) });
-    events.push({ type: "receipt_auto_confirmed", detail: { decision_id: id, fact_id: slot.fact_id, ...v.evidence } });
+    events.push({ type: "receipt_auto_confirmed", detail: { decision_id: id, fact_id: target.obs.id, ...v.evidence } });
   }
   return events;
 }
