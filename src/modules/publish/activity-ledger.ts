@@ -66,7 +66,7 @@ function deadlineVerdict(r: ActivityRecord, now: number): Freshness | null {
 }
 
 /** 投稿期还没开始：start 只有日期按 timezone 的日历日比，有时刻按时刻比；解析不了不算未开始 */
-function notOpenYet(r: ActivityRecord, now: number): boolean {
+export function notOpenYet(r: ActivityRecord, now: number): boolean {
   const start = r.window?.start?.trim();
   if (!start) return false;
   const w = parseWhen(start, tzOf(r));

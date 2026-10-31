@@ -74,7 +74,7 @@ const ORDER: Record<Freshness, number> = { fresh: 0, recheck: 1, not_open: 2, ex
 /** activities 动作：fits_us 按 fresh → recheck → expired，not_for_us 全部垫底（带 reason） */
 export async function listActivities(dataDir: string | undefined, now: number, platform?: string) {
   const ledger = await readLedger(dataDir);
-  const used = await selectedCounts(dataDir);
+  const { counts: used, unreadable } = await selectedCounts(dataDir);
   const rows = Object.values(ledger.activities)
     .filter((r) => !platform || r.platform === platform)
     .map((r) => { const f = freshnessOf(r, now); return { ...r, freshness: f, used_by: used.get(r.key) ?? 0, ...(f === "not_open" ? { opens_at: r.window?.start } : {}) } as ListedActivity; });
@@ -85,6 +85,7 @@ export async function listActivities(dataDir: string | undefined, now: number, p
     activities: rows,
     counts: { fresh: count("fresh"), recheck: count("recheck"), not_open: count("not_open"), expired: count("expired"), not_for_us: rows.filter((r) => r.relevance === "not_for_us").length },
     ...(platform ? {} : emptyPlatforms(ledger)),
+    ...(unreadable.length ? { used_by_incomplete: { unreadable_plans: unreadable, note: "这些发布计划读不了，used_by 可能偏少" } } : {}),
     ...(rows.length ? {} : { note: "台账里还没有这个范围的活动：按完整核查走一遍，核完每条都用 activity_record 入账（适合或不适合都记）" }),
   };
 }
@@ -165,23 +166,33 @@ async function scanPlans(dataDir: string | undefined): Promise<{ plans: Obj[]; u
 }
 
 /** 每个台账 key 被几条视频选中过（不管公开没有）：看得出这个活动最近真用了几条，不另存一份参与记录 */
-async function selectedCounts(dataDir: string | undefined): Promise<Map<string, number>> {
+async function selectedCounts(dataDir: string | undefined): Promise<{ counts: Map<string, number>; unreadable: string[] }> {
   const counts = new Map<string, number>();
-  for (const plan of (await scanPlans(dataDir)).plans) {
+  const { plans, unreadable } = await scanPlans(dataDir);
+  for (const plan of plans) {
     const keys = new Set(parsePlan(plan).entries.flatMap((e) => e.campaigns)
       .filter((c): c is Obj => !!c && typeof c === "object" && (c as Obj).selected === true)
       .map((c) => String(c.ledger_key ?? c.key ?? "")).filter(Boolean));
     for (const k of keys) counts.set(k, (counts.get(k) ?? 0) + 1);
   }
-  return counts;
+  return { counts, unreadable };
 }
 
 type Obj = Record<string, unknown>;
 const PUBLIC = new Set(["published", "public", "live", "removed", "rejected", "cancelled"]);
 
 /** 平台还没公开且有定时：publication.status 是公开/终止就不算；定时取 publication.scheduled_at → 条目 → 计划顶层 */
+const publicationOf = (raw: Obj | undefined): Obj => (raw && typeof raw.publication === "object" && raw.publication ? (raw.publication as Obj) : {});
+
+/** 这个平台实际按哪个时间发：publication.scheduled_at → 条目 → 计划顶层；都没有 = NaN */
+export function effectiveScheduledAt(plan: Obj, platform: string, entryAt: string | null): number {
+  const rawList = Array.isArray(plan.platforms) ? (plan.platforms as Obj[]) : [];
+  const raw = rawList.find((r) => r && typeof r === "object" && normalizePlatform(r.platform) === platform);
+  return Date.parse(String(publicationOf(raw).scheduled_at ?? entryAt ?? plan.scheduled_at ?? ""));
+}
+
 function pendingScheduled(raw: Obj | undefined, entryAt: string | null, plan: Obj, now: number): boolean {
-  const pub = raw && typeof raw.publication === "object" && raw.publication ? (raw.publication as Obj) : {};
+  const pub = publicationOf(raw);
   if (PUBLIC.has(String(pub.status ?? "")) || pub.published_at || pub.public_url) return false;
   const at = Date.parse(String(pub.scheduled_at ?? entryAt ?? plan.scheduled_at ?? ""));
   // 只认定时还在未来的：定时已过、状态还写着 scheduled 的不算
