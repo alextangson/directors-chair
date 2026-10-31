@@ -44,7 +44,8 @@ describe("shared projects", () => {
     expect(() => contentFile(c.id, data, "assets", "x")).toThrow(/symlink/);
     await fs.rm(path.join(b.project_root, "03-broll"));
     await fs.rename(b.project_root, `${b.project_root}-offline`);
-    await expect(ensureContentProject(c.id, c.title, data)).rejects.toThrow(/owner_mismatch/);
+    // 项目文件夹不在了：照旧拒绝（不悄悄另建），错误码直说「不在了」
+    await expect(ensureContentProject(c.id, c.title, data)).rejects.toThrow(/project_missing/);
     await fs.rm(path.join(data, "project-registry.json"));
     expect(() => readProjectRegistry(data)).toThrow(/registry_invalid/);
   });
@@ -180,5 +181,18 @@ describe("manifest migration", () => {
     await applyProjectMigration(plan);
     await fs.writeFile(path.join(data, plan.projects[0].binding.project_relpath, ".autocrew-owner"), "{}");
     await expect(verifyProjectMigration(plan)).rejects.toThrow("migration_owner_mismatch");
+  });
+});
+
+describe("创始人在访达里删掉已发布稿的项目文件夹（2026-10-31）", () => {
+  it("列表照常读出其他稿；按 id 读那条报 project_missing（不是 owner_mismatch）", async () => {
+    await initializeProjectLayout(data, "lib-deadbeef", "default");
+    const keep = await saveContent({ ...draft, title: "留着的" }, data);
+    const gone = await saveContent({ ...draft, title: "删掉的" }, data);
+    await fs.rm(resolveContentProject(gone.id, data)!.project_root, { recursive: true, force: true });
+    const list = await listContents(data);
+    expect(list.map((c) => c.id)).toEqual([keep.id]);
+    expect(() => resolveContentProject(gone.id, data)).toThrow(/project_missing/);
+    expect((await getContent(keep.id, data))?.title).toBe("留着的");
   });
 });

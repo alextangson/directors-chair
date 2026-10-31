@@ -1,7 +1,7 @@
 import { isContentId } from "./entity-id.js";
 /** The only content location resolver. A committed v2 workspace never unions legacy contents. */
 import fs from "node:fs/promises";
-import { readFileSync, lstatSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { resolveDataDir, assertManagedPathAvailable } from "./storage-roots.js";
@@ -61,6 +61,8 @@ export function resolveContentProject(id: string, dataDir?: string): (ProjectBin
       binding.layout_version !== 2 || !Number.isInteger(binding.binding_revision) || binding.binding_revision < 1 ||
       !/^projects\/[^/\\]+$/.test(binding.project_relpath)) throw new Error(`project_binding_invalid: ${id}`);
   const root = safeProjectPath(data, binding.project_relpath);
+  // 先看文件夹还在不在：创始人在访达里删掉一条已发布稿的项目文件夹时，要报「不在了」，不是「归属对不上」
+  if (!existsSync(root)) throw new Error(`project_missing: ${root}`);
   const owner = read<ProjectBinding>(safeProjectPath(root, ".autocrew-owner"));
   if (!owner || Object.keys(binding).some(k => owner[k as keyof ProjectBinding] !== binding[k as keyof ProjectBinding])) {
     throw new Error(`project_owner_mismatch: ${root}`);
@@ -116,10 +118,23 @@ export async function contentIds(dataDir?: string): Promise<string[]> {
       await ensureContentProject(reservation.content.id, reservation.content.title, data, reservation.content);
     }
     reg = readProjectRegistry(data)!;
-    return Object.keys(reg.projects);
+    // 项目文件夹已经被删掉的稿（创始人手动删已发布的稿，2026-10-31）：不再算在库里。
+    // 不然任何「列全部稿」的地方（管线、收件箱、归属校验、归档）读到它就整个失败
+    const ids = Object.keys(reg.projects);
+    const present = ids.filter((id) => existsSync(safeProjectPath(data, reg!.projects[id].project_relpath)));
+    if (present.length !== ids.length) warnMissingOnce(ids.filter((id) => !present.includes(id)));
+    return present;
   }
   try { return (await fs.readdir(path.join(resolveDataDir(dataDir), "contents"), { withFileTypes: true })).filter(e => e.isDirectory()).map(e => e.name); }
   catch (e) { if (isMissing(e)) return []; throw e; }
+}
+const warnedMissing = new Set<string>();
+/** 每个被删掉的项目只在服务日志里提一次（看得见，不刷屏） */
+function warnMissingOnce(ids: string[]): void {
+  const fresh = ids.filter((id) => !warnedMissing.has(id));
+  if (!fresh.length) return;
+  fresh.forEach((id) => warnedMissing.add(id));
+  console.warn(`[content-project] ${fresh.length} 条稿的项目文件夹不在了，不再算在库里：${fresh.join("、")}`);
 }
 let creationQueue: Promise<unknown> = Promise.resolve();
 interface CreationReservation { binding: ProjectBinding; content: Content }
