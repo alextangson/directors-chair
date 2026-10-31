@@ -265,6 +265,19 @@ describe("Codex 审 sliver 回归", () => {
     expect((await checks(s.c.id)).at(-1)).toMatchObject({ status: "slivers" });
   });
 
+  it("[Codex 审] 后补路径上的文件被换成别的字节：不再当原片认", async () => {
+    const original = path.join(env.outside, "素材盘", RAW_NAME);
+    await writeProject([gapTimeline(5)], { assets: { ...ASSETS, A: { ...ASSETS.A, path: original } } });
+    const s = await setup();
+    await record(env, { content_id: s.c.id, kind: "aroll", path: await put(original, "raw"), request_id: "a2" });
+    await runSliverCheck(s.c.id, env.dir);
+    const good = (await checks(s.c.id)).at(-1)!;
+    expect(good).toMatchObject({ status: "slivers" });
+    await fs.writeFile(original, "another video");
+    await runSliverCheck(s.c.id, env.dir);
+    expect((await checks(s.c.id)).at(-1)).toMatchObject({ status: "unchecked" });
+  });
+
   it("[2026-10-31] 同一路径重复报：不重复补", async () => {
     await writeProject([gapTimeline(5)]);
     const s = await setup();

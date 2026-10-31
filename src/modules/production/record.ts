@@ -291,6 +291,9 @@ function upsertFact(doc: ProductionDoc, fact: Fact, existing: Fact | undefined):
   // 导出时间与原始路径随升级带上（Codex 审 sliver P1）：克隆后的 mtime_ms 是落位时间，不能拿来比时间线保存时间
   Object.assign(target, { state: fact.state, path: fact.path, availability: "present", evidence: fact.evidence, size: fact.size, mtime_ms: fact.mtime_ms, ...(fact.txn_id ? { txn_id: fact.txn_id } : {}),
     ...(fact.export_mtime_ms !== undefined ? { export_mtime_ms: target.export_mtime_ms ?? fact.export_mtime_ms } : {}), ...(fact.source_path ? { source_path: target.source_path ?? fact.source_path } : {}) });
+  // 候选升级时这次报的原始路径和原来的不同：补成又一个原始路径，不丢（Codex 审）
+  if (fact.kind === "aroll" && fact.source_path && target.source_path && path.resolve(fact.source_path) !== path.resolve(target.source_path)
+    && !(target.source_paths ?? []).includes(path.resolve(fact.source_path))) target.source_paths = [...(target.source_paths ?? []), path.resolve(fact.source_path)];
   return target;
 }
 
