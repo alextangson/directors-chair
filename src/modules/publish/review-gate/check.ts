@@ -14,6 +14,7 @@ import { contentRoot } from "../../../storage/content-project.js";
 import { registeredPackage } from "../../production/publish-gate.js";
 import { readProductionDocOrEmpty } from "../../../storage/production-store.js";
 import { COVER_CROP_CHECKS, effectiveCoverRatios } from "../../cover/platform-ratios.js";
+import { activityItems } from "./activities.js";
 import { applyOverrides, deterministicChecks, type CoverFact, type RegistrationState } from "./deterministic.js";
 import { makeJevCaller, JEV_MODEL, type JevCaller } from "./jev-client.js";
 import { fingerprint, payloadHash, QUESTION_SET_VERSION, textSha } from "./identity.js";
@@ -173,7 +174,7 @@ const coverRows = (covers: CoverFact[]) => covers.map((c) => ({ usage: c.usage, 
 async function checkPlatform(ctx: Ctx, entry: PlanEntry, named: GatePlatform[]): Promise<Detail> {
   const { det, detItems, payload, instructions, basis, a, b, parts, fp } = await identityFor(ctx, entry, named);
   const sem = await runSemantic({ contentId: ctx.content.id, dataDir: ctx.dataDir, fingerprint: fp, requests: [a.request, b].filter((x): x is NonNullable<typeof x> => x !== null), basis, instructions, caller: ctx.caller });
-  const semItems = [...a.codeItems, ...sem.items, ...skippedInstructions(ctx, entry.platform)];
+  const semItems = [...a.codeItems, ...sem.items, ...skippedInstructions(ctx, entry.platform), ...(await activityItems(entry, ctx.dataDir, Date.now()))];
   if (!instructions.length) semItems.push({ check: "B 执行符合指令", result: "info", basis: "没有可核对的原话 / 规则（不算失败；agent 漏交原话就查不到）" });
   // 同一条问题只列一次（同检查、同规则、同字段、同依据）
   const seen = new Set<string>();

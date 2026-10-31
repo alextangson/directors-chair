@@ -67,15 +67,17 @@ export function mutateLedger<T>(dataDir: string | undefined, mutate: (l: Ledger)
   });
 }
 
-export type ListedActivity = ActivityRecord & { freshness: Freshness; opens_at?: string };
+/** used_by = 发布计划里选中过它的视频条数 */
+export type ListedActivity = ActivityRecord & { freshness: Freshness; used_by: number; opens_at?: string };
 const ORDER: Record<Freshness, number> = { fresh: 0, recheck: 1, not_open: 2, expired: 3 };
 
 /** activities 动作：fits_us 按 fresh → recheck → expired，not_for_us 全部垫底（带 reason） */
 export async function listActivities(dataDir: string | undefined, now: number, platform?: string) {
   const ledger = await readLedger(dataDir);
+  const used = await selectedCounts(dataDir);
   const rows = Object.values(ledger.activities)
     .filter((r) => !platform || r.platform === platform)
-    .map((r) => { const f = freshnessOf(r, now); return { ...r, freshness: f, ...(f === "not_open" ? { opens_at: r.window?.start } : {}) } as ListedActivity; });
+    .map((r) => { const f = freshnessOf(r, now); return { ...r, freshness: f, used_by: used.get(r.key) ?? 0, ...(f === "not_open" ? { opens_at: r.window?.start } : {}) } as ListedActivity; });
   rows.sort((a, b) => (a.relevance === "not_for_us" ? 1 : 0) - (b.relevance === "not_for_us" ? 1 : 0) || ORDER[a.freshness] - ORDER[b.freshness]);
   const count = (f: Freshness) => rows.filter((r) => r.relevance !== "not_for_us" && r.freshness === f).length;
   return {
@@ -141,20 +143,37 @@ export function recordActivity(dataDir: string | undefined, patch: RecordPatch, 
  * 扫 <dataDir>/projects/*\/06-publish/publish-plan.json；平台条目与活动用发布把关同一套 parsePlan 读；读不了的计划计入 unreadable，不吞。
  */
 export async function scheduledUsers(dataDir: string | undefined, key: string, now: number, excludeContentId?: string) {
+  const { plans, unreadable } = await scanPlans(dataDir);
+  const count = plans.filter((plan) => !(excludeContentId && plan.content_id === excludeContentId) && planUsesKey(plan, key, now)).length;
+  return { count, unreadable };
+}
+
+/** 读全部发布计划；读不了的计入 unreadable，不吞 */
+async function scanPlans(dataDir: string | undefined): Promise<{ plans: Obj[]; unreadable: string[] }> {
   const root = path.join(getDataDir(dataDir), "projects");
   let dirs: string[];
-  try { dirs = await fs.readdir(root); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return { count: 0, unreadable: [] as string[] }; throw e; }
-  let count = 0; const unreadable: string[] = [];
+  try { dirs = await fs.readdir(root); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return { plans: [], unreadable: [] }; throw e; }
+  const plans: Obj[] = []; const unreadable: string[] = [];
   for (const d of dirs) {
     const file = path.join(root, d, "06-publish", "publish-plan.json");
-    let plan: Record<string, unknown>;
+    let plan: unknown;
     try { plan = JSON.parse(await fs.readFile(file, "utf8")); }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT" && (e as NodeJS.ErrnoException).code !== "ENOTDIR") unreadable.push(file); continue; }
-    if (!plan || typeof plan !== "object") { unreadable.push(file); continue; }
-    if (excludeContentId && plan.content_id === excludeContentId) continue;
-    if (planUsesKey(plan, key, now)) count++;
+    if (plan && typeof plan === "object") plans.push(plan as Obj); else unreadable.push(file);
   }
-  return { count, unreadable };
+  return { plans, unreadable };
+}
+
+/** 每个台账 key 被几条视频选中过（不管公开没有）：看得出这个活动最近真用了几条，不另存一份参与记录 */
+async function selectedCounts(dataDir: string | undefined): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  for (const plan of (await scanPlans(dataDir)).plans) {
+    const keys = new Set(parsePlan(plan).entries.flatMap((e) => e.campaigns)
+      .filter((c): c is Obj => !!c && typeof c === "object" && (c as Obj).selected === true)
+      .map((c) => String(c.ledger_key ?? c.key ?? "")).filter(Boolean));
+    for (const k of keys) counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  return counts;
 }
 
 type Obj = Record<string, unknown>;

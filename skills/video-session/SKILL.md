@@ -129,7 +129,7 @@ Codex 交来封面或成片（它说做完了、或你看到这条稿有了新�
    - 你先独立逐维自评（9 维 0–5，rubric 见 `calib_status`），**再** `autocrew_insights {action:"calib_blind", calib:{content_id, self_scores, seen_data?}}`；盲评通道只看稿子和评分表。回 `blind_failed` 照实告诉创始人，重试或经他同意 `skip_blind:true`（会被晨报持续提醒）。
    - `needs_decision` 里每一维摆给创始人选「信盲评 / 信主通道 / 自己给分」，然后 `calib_predict`（已发布的再带一次 `seen_data:false`；落盘时满 3 天会自动记成 reconstructed）交 bucket + 5 档概率（合计 100，冷启动更平）+ 中枢 + 一句理由、推理因素、每档反事实、关键校准假设。预测落盘后不可改，要重做只能 `redo_of`。
 3. `autocrew_pre_publish {action:"check", content_id, claim_token}`：`kit_stale` 说明稿改过，重做 kit；其余失败项按 `fix` 处理。
-4. 发布分两趟派 Codex（gpt-5.6-terra），都按 `publish-content` 技能：第一趟准备到授权前——账号、排期、活动，跑 `autocrew_publish check`，交回 `summary_table`、各平台 `check_id` 和活动计划，不上传不点击。你把这些原样给创始人；他说发，第二趟带上 content_id、`check_id` 和他同意发布的原话（引号原样）去执行（`ego_lite_prepare` 上传填表、点一次、存回执、`record kind:publish` 登记）。没有他的原话不派第二趟。后台 Codex 不能和创始人对话：原话没覆盖的事（check 过期、缺批准、账号对不上）它会停在最终点击前交回；你转给创始人，拿到新的原话再重派，不替他点头。
+4. 发布分两趟派 Codex（gpt-5.6-terra），都按 `publish-content` 技能：第一趟准备到授权前——账号、排期、活动（台账里在期对口的默认参加，写清加哪些话题 / @账号），跑 `autocrew_publish check`，交回 `summary_table`、各平台 `check_id` 和活动计划，不上传不点击；check 有拦截项就把全部拦截项一次列齐交回，不要等创始人说发之后才一个个暴露。你把这些原样给创始人；他说发（这也批了包里列的活动），第二趟带上 content_id、`check_id`、批过的活动计划和他同意发布的原话（引号原样）去执行（`ego_lite_prepare` 上传填表、点一次、存回执、`record kind:publish` 登记）。没有他的原话不派第二趟。后台 Codex 不能和创始人对话：原话没覆盖的事（check 过期、缺批准、账号对不上）它会停在最终点击前交回；你转给创始人，拿到新的原话再重派，不替他点头。
 
 ## 7. 发布后复盘（T+3）
 
