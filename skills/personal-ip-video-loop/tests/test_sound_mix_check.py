@@ -223,8 +223,28 @@ class MixVoiceInputTests(unittest.TestCase):
         rng = np.random.default_rng(1)
         voice, music = 0.1 * rng.standard_normal(1000), 0.02 * rng.standard_normal(1000)
         got, v = m.music_from_mix(voice + music, voice)
-        self.assertTrue(np.allclose(got, music))
+        self.assertTrue(np.allclose(got[:, 0], music))
         self.assertEqual(len(v), 1000)
+
+    def test_stereo_music_is_subtracted_per_channel_not_cancelled(self):
+        # [Codex P2] 左右反相的音乐：先平均再减会把它抵消成 0
+        rng = np.random.default_rng(2)
+        voice = np.repeat(0.1 * rng.standard_normal((48000, 1)), 2, axis=1)
+        side = 0.02 * rng.standard_normal(48000)
+        music = np.stack([side, -side], axis=1)
+        got, _ = m.music_from_mix(voice + music, voice)
+        self.assertTrue(np.allclose(got, music))
+        self.assertGreater(float(m.window_db(got, 48000, 0.5).mean()), -40)
+
+    def test_mismatched_lengths_are_refused(self):
+        # [Codex P2] 不截断后报「通过」：两条导出要同一时间范围
+        with self.assertRaises(ValueError) as cm:
+            m.music_from_mix(np.zeros(48000 * 10), np.zeros(48000 * 9), 48000)
+        self.assertIn('same timeline range', str(cm.exception))
+
+    def test_mismatched_channel_layout_is_refused(self):
+        with self.assertRaises(ValueError):
+            m.music_from_mix(np.zeros((1000, 2)), np.zeros((1000, 3)))
 
     def test_end_to_end_reports_gap_and_writes_no_audio(self):
         import tempfile

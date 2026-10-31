@@ -10,9 +10,13 @@ export const MIX_AUDIO_DIR = "99-cache/audio";
 const AUDIO = /\.(flac|wav|m4a|mp3|aiff?|caf)$/i;
 
 export async function purgeMixAudio(projectRoot: string, recorded: Set<string>): Promise<number> {
-  const top = path.join(projectRoot, MIX_AUDIO_DIR);
-  const st = await fs.lstat(top).catch(() => null);
-  if (!st?.isDirectory()) return 0; // 不存在，或缓存根是指到别处的链接：不跟进去
+  // 路径上每一级（99-cache、99-cache/audio）都要是真目录：任何一级是链接（指到共享或项目外的目录）就不碰（Codex 审）
+  let rel = "";
+  for (const seg of MIX_AUDIO_DIR.split("/")) {
+    rel = rel ? `${rel}/${seg}` : seg;
+    const st = await fs.lstat(path.join(projectRoot, rel)).catch(() => null);
+    if (!st?.isDirectory()) return 0;
+  }
   return purgeDir(projectRoot, MIX_AUDIO_DIR, recorded);
 }
 

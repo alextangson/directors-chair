@@ -10,9 +10,10 @@ Usage:
     MIX   = the full mix exported from ChatCut (what the viewer hears)
     VOICE = the same timeline exported with only the narration track audible
             (mute music/SFX tracks, never the narration: ducking follows the narration track)
-    Music + SFX = MIX - VOICE, computed in memory. Any format ffmpeg decodes (FLAC preferred, lossless).
-    For a cut that cannot export stems (e.g. JianYing), separate vocals with demucs into a temp dir
-    and pass that file as --voice; delete the temp dir after measuring.
+    Music + SFX = MIX - VOICE, per channel, computed in memory. Any format ffmpeg decodes (FLAC preferred,
+    lossless). Both exports must cover the same timeline range (same start, same length): the script
+    refuses mismatched lengths instead of measuring a partial mix. No separated-stem fallback: a demucs
+    vocal estimate is not the narration, so MIX - estimate is not the music.
   add --sfx SFX.json to judge each sound effect against the voice around it:
     [{"at_s": 20.5, "file": "/abs/slide.mp3", "gain_db": -31.7, "dur_s": 1.2, "kind": "punch"}, ...]
     kind: "sfx" (default) | "punch" (comedic sting) | "accent" (key-line hit)
@@ -48,11 +49,11 @@ SFX_TOLERANCE_DB = 1.0  # measurement noise; within this of the margin passes
 DECODE_SR = 48000
 
 
-def read_mono(path, sr=DECODE_SR):
-    """Decode any ffmpeg-readable file (FLAC/WAV of any bit depth/float/AAC) to mono float64 at sr.
+def read_audio(path, sr=DECODE_SR):
+    """Decode any ffmpeg-readable file (FLAC/WAV of any bit depth/float/AAC) to float64 (frames, channels) at sr.
 
-    Channels are averaged here, not by ffmpeg's -ac 1 (which sums stereo at -3 dB per channel).
-    Both inputs are resampled to the same rate so MIX - VOICE lines up sample for sample.
+    Channels are kept: stereo music with different left/right content must be subtracted and measured
+    per channel, or averaging can cancel it. Both inputs are resampled to the same rate.
     """
     ch = int(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
                              "stream=channels", "-of", "csv=p=0", str(path)],
@@ -61,19 +62,42 @@ def read_mono(path, sr=DECODE_SR):
                          check=True, capture_output=True).stdout
     x = np.frombuffer(raw, dtype=np.float32).astype(np.float64)
     x = x[: len(x) // ch * ch]
-    return x.reshape(-1, ch).mean(axis=1), sr
+    return x.reshape(-1, ch), sr
 
 
-def music_from_mix(mix, voice):
-    """Music + SFX = full mix minus the narration-only export (same timeline, same gain staging)."""
+def read_mono(path, sr=DECODE_SR):
+    """Mono (channel-averaged) view, for callers that only need one level per window."""
+    x, sr = read_audio(path, sr)
+    return x.mean(axis=1), sr
+
+
+MAX_LENGTH_MISMATCH_S = 0.05
+
+
+def music_from_mix(mix, voice, sr=DECODE_SR):
+    """Music + SFX = full mix minus the narration-only export, per channel (same timeline, same gain staging).
+
+    Refuses exports that do not cover the same range (more than 50 ms apart): truncating would silently
+    skip the unmatched tail and could pass a mix that was never fully measured.
+    """
+    mix = mix[:, None] if mix.ndim == 1 else mix
+    voice = voice[:, None] if voice.ndim == 1 else voice
+    if abs(len(mix) - len(voice)) > MAX_LENGTH_MISMATCH_S * sr:
+        raise ValueError(f"mix and voice lengths differ ({len(mix) / sr:.2f}s vs {len(voice) / sr:.2f}s): "
+                         "export both from the same timeline range")
+    if voice.shape[1] != mix.shape[1]:
+        if voice.shape[1] != 1:
+            raise ValueError(f"mix has {mix.shape[1]} channels, voice has {voice.shape[1]}: export both with the same layout")
+        voice = np.repeat(voice, mix.shape[1], axis=1)
     n = min(len(mix), len(voice))
     return mix[:n] - voice[:n], voice[:n]
 
 
 def window_db(x, sr, win_s, stat="rms"):
+    """Level per window; multichannel input is power-averaged (rms) or max-abs (peak) across channels."""
     hop = max(1, int(sr * win_s))
     n = len(x) // hop
-    blocks = x[: n * hop].reshape(n, hop)
+    blocks = x[: n * hop].reshape(n, -1)
     v = np.sqrt((blocks ** 2).mean(axis=1)) if stat == "rms" else np.abs(blocks).max(axis=1)
     return 20 * np.log10(v + 1e-12)
 
@@ -88,8 +112,10 @@ def short_term_lufs(path):
 
 
 def short_term_lufs_samples(x, sr):
-    """short_term_lufs for in-memory mono samples (piped to ffmpeg, nothing written to disk)."""
-    out = subprocess.run(["ffmpeg", "-nostats", "-v", "error", "-f", "f32le", "-ar", str(sr), "-ac", "1", "-i", "-",
+    """short_term_lufs for in-memory samples, mono or (frames, channels) at their own channel count
+    (EBU R128 sums channel loudness; nothing is written to disk)."""
+    ch = 1 if np.ndim(x) == 1 else np.shape(x)[1]
+    out = subprocess.run(["ffmpeg", "-nostats", "-v", "error", "-f", "f32le", "-ar", str(sr), "-ac", str(ch), "-i", "-",
                           "-af", "ebur128=metadata=1,ametadata=mode=print:key=lavfi.r128.S:file=-",
                           "-f", "null", "-"], input=np.asarray(x, dtype=np.float32).tobytes(),
                          check=True, capture_output=True).stdout.decode()
@@ -276,9 +302,12 @@ def main(argv=None):
     for f in (a.mix, a.voice):
         if not f.is_file():
             sys.exit(f"not found: {f}")
-    mix, sr = read_mono(a.mix)
-    voice, _ = read_mono(a.voice)
-    music, voice = music_from_mix(mix, voice)
+    mix, sr = read_audio(a.mix)
+    voice, _ = read_audio(a.voice)
+    try:
+        music, voice = music_from_mix(mix, voice, sr)
+    except ValueError as e:
+        sys.exit(str(e))
     v5, m5 = window_db(voice, sr, 0.5), window_db(music, sr, 0.5)
     v01, m01 = window_db(voice, sr, 0.1), window_db(music, sr, 0.1)
     sfx = json.loads(a.sfx.read_text()) if a.sfx else None
