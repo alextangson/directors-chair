@@ -312,3 +312,26 @@ describe("record 与阶段：只报事实，不带批准", () => {
     expect((await getContent(c.id, env.dir))!.status).toBe("draft_ready");
   });
 });
+
+describe("重复登记原片的来源路径", () => {
+  it("登记与项目内副本字节一致的原片时，补充原始路径并保留文件", async () => {
+    const c = await videoContent(env, TITLE);
+    const copy = await put(path.join(projectRoot(env, c.id), "02-aroll/copy.mov"), "same-video");
+    const original = await put(path.join(env.inbox, "AI又忘了怎么办-source.mov"), "same-video");
+    const first = await record(env, { content_id: c.id, kind: "aroll", path: copy, request_id: "origin-first" });
+    const second = await record(env, { content_id: c.id, kind: "aroll", path: original, request_id: "origin-second" });
+    expect(second).toMatchObject({ ok: true, fact_id: first.fact_id });
+    const doc = await readProductionDoc(c.id, env.dir);
+    expect(doc?.facts.find((f) => f.id === first.fact_id)?.source_path).toBe(original);
+    expect(await exists(original)).toBe(true);
+  });
+  it("已有不同的原始路径时不覆盖", async () => {
+    const c = await videoContent(env, TITLE);
+    const original = await put(path.join(env.inbox, "AI又忘了怎么办-source.mov"), "same-video");
+    const first = await record(env, { content_id: c.id, kind: "aroll", path: original, request_id: "origin-first-2" });
+    const another = await put(path.join(env.outside, "other.mov"), "same-video");
+    await record(env, { content_id: c.id, kind: "aroll", path: another, request_id: "origin-second-2" });
+    const doc = await readProductionDoc(c.id, env.dir);
+    expect(doc?.facts.find((f) => f.id === first.fact_id)?.source_path).toBe(original);
+  });
+});
