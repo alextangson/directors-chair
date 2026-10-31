@@ -8,7 +8,7 @@ import { getDataDir } from "../../storage/local-store.js";
 import { writeJsonAtomicMkdir } from "../../storage/json-atomic.js";
 import { assertManagedPathAvailable } from "../../storage/storage-roots.js";
 import { withFileLock } from "./activity-ledger-lock.js";
-import { parsePlan } from "./review-gate/plan.js";
+import { maybeJson, parsePlan } from "./review-gate/plan.js";
 import { normalizePlatform } from "./review-gate/platforms.js";
 import {
   ACTIVITY_PLATFORMS, freshnessOf, normalizeName, recordShapeProblem, ruleDiff,
@@ -145,22 +145,22 @@ export function recordActivity(dataDir: string | undefined, patch: RecordPatch, 
  */
 export async function scheduledUsers(dataDir: string | undefined, key: string, now: number, excludeContentId?: string) {
   const { plans, unreadable } = await scanPlans(dataDir);
-  const count = plans.filter((plan) => !(excludeContentId && plan.content_id === excludeContentId) && planUsesKey(plan, key, now)).length;
+  const count = plans.map((x) => x.plan).filter((plan) => !(excludeContentId && plan.content_id === excludeContentId) && planUsesKey(plan, key, now)).length;
   return { count, unreadable };
 }
 
 /** 读全部发布计划；读不了的计入 unreadable，不吞 */
-async function scanPlans(dataDir: string | undefined): Promise<{ plans: Obj[]; unreadable: string[] }> {
+async function scanPlans(dataDir: string | undefined): Promise<{ plans: Array<{ file: string; plan: Obj }>; unreadable: string[] }> {
   const root = path.join(getDataDir(dataDir), "projects");
   let dirs: string[];
   try { dirs = await fs.readdir(root); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return { plans: [], unreadable: [] }; throw e; }
-  const plans: Obj[] = []; const unreadable: string[] = [];
+  const plans: Array<{ file: string; plan: Obj }> = []; const unreadable: string[] = [];
   for (const d of dirs) {
     const file = path.join(root, d, "06-publish", "publish-plan.json");
     let plan: unknown;
     try { plan = JSON.parse(await fs.readFile(file, "utf8")); }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT" && (e as NodeJS.ErrnoException).code !== "ENOTDIR") unreadable.push(file); continue; }
-    if (plan && typeof plan === "object") plans.push(plan as Obj); else unreadable.push(file);
+    if (plan && typeof plan === "object") plans.push({ file, plan: plan as Obj }); else unreadable.push(file);
   }
   return { plans, unreadable };
 }
@@ -169,8 +169,11 @@ async function scanPlans(dataDir: string | undefined): Promise<{ plans: Obj[]; u
 async function selectedCounts(dataDir: string | undefined): Promise<{ counts: Map<string, number>; unreadable: string[] }> {
   const counts = new Map<string, number>();
   const { plans, unreadable } = await scanPlans(dataDir);
-  for (const plan of plans) {
-    const keys = new Set(parsePlan(plan).entries.flatMap((e) => e.campaigns)
+  for (const { file, plan } of plans) {
+    const parsed = parsePlan(plan);
+    // 平台或活动字段形状坏了会被当成空的：这份计划算没读全，不让 used_by 冒充完整
+    if (parsed.problems.some((p) => p.field === "platforms" || p.field === "campaigns")) unreadable.push(file);
+    const keys = new Set(parsed.entries.flatMap((e) => e.campaigns)
       .filter((c): c is Obj => !!c && typeof c === "object" && (c as Obj).selected === true)
       .map((c) => String(c.ledger_key ?? c.key ?? "")).filter(Boolean));
     for (const k of keys) counts.set(k, (counts.get(k) ?? 0) + 1);
@@ -186,7 +189,8 @@ const publicationOf = (raw: Obj | undefined): Obj => (raw && typeof raw.publicat
 
 /** 这个平台实际按哪个时间发：publication.scheduled_at → 条目 → 计划顶层；都没有 = NaN */
 export function effectiveScheduledAt(plan: Obj, platform: string, entryAt: string | null): number {
-  const rawList = Array.isArray(plan.platforms) ? (plan.platforms as Obj[]) : [];
+  const list = maybeJson(plan.platforms);
+  const rawList = Array.isArray(list) ? (list as Obj[]) : [];
   const raw = rawList.find((r) => r && typeof r === "object" && normalizePlatform(r.platform) === platform);
   return Date.parse(String(publicationOf(raw).scheduled_at ?? entryAt ?? plan.scheduled_at ?? ""));
 }

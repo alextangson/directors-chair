@@ -78,6 +78,7 @@ describe("activityItems", () => {
     const pub = effectiveScheduledAt({ platforms: [{ platform: "douyin", publication: { scheduled_at: "2026-12-05T18:00:00+08:00" } }] }, "douyin", null);
     expect(pub).toBe(top);
     expect(Number.isNaN(effectiveScheduledAt({ platforms: [] }, "douyin", null))).toBe(true);
+    expect(effectiveScheduledAt({ platforms: JSON.stringify([{ platform: "douyin", publication: { scheduled_at: "2026-12-05T18:00:00+08:00" } }]) }, "douyin", null)).toBe(top);
   });
 
   it("两个在期活动：各给一条", async () => {
@@ -108,5 +109,7 @@ describe("listActivities used_by", () => {
     await fs.mkdir(path.join(dir, "projects", "bad", "06-publish"), { recursive: true });
     await fs.writeFile(path.join(dir, "projects", "bad", "06-publish", "publish-plan.json"), "{nope");
     expect((await listActivities(dir, NOW)).used_by_incomplete?.unreadable_plans).toHaveLength(1);
+    await plan("shape", [{ platform: "douyin", campaigns: { ledger_key: "douyin:1", selected: true } }]);
+    expect((await listActivities(dir, NOW)).used_by_incomplete?.unreadable_plans).toHaveLength(2);
   });
 });
