@@ -53,6 +53,8 @@ export interface Fact {
   export_mtime_ms?: number;
   /** aroll：记录 / 挪入之前的原始绝对路径（ChatCut 工程引用的往往是它；抽帧检查按路径认原片） */
   source_path?: string;
+  /** aroll：后来又用别的路径报过的同一份原片（SHA 一致才收）；ChatCut 引用其中任何一个都认得出（2026-10-31） */
+  source_paths?: string[];
   /** aroll pending_match（1b §3）：核对作业代号、开始时间；落结果时锁内按它认「还是同一次核对」 */
   match_job?: string;
   match_started_at?: string;

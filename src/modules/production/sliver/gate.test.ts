@@ -251,6 +251,30 @@ describe("Codex 审 sliver 回归", () => {
     expect((await checks(s.c.id)).at(-1)).toMatchObject({ status: "slivers" });
   });
 
+  it("[2026-10-31] ChatCut 引用的是另一个路径下字节相同的原片：用那个路径再报一次 aroll，补成又一个原始路径后认得出", async () => {
+    const original = path.join(env.outside, "素材盘", RAW_NAME);
+    await writeProject([gapTimeline(5)], { assets: { ...ASSETS, A: { ...ASSETS.A, path: original } } });
+    const s = await setup();
+    expect((await checks(s.c.id)).at(-1)).toMatchObject({ status: "unchecked" });
+    const again = await record(env, { content_id: s.c.id, kind: "aroll", path: await put(original, "raw"), request_id: "a2" });
+    expect(again).toMatchObject({ ok: true });
+    const ar = (await readProductionDoc(s.c.id, env.dir))!.facts.filter((f) => f.kind === "aroll");
+    expect(ar).toHaveLength(1);
+    expect(ar[0].source_paths).toEqual([original]);
+    await runSliverCheck(s.c.id, env.dir);
+    expect((await checks(s.c.id)).at(-1)).toMatchObject({ status: "slivers" });
+  });
+
+  it("[2026-10-31] 同一路径重复报：不重复补", async () => {
+    await writeProject([gapTimeline(5)]);
+    const s = await setup();
+    const before = (await readProductionDoc(s.c.id, env.dir))!.facts.find((f) => f.kind === "aroll")!;
+    const inProject = path.join(projectRoot(env, s.c.id), before.path!);
+    expect(await record(env, { content_id: s.c.id, kind: "aroll", path: inProject, request_id: "a3" })).toMatchObject({ ok: true });
+    const ar = (await readProductionDoc(s.c.id, env.dir))!.facts.find((f) => f.kind === "aroll")!;
+    expect(ar.source_paths ?? []).toEqual([]);
+  });
+
   it("[P2 chatcut-read.ts:137] 素材探针临时失败：不缓存，下次重用快照时再探，恢复后出结论", async () => {
     await writeProject([gapTimeline(5)]);
     let calls = 0;

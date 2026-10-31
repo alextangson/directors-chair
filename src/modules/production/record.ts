@@ -277,6 +277,13 @@ function factFrom(a: RecordArgs, p: FilePlan, doc: ProductionDoc, relPath: strin
   };
 }
 
+/** 原片的又一个原始路径：和已记的路径 / 原始路径都不同才补（绝对路径） */
+export function addSourcePath(fact: Fact, source: string, projectRoot: string): void {
+  const abs = path.resolve(source);
+  const known = new Set([fact.path ? path.resolve(projectRoot, fact.path) : null, fact.source_path ? path.resolve(fact.source_path) : null, ...(fact.source_paths ?? []).map((s) => path.resolve(s))]);
+  if (!known.has(abs)) fact.source_paths = [...(fact.source_paths ?? []), abs];
+}
+
 /** 已有候选被再次报成可收的：原地升级（挪了的改路径），不另起一条 */
 function upsertFact(doc: ProductionDoc, fact: Fact, existing: Fact | undefined): Fact {
   if (!existing) { doc.facts.push(fact); return fact; }
@@ -339,6 +346,9 @@ export async function commitFile(a: RecordArgs, content: Content, p: FilePlan, d
       if (opts.patch) Object.assign(fact, opts.patch);
       // 封面记进组（review-inbox §6.1）：项目内原地收的按所在目录；其余按计划的组。同 sha 进新组 = 新成员关系
       const coverEvents = fact.kind === "cover" && fact.state === "accepted" ? joinCoverGroup(doc, fact, p, a) : [];
+      // 同一份原片（SHA 一致）换了个路径再报：把这个路径补成它的又一个原始路径，不当重复丢掉——
+      // 项目里登记的是副本、ChatCut 引用的是原始路径时，抽帧检查才认得出（2026-10-31 两个月100万播放那条）
+      if (reuse && fact.kind === "aroll") addSourcePath(fact, p.source, p.projectRoot);
       // 已有字幕没绑成片、这次报了 for_cut：补上绑定，不丢新信息（Codex 审 P2）
       if (reuse && p.for_cut && (fact.kind === "srt" || fact.kind === "clean_master") && !fact.for_cut) fact.for_cut = p.for_cut;
       const core: ReceiptCore = { fact_id: fact.id, kind: fact.kind, state: fact.state, ...(fact.path ? { path: fact.path } : {}), ...(fact.state === "candidate" ? { reason: p.evidence } : {}) };

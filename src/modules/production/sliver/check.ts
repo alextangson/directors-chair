@@ -100,7 +100,7 @@ export async function arollIdentity(root: string, facts: Fact[]): Promise<ArollI
   for (const f of facts) {
     const paths = new Set<string>();
     if (f.path) { const a = abs(root, f.path); paths.add(a); paths.add(await realOr(a)); }
-    if (f.source_path) { paths.add(f.source_path); paths.add(await realOr(f.source_path)); }
+    for (const s of [f.source_path, ...(f.source_paths ?? [])]) if (s) { paths.add(s); paths.add(await realOr(s)); }
     out.facts.push({ id: f.id, label: f.path ? path.basename(f.path) : f.id, paths: [...paths] });
   }
   return out;
