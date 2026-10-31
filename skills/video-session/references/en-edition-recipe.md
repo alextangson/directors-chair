@@ -4,6 +4,19 @@
 
 动 ChatCut 前按仓库 CLAUDE.md 拿锁（`mkdir ~/.cache/autocrew-yt/chatcut.lock`），这一段做完或要问创始人前放锁；写操作带明确的轨道 / item ID。
 
+## 每一步的东西放哪（2026-10-30 存储审查）
+
+全部写进**英文版这条稿自己的项目**（`autocrew_content get` 的 `project.project_root`），不写进源视频的项目，不写 `~/.cache/autocrew-yt`，不新建 `08-*` 之类的顶层目录（归档按保留名单删，自建目录里的东西会被当素材搬走；写在项目外的则永远没人清）。ChatCut `export` 一律带绝对 `outputPath`。
+
+| 步骤 | 产物 | 放哪 |
+|---|---|---|
+| 1 摆音轨 | 配音 mp3 | 产品已放在 `00-project/autocrew/en-dub/`，原地引用，不复制 |
+| 2 画面重排 | 重排片段、concat 清单、QA 混音 | `99-cache/en/`（能重算；英文成片登记后自己删掉。没删的，这条稿发布后闲置满 24 小时，导演椅每天清缓存时一并清掉） |
+| 3 口型参考 | 参考视频（< 50 MiB） | `02-aroll/`，按第 8 步登记成 `kind:aroll` |
+| 4 口型对齐 | 对齐后的无字幕片 | `04-edit/review/` |
+| 5 MG / 字卡 | 英文镜头 | `03-broll/delivery/vNNN/`，规则同中文（不把源码连 `node_modules` 复制进项目） |
+| 7 烧字幕 | 英文成片 | `07-delivery/` |
+
 ## 前提（产品核过才往下走）
 
 - 英文脚本已在「等你拍板」里批过：`autocrew_content {action:"en_edition", content_id:<英文版>, edition:{op:"status"}}` 的 `approval` 是「已批准」。
