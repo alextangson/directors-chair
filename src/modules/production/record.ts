@@ -347,6 +347,18 @@ export async function commitFile(a: RecordArgs, content: Content, p: FilePlan, d
     r = await mutateProduction(content.id, dataDir, (doc) => {
       const fact = reuse ? doc.facts.find((f) => f.id === p.existing!.id)! : upsertFact(doc, { ...factFrom(a, p, doc, rel, moves ? txn.id : undefined), ...(placed ?? {}) }, p.existing);
       if (opts.patch) Object.assign(fact, opts.patch);
+      // A duplicate A-roll explicitly reported at another path has the same full SHA-256.
+      // Fill a missing origin only when the existing origin merely repeats the project copy.
+      // Never replace an already recorded distinct origin or move the reported file.
+      let sourceCorrected = false;
+      if (reuse && p.action === "existing" && fact.kind === "aroll" && fact.state === "accepted" && fact.path) {
+        const stored = path.resolve(p.projectRoot, fact.path);
+        const origin = fact.source_path ? path.resolve(p.projectRoot, fact.source_path) : stored;
+        if (origin === stored && p.source !== stored) {
+          fact.source_path = p.source;
+          sourceCorrected = true;
+        }
+      }
       // 封面记进组（review-inbox §6.1）：项目内原地收的按所在目录；其余按计划的组。同 sha 进新组 = 新成员关系
       const coverEvents = fact.kind === "cover" && fact.state === "accepted" ? joinCoverGroup(doc, fact, p, a) : [];
       // 同一份原片（SHA 一致）换了个路径再报：把这个路径补成它的又一个原始路径，不当重复丢掉——
@@ -361,7 +373,7 @@ export async function commitFile(a: RecordArgs, content: Content, p: FilePlan, d
       doc.requests = { ...(doc.requests ?? {}), [a.request_id]: { at: new Date().toISOString(), args, receipt: { ...core }, ...(opts.pairArgs ? { pair_args: opts.pairArgs } : {}) } };
       if (journaled) doc.txns = [...(doc.txns ?? []), txn.id];
       if (a.review && fact.kind === "cut" && fact.state === "accepted") coverEvents.push(...addReadyMark(doc, fact, a));
-      return { value: core, events: [...(reuse ? [] : [{ type: opts.event ?? "fact_recorded", detail: { fact_id: fact.id, kind: fact.kind, state: fact.state, by: a.host } }]), ...coverEvents] };
+      return { value: core, events: [...(reuse ? [] : [{ type: opts.event ?? "fact_recorded", detail: { fact_id: fact.id, kind: fact.kind, state: fact.state, by: a.host } }]), ...(sourceCorrected ? [{ type: "aroll_source_corrected", detail: { fact_id: fact.id, source_path: p.source, sha256: p.sha256, by: a.host } }] : []), ...coverEvents] };
     });
   } catch (err) { return commitFailed(a, content, dataDir, txn, journaled, err); }
   if (release) await applyRelease(dataDir, release);
