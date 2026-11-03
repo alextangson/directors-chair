@@ -370,21 +370,42 @@ export async function ensureClaim(
   const now = Date.now();
   const current = activeClaim(content, now);
   if (current && gate.override) {
-    const handoffs = withHandoff(content, withSession({
-      from: current.host,
-      to: input.host,
-      by: input.host,
-      at: new Date(now).toISOString(),
-      note: "工作台越过认领",
-      override: true,
-    }));
-    await updateContent(content.id, { handoffs }, dataDir);
+    await recordOverride(content, current, input.host, dataDir, now);
     return { ok: true, claim: current, override: true };
   }
   const employee = input.employee ?? current?.employee ?? content.claim?.employee ?? "writer";
   // 续租沿用原持有者：带着别人令牌来的宿主接手的是那份认领，别把账记到自己头上
   const host = current ? current.host : input.host;
   return { ok: true, claim: await writeClaim(content, { employee, host, renew: Boolean(current), presented: input.token }, dataDir, now) };
+}
+
+/** 越门留账：放行但不静默 */
+async function recordOverride(content: Content, current: ContentClaim, host: string, dataDir: string | undefined, now: number): Promise<void> {
+  const handoffs = withHandoff(content, withSession({
+    from: current.host,
+    to: host,
+    by: host,
+    at: new Date(now).toISOString(),
+    note: "工作台越过认领",
+    override: true,
+  }));
+  await updateContent(content.id, { handoffs }, dataDir);
+}
+
+/**
+ * 创始人的决定（对话 / 工作台里认稿、退回修改）只是推状态，不是接活：令牌门照过、越门照记账，
+ * 但**不新占、不续租**认领。写手交稿时认领已随交接释放，这里若按 `ensureClaim` 补记一枚
+ * `local-user` 认领，宿主接着改稿 / 核引文就撞 claim_held，跨宿主又接管不了，只能干等 30 分钟（2026-11-03 真机）。
+ */
+export async function gateWithoutClaim(contentId: string, input: ClaimGuardInput, dataDir?: string): Promise<WriteGate> {
+  const content = await getContent(contentId, dataDir);
+  if (!content) return { denied: { ok: false, error: `稿件不存在：${contentId}` } };
+  const gate = assertClaimToken(content, input.host, input.token);
+  if (!gate.ok) return { denied: { ok: false, error: gate.error, code: gate.code, holder: gate.holder } };
+  const now = Date.now();
+  const current = activeClaim(content, now);
+  if (current && gate.override) await recordOverride(content, current, input.host, dataDir, now);
+  return { grant: {} };
 }
 
 /** 写操作回执里的令牌：认领落在调用宿主名下才回给他（新认领 / 带令牌续租）；越门的工作台拿不到别人的令牌 */

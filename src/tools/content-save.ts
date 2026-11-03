@@ -1,7 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { historyGuard } from "./history-guard.js";
 import { contentSummary } from "./content-summary.js";
-import { gateClaimWrite, redactClaim, type WriteGate } from "../storage/claims.js";
+import { gateClaimWrite, gateWithoutClaim, redactClaim, type WriteGate } from "../storage/claims.js";
 import {
   LOCAL_HOST,
   saveContent,
@@ -211,6 +211,8 @@ function gateContentWrite(
 ): Promise<WriteGate> {
   const host = typeof params._host === "string" && params._host.trim() ? params._host.trim() : LOCAL_HOST;
   const token = typeof params.claim_token === "string" ? params.claim_token.trim() : "";
+  // 创始人认稿 / 退回修改（收件箱决定，内部键、MCP 客户端传不进来）：过门不占认领
+  if (params._founderDecision === true) return gateWithoutClaim(id, { host, token: token || undefined }, dataDir);
   return gateClaimWrite(id, { host, token: token || undefined }, dataDir);
 }
 
