@@ -95,6 +95,19 @@ describe("validateCoverage — 创作者本人观点 / 亲历", () => {
     expect(check([creator(S_370), ...REQUIRED])).toEqual([]);
   });
 
+  it("「一个月」「一年」撞上旧稿条目不算出处：可以记成创作者观点；同句里真有台账数字照样要引（2026-11-03 真机）", () => {
+    const month = "AI 一个月多少钱，客户一年就买一次。";
+    const oldDrafts: LedgerEntry[] = [
+      { id: "om:content-1791165778406-6dqmys:approved_draft:4:0", source: "own_claim", quote: "坚持一个月，你会发现习惯变了。" },
+      { id: "om:content-1793164685145-h5y20d:approved_draft:5:0", source: "own_claim", quote: "一年下来，这本账就清楚了。" },
+    ];
+    expect(check([creator(month, month)], content(month, oldDrafts))).toEqual([]);
+    const withData = "一个月 370 次。";
+    const errors = check([creator(withData, withData)], content(withData, [...oldDrafts, USER_TOPIC]));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/数字「370 次」在台账 user-topic 有出处/);
+  });
+
   it("台账里没有的亲历数字可以记成创作者观点", () => {
     const body = "我自己试了 3 次，每次都先让它问清楚再动手。";
     expect(check([creator(body, body)], content(body))).toEqual([]);
