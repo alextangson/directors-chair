@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getContent } from "../../../storage/local-store.js";
 import { claimContent, gateClaimWrite } from "../../../storage/claims.js";
 import { executeReviewInbox } from "../../../tools/review-inbox.js";
+import { executeContentSave } from "../../../tools/content-save.js";
 import { makeEnv, videoContent, type Env } from "../testkit.js";
 
 let env: Env;
@@ -41,5 +42,12 @@ describe("收件箱决定不占写手认领", () => {
     const after = (await getContent(c.id, env.dir))!.claim!;
     expect(after.host).toBe(HOST);
     expect(await hostWrite(c.id, "writer", token)).toMatchObject({ grant: { claim_token: token } });
+  });
+
+  it("免占认领只认内部函数参数：调用参数里自带 _founderDecision（OpenClaw 不剥 _ 键）照常占认领", async () => {
+    const c = await videoContent(env, "参数冒充", "draft_ready");
+    const r = await executeContentSave({ _dataDir: env.dir, _founderDecision: true, action: "transition", id: c.id, target_status: "revision", from_status: "draft_ready", force: true });
+    expect(r).toMatchObject({ ok: true });
+    expect((await getContent(c.id, env.dir))!.claim).toMatchObject({ host: "local-user" });
   });
 });

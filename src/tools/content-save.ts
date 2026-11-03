@@ -208,11 +208,12 @@ function gateContentWrite(
   params: Record<string, unknown>,
   id: string,
   dataDir: string | undefined,
+  founderDecision = false,
 ): Promise<WriteGate> {
   const host = typeof params._host === "string" && params._host.trim() ? params._host.trim() : LOCAL_HOST;
   const token = typeof params.claim_token === "string" ? params.claim_token.trim() : "";
-  // 创始人认稿 / 退回修改（收件箱决定，内部键、MCP 客户端传不进来）：过门不占认领
-  if (params._founderDecision === true) return gateWithoutClaim(id, { host, token: token || undefined }, dataDir);
+  // 创始人认稿 / 退回修改（收件箱决定）：过门不占认领。只走函数参数——params 里的键模型调用能带进来（OpenClaw 不剥 `_`）
+  if (founderDecision) return gateWithoutClaim(id, { host, token: token || undefined }, dataDir);
   return gateClaimWrite(id, { host, token: token || undefined }, dataDir);
 }
 
@@ -231,6 +232,8 @@ function rejectedTransition(pre: { error?: string; blocked?: boolean; code?: str
 export async function executeContentSave(
   params: Record<string, unknown>,
   deps?: {
+    /** 收件箱里创始人的认稿 / 退回修改：流转过令牌门但不占认领（只由 inbox-decide 传） */
+    founderDecision?: boolean;
     recordDiffImpl?: typeof recordDiff;
     shouldDistillImpl?: typeof shouldDistillStyle;
     distillImpl?: typeof distillStyleRules;
@@ -453,7 +456,7 @@ export async function executeContentSave(
     // 状态机和阶段门先于认领门：被拒的流转不新占、不续约认领
     const pre = await transitionPreflight(id, normalizeLegacyStatus(targetStatus), { force: params.force as boolean, decidedBy: decidedBy(params) }, dataDir);
     if (!pre.ok) return rejectedTransition(pre);
-    const gate = await gateContentWrite(params, id, dataDir);
+    const gate = await gateContentWrite(params, id, dataDir, deps?.founderDecision === true);
     if ("denied" in gate) return gate.denied;
     // from_status：调用方手里那一版的状态。旧标签页/双击推进时后端据此人话拒绝，不硬盖
     const from = typeof params.from_status === "string" ? normalizeLegacyStatus(params.from_status) : undefined;
