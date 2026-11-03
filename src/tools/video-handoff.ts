@@ -18,6 +18,7 @@ import { revokeHandoff } from "../modules/video/handoff/revoke.js";
 import { isRegisterInput, parseRegisterInput, registerVideo } from "../modules/video/handoff/register.js";
 import { handoffFail } from "../modules/video/handoff/types.js";
 import { hostOf, videoFail, type VideoToolResult } from "./video-gates.js";
+import { maybeJson } from "../modules/publish/review-gate/plan.js";
 import { storageFailure } from "../storage/storage-error.js";
 import { matchAroll } from "../modules/video/handoff/match.js";
 import { confirmHandoff } from "../modules/video/handoff/confirm.js";
@@ -110,11 +111,8 @@ export async function executeVideoHandoff(action: HandoffAction, params: Record<
   }
 }
 
-/** 模型交来的 coverage：对象直接用；中转端点会把对象序列化成 JSON 字符串，解析回来；别的一律当没带 */
+/** 模型交来的 coverage：对象直接用；中转端点序列化成的 JSON 字符串（含没转义的内引号）修好解析回来；别的一律当没带 */
 function coverageArg(raw: unknown): CitationCoverage | null {
-  let value = raw;
-  if (typeof value === "string") {
-    try { value = JSON.parse(value); } catch { return null; }
-  }
+  const value = maybeJson(raw);
   return value && typeof value === "object" && !Array.isArray(value) ? value as CitationCoverage : null;
 }

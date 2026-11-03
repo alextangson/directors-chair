@@ -69,6 +69,10 @@ describe("citations 的 coverage 参数", () => {
     const c = await seedAccepted(env.dir);
     const r = await callVideo(env.dir, { action: "citations", content_id: c.id, coverage: JSON.stringify(coverageOf(c)) });
     expect(r).toMatchObject({ ok: true });
+    // 没转义的内引号（中转端点常见）也修好再解析
+    const quoted = { ...coverageOf(c), reviewed_by: "writer" };
+    const broken = JSON.stringify(quoted).replace('"创作者亲历（测试夹具）"', '"创作者说"亲历"（测试夹具）"');
+    expect(await callVideo(env.dir, { action: "citations", content_id: c.id, coverage: broken, claim_token: r.claim_token })).toMatchObject({ ok: true });
   });
 });
 

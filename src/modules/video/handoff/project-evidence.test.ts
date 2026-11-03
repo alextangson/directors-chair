@@ -106,6 +106,10 @@ describe("validateCoverage — 创作者本人观点 / 亲历", () => {
     const errors = check([creator(withData, withData)], content(withData, [...oldDrafts, USER_TOPIC]));
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatch(/数字「370 次」在台账 user-topic 有出处/);
+    // 外部原文对上的时长是真出处：不能只记创作者观点
+    const warranty = "这台机器保修期为一年。";
+    const ev: LedgerEntry = { id: "ev-w1", source: "verified_quote", quote: "保修期为一年", sourceUrl: "https://example.com/warranty" };
+    expect(check([creator(warranty, warranty)], content(warranty, [...oldDrafts, ev]))[0]).toMatch(/数字「一年」在台账 ev-w1 有出处/);
   });
 
   it("台账里没有的亲历数字可以记成创作者观点", () => {
