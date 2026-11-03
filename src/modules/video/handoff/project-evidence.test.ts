@@ -106,10 +106,14 @@ describe("validateCoverage — 创作者本人观点 / 亲历", () => {
     const errors = check([creator(withData, withData)], content(withData, [...oldDrafts, USER_TOPIC]));
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatch(/数字「370 次」在台账 user-topic 有出处/);
-    // 外部原文对上的时长是真出处：不能只记创作者观点
-    const warranty = "这台机器保修期为一年。";
-    const ev: LedgerEntry = { id: "ev-w1", source: "verified_quote", quote: "保修期为一年", sourceUrl: "https://example.com/warranty" };
-    expect(check([creator(warranty, warranty)], content(warranty, [...oldDrafts, ev]))[0]).toMatch(/数字「一年」在台账 ev-w1 有出处/);
+  });
+
+  it("宿主登记的用户材料里顺带有「一年」也不算出处：只有同句真数据对上才必引（2026-11-03 真机 user-1）", () => {
+    const sentence = "如果你的客户一年就买一次，你得想清楚这一次怎么接住。";
+    const user1: LedgerEntry = { id: "user-1", source: "user_claim", quote: "那时候英国的普通工人，一年的工作日从 250 天加到了 300 天。", reason: "宿主登记（claim_offline）" };
+    expect(check([creator(sentence, sentence)], content(sentence, [user1]))).toEqual([]);
+    const data = "英国工人一年的工作日加到了 300 天。";
+    expect(check([creator(data, data)], content(data, [user1]))[0]).toMatch(/数字「300 天」在台账 user-1 有出处/);
   });
 
   it("台账里没有的亲历数字可以记成创作者观点", () => {

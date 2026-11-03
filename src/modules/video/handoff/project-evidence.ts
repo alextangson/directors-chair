@@ -34,9 +34,10 @@ export async function readProjectJson<T>(id: string, file: string, dataDir: stri
 const clip = (text: string, max = 20) => (text.length > max ? `${text.slice(0, max)}…` : text);
 const reasonOf = (s: FactualSentence) => [s.numbers.length ? `数字 ${s.numbers.join("、")}` : "", s.attribution ? `归因「${clip(s.attribution)}」` : ""].filter(Boolean).join("，");
 /**
- * 「一个月」「一年」「一天」这类时间说法多是行文里的频率 / 时长：创作者随便哪篇旧稿都含这几个字，
- * 撞上了也不是出处，逼着引它就是错误归因（2026-11-03 真机：「AI 一个月多少钱」「客户一年就买一次」）。
- * 只对旧稿条目豁免「必须引台账」这一条；句子照样要有出处定位。
+ * 「一个月」「一年」「一天」这类时间说法是行文里的频率 / 时长，不承载数据：任何台账条目（旧稿、外部原文、
+ * 宿主登记的用户材料）都可能顺带含这几个字，撞上了不是出处，逼着引它就是错误归因
+ * （2026-11-03 真机：「客户一年就买一次」撞上 user-1「一年的工作日从 250 天加到了 300 天」）。
+ * 所以单凭时间词永远不让台账条目变成必引；同句里真正的数据数字对上了才算。句子照样要有出处定位。
  */
 const PHRASAL_TIME = /^一(?:个月|年|月|天|日|周|星期|小时|分钟|秒钟|秒)$/;
 /** Structural coverage only. Source entailment still requires the writer's review. */
@@ -47,11 +48,8 @@ export function validateCoverage(content: Content, coverage: CitationCoverage): 
   const errors = coverage.citations.flatMap(c => citationErrors(c, content.body, entries));
   // A number the ledger can back must cite the ledger: the creator slot is for claims that have no ledger source.
   // 定稿时创始人「保留」生成的 user-kept-* 只替它自己那句作保，不算别的句子的出处
-  const usable = entries.filter(e => !e.id.startsWith(KEPT_ENTRY_PREFIX));
-  const backedBy = (es: readonly LedgerEntry[]) => verifyNumbers({ title: "", hook: "", body: content.body, cta: "" }, es).verified.filter(v => !v.citedOnly);
-  // 时间说法只在撞上创作者旧稿（own_claim）时算顺带撞词；外部原文 / 用户材料对上了（「保修期为一年」）照样要引
-  const backed = [...backedBy(usable).filter(v => !PHRASAL_TIME.test(v.mention.raw)),
-    ...backedBy(usable.filter(e => e.source !== "own_claim")).filter(v => PHRASAL_TIME.test(v.mention.raw))];
+  const backed = verifyNumbers({ title: "", hook: "", body: content.body, cta: "" }, entries.filter(e => !e.id.startsWith(KEPT_ENTRY_PREFIX))).verified
+    .filter(v => !v.citedOnly && !PHRASAL_TIME.test(v.mention.raw));
   // Treat an entire factual sentence as the coverage unit, not an isolated digit.
   for (const s of factualSentences(content.body)) {
     const covering = coverage.citations.filter(c => c.start <= s.start && c.end >= s.end);
