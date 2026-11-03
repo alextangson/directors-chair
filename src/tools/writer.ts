@@ -203,7 +203,8 @@ async function doFindEvidence(
   // 选题会调研时没定平台、领包才填上的平台不算改了调研要求：省略 = 沿用当前任务，否则补证撞 task_changed 只能整轮重做（2026-11-03 真机）
   // 读不出任务就照常带上平台，坏任务由 prepare 自己报
   const current = req.topicId ? await inspectHostResearchTask(req.topicId, dataDir).catch(() => null) : null;
-  const platform = current && !current.creativeTask.platform?.trim() ? {} : { platform: pack.context.platform };
+  // 省略平台时钉住读到的那份任务：拿锁前被别的会话换掉就回 stale_task，不悄悄继承新任务的平台
+  const platform = current && !current.creativeTask.platform?.trim() ? { task_id: current.taskId } : { platform: pack.context.platform };
   const prepared = await executeScout({ action: "prepare", topic_id: req.topicId, ...platform, requirements: req.requirements, direction: req.direction, _host: params.host, _dataDir: dataDir });
   if (prepared.ok === false) return prepared;
   return { ok: true, status: "awaiting_host_evidence", executed_by: { kind: "host", host: params.host }, model_api_calls: 0,
