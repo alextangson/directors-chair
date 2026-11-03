@@ -2,6 +2,7 @@ import { updateContent } from "../storage/local-store.js";
 import { historyGuard } from "./history-guard.js";
 import { newDraftGate } from "./writing-readiness.js";
 import { aiContentWriteRefusal } from "../modules/research/angle-gate.js";
+import { inspectHostResearchTask } from "../modules/research/host-research-store.js";
 import { Value } from "@sinclair/typebox/value";
 import { outlineSchema, techniqueRefsSchema, gapSchema, type Outline, type TechniqueRef } from "../modules/writing/series-memory.js";
 import { findCard, techniqueCatalog } from "../modules/writing/technique-store.js";
@@ -198,7 +199,12 @@ async function doFindEvidence(
   if (!params.need) return fail("need 必填：一句话说清你缺什么证据");
   const mode = pack.context.req.researchMode;
   if (mode === "provided" || mode === "skip") return evidenceWithoutResearchTask(pack, params);
-  const prepared = await executeScout({ action: "prepare", topic_id: pack.context.req.topicId, platform: pack.context.platform, requirements: pack.context.req.requirements, direction: pack.context.req.direction, _host: params.host, _dataDir: dataDir });
+  const req = pack.context.req;
+  // 选题会调研时没定平台、领包才填上的平台不算改了调研要求：省略 = 沿用当前任务，否则补证撞 task_changed 只能整轮重做（2026-11-03 真机）
+  // 读不出任务就照常带上平台，坏任务由 prepare 自己报
+  const current = req.topicId ? await inspectHostResearchTask(req.topicId, dataDir).catch(() => null) : null;
+  const platform = current && !current.creativeTask.platform?.trim() ? {} : { platform: pack.context.platform };
+  const prepared = await executeScout({ action: "prepare", topic_id: req.topicId, ...platform, requirements: req.requirements, direction: req.direction, _host: params.host, _dataDir: dataDir });
   if (prepared.ok === false) return prepared;
   return { ok: true, status: "awaiting_host_evidence", executed_by: { kind: "host", host: params.host }, model_api_calls: 0,
     task_id: prepared.task_id, need: params.need, content_id: params.contentId, pack_id: params.packId,

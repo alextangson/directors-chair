@@ -990,6 +990,20 @@ describe("writer find_evidence", () => {
     expect((await readPackFile(res.content_id)).ledgerBudget.used).toBe(0);
   });
 
+  it("选题会调研没定平台、领包才填 douyin：补证沿用原研究任务，不回 task_changed", async () => {
+    const topic = await seed(makeBrief({ creativeTask: createCreativeTask({}) }));
+    await pickAngle(topic.id);
+    const research = await executeScout({ action: "prepare", topic_id: topic.id, _dataDir: testDir });
+    expect(research).toMatchObject({ ok: true, task_id: expect.any(String) });
+    // 这轮调研早已交出简报：台账回到已完成，pack 才放行（研究任务本身没定平台）
+    await upsertJob({ topicId: topic.id, status: "succeeded", startedAt: "2026-09-04T09:00:00.000Z", settledAt: "2026-09-04T10:00:00.000Z",
+      perspectives: pendingPerspectives(), briefRevision: 1, topicHash: topicHashOf(TITLE, DESC) }, testDir);
+    const started = await run({ action: "pack", topic_id: topic.id, platform: "douyin" }, { runLoopImpl: emptyResearchLoop });
+    const res = { ...started, ...(await settle(started.content_id as string)) };
+    const found = await run({ action: "find_evidence", content_id: res.content_id, pack_id: res.pack_id, claim_token: res.claim_token, need: "返工工时数据" });
+    expect(found).toMatchObject({ ok: true, status: "awaiting_host_evidence", task_id: research.task_id });
+  });
+
   it("need 为空、稿件不存在各自拒绝并说明", async () => {
     const res = await pack({ direction: "只算维护账" }, { runLoopImpl: emptyResearchLoop });
     expect(await run({ action: "find_evidence", content_id: res.content_id, pack_id: res.pack_id })).toMatchObject({ ok: false });
