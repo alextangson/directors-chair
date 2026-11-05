@@ -317,7 +317,7 @@ export function Integrations() {
           </select>
         </label>
         <Field label="中转模型" value={cForm.relay_model} placeholder={cover?.relay.model ?? "gpt-image-2"} onChange={(v) => setCForm((f) => ({ ...f, relay_model: v }))} />
-        <Field label="Gemini Key" password value={cForm.gemini_api_key} placeholder={cover?.gemini.apiKeyMasked ?? "AIza...（切 Gemini 才需要）"} onChange={(v) => setCForm((f) => ({ ...f, gemini_api_key: v }))} />
+        <Field label="Gemini Key（封面和比稿共用）" password value={cForm.gemini_api_key} placeholder={cover?.gemini.apiKeyMasked ?? "AIza...（封面切 Gemini、写稿比稿时需要）"} onChange={(v) => setCForm((f) => ({ ...f, gemini_api_key: v }))} />
         <SaveRow label="保存封面配置" onSave={() => void submit("settings:cover_set", cForm, () => setCForm({ provider: "", relay_model: "", gemini_api_key: "", gemini_model: "" }))} />
       </IntegrationCard>
 

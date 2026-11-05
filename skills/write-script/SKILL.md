@@ -132,6 +132,17 @@ description: |
 
 结果用 `save{content_id, base_version, body:<它读的那一版正文>, test_read:{status, notes}}` 附在那一版上：`ok` 时 `notes` 是试读原文；超时、出错是 `failed`，`notes` 写原因。划走点超过 2 处：先自己改一次再存（最多一次），把两版和试读一起给创始人看；试读只是参考，不替他做决定。
 
+### 比稿（试行）
+
+试的是：同样锁住的依据，Gemini 写的全文在他盲选时能不能赢。比的是措辞、节奏和钩子，所以两版要在同等条件下摆给他。
+
+- 开头选定后、动笔前先调 `rival{content_id, base_version}`，拿到 `rival_id` 就接着写自己那版、照常存第 1 版和试读，不等它。之后用 `rival{content_id, rival_id}` 取结果，最多等 10 分钟。
+- 回 `not_configured`：这篇跳过比稿，把回执里的配置位置告诉创始人一次，照常单稿。`failed` / `interrupted`：把原因照实告诉他，只交你那版，不要假装比过。
+- Gemini 那版也起一个不继承会话的子代理试读（只给正文），并用同一标准检查两版：不在 `firsthand` 和创始人原话里的「我/我们做过」、证据台账以外的数字和引述、`format_warnings` 那类格式问题。只标出来，两版都不改——改了就不是在比原稿。
+- 随机排成 A / B 给他：两版全文、各自试读、标出的问题。不说哪版是谁写的，不给推荐。
+- 他选你那版：`save{body:<你第 1 版原文>, rival_pick:{rival_id, picked:"host", founder_words}}`；选 Gemini 那版：`save{body:<Gemini 原文逐字>, rival_pick:{rival_id, picked:"rival", founder_words}, test_read:<它的试读>}`；要拼：按他的话拼好再存，`picked:"merged"`。之后照第 6 步改。
+- 回执里的 `tally` 每篇告诉他一句（几篇里各赢几次）；带 `hint` 时请他定去留。
+
 ## 6 改
 
 创始人说改哪里就只改哪里，别的不动，改完 `save`，带 `feedback:{founder_words:<他这次的原话，逐字>}`。他只说了意见、正文暂时不改，也照样带 `feedback` 存（同一版正文），意见不会丢。意见是方向性的、没指具体句子：先给简短诊断和改动清单，等他确认再动稿。意见改变了主线、受众或体裁，就回第 3 步重出立意（换体裁时重新预览范文）。
