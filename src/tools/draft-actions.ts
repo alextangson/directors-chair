@@ -11,9 +11,14 @@ import { ScriptFrozenError } from "../storage/production-store.js";
 import { verifyQuote } from "../modules/draft/verify-quote.js";
 import type { DraftFeedbackInput, DraftFeedbackRecord } from "../modules/draft/draft-feedback.js";
 import { bodyHash, currentVersion, draftNextNote, needsOpening, workbenchUrl, type DraftReviewNote, type TestReadRecord } from "../modules/draft/draft-types.js";
-import type { TestReadInput } from "../modules/draft/draft-args-extra.js";
+import type { RivalPickInput, TestReadInput } from "../modules/draft/draft-args-extra.js";
 import { fail, withVersion } from "./draft-version.js";
 import { INVALID, type DraftArgs } from "./draft-args.js";
+import { pickRefusal, recordPick, rivalAuthor } from "./draft-rival.js";
+import { rivalTally } from "../modules/draft/rival-store.js";
+
+/** 这一版记在谁名下：比稿选中 Gemini 那版时记 Gemini 和模型名，其余是调用方 */
+type Author = { host: string; writtenBy: Content["writtenBy"]; note: string };
 
 type R = Record<string, unknown>;
 export const LESSONS_DEFERRED = "这条已改为定稿时跨稿比对：lessons 原样记在这篇的意见里，不再即时生成规则或手册提案";
@@ -49,14 +54,14 @@ function testReadRecord(t: TestReadInput, version: number, body: string): TestRe
   return { kind: "viewer_test_read", version, status: t.status, body_hash: bodyHash(body), notes: t.notes, at: new Date().toISOString() };
 }
 
-async function saveBody(a: DraftArgs, c: Content, tx: ContentTx): Promise<Content | R> {
+async function saveBody(a: DraftArgs, c: Content, tx: ContentTx, by?: Author): Promise<Content | R> {
   const angle = c.draftPath?.angle;
-  const provenance = modelWrite(a.host, angle ? { direction: angle.main_line } : undefined);
+  const provenance = modelWrite(by?.host ?? a.host, angle ? { direction: angle.main_line } : undefined);
   try {
-    const saved = await tx.write({ ...(a.title ? { title: a.title } : {}), body: a.body!, writtenBy: { kind: "host", host: a.host },
+    const saved = await tx.write({ ...(a.title ? { title: a.title } : {}), body: a.body!, writtenBy: by?.writtenBy ?? { kind: "host", host: a.host },
       // 看板交出去的稿没调 start 直接存了一版，也算接手（spec 2026-10-15 §B5）
       ...(c.writingHandoff && !c.writingHandoff.pickedUpAt ? { writingHandoff: { ...c.writingHandoff, pickedUpAt: new Date().toISOString(), pickedUpBy: a.host } } : {}),
-      _versionNote: a.note ?? "AI 写入", _editor: "agent", _provenance: provenance });
+      _versionNote: a.note ?? by?.note ?? "AI 写入", _editor: "agent", _provenance: provenance });
     return saved ?? fail("not_found", `稿件不存在：${c.id}`);
   } catch (err) {
     if (err instanceof FirstBodyRefusedError) return fail("needs_angle", "还没记录创始人选定的立意：先出 3 个立意让创始人选，用 angle 记下再存稿", { detail: err.refusal.error, next_action: { tool: "autocrew_draft", params: { action: "angle", content_id: c.id } } });
@@ -66,9 +71,9 @@ async function saveBody(a: DraftArgs, c: Content, tx: ContentTx): Promise<Conten
 }
 
 /** 存一版（正文没变就不出新版本），再把审稿意见 / 试读 / 改稿意见挂到这一版上 */
-async function writeVersion(a: DraftArgs, c: Content, tx: ContentTx): Promise<R> {
+async function writeVersion(a: DraftArgs, c: Content, tx: ContentTx, by?: Author): Promise<R> {
   const bodyChanged = a.body !== c.body || Boolean(a.title && a.title !== c.title);
-  const saved = await saveBody(a, c, tx);
+  const saved = await saveBody(a, c, tx, by);
   if (!("id" in saved)) return saved;
   const s = saved as Content;
   const version = currentVersion(s);
@@ -95,7 +100,19 @@ function argRefusal(a: DraftArgs): R | null {
   if (a.reviewNotes === INVALID) return fail("bad_param", "review_notes 解析不了：传一段文字，或一个 JSON 对象 / 数组（不超过 2 万字）");
   if (typeof a.feedback === "string") return fail("bad_param", a.feedback);
   if (typeof a.testRead === "string") return fail("bad_param", a.testRead);
+  if (typeof a.rivalPick === "string") return fail("bad_param", a.rivalPick);
   return bodyRefusal(a.body);
+}
+
+/** 比稿选完存这一版：选 Gemini 记它名下；拼的版本备注「拼自两版」；结果记到那次比稿上 */
+async function pickVersion(a: DraftArgs, c: Content, tx: ContentTx): Promise<R> {
+  const p = a.rivalPick as RivalPickInput;
+  const bad = pickRefusal(p, c, a.body);
+  if (bad) return bad;
+  const by = p.picked === "rival" ? rivalAuthor(c, p.rival_id) : p.picked === "merged" ? { host: a.host, writtenBy: { kind: "host" as const, host: a.host }, note: "拼自两版" } : undefined;
+  const r = await writeVersion(a, c, tx, by);
+  if (r.ok) await recordPick(tx, p, r.version as number, a);
+  return r.ok ? { ...r, rival_picked: p.picked } : r;
 }
 
 export async function draftSave(a: DraftArgs): Promise<R> {
@@ -106,12 +123,15 @@ export async function draftSave(a: DraftArgs): Promise<R> {
     // 第一版是按立意写的，没有意见可记
     if (a.feedback && !real) return fail("bad_param", "feedback 只在已有一版正文之后收：第一版按立意写，不带 feedback；开头阶段的意见用 opening 记");
     if (!real && needsOpening(c.draftPath?.angle)) return fail("needs_opening", "还没选开头：先给创始人 3 个开头挑（opening{candidates}），他选了用 opening{opening, founder_words} 记下，再写全文", { next_action: { tool: "autocrew_draft", params: { action: "opening", content_id: c.id } } });
-    if (a.testRead && a.body !== c.body && real) return fail("bad_param", "test_read 要附在它读的那一版上：body 传试读时读的那一版正文原文（和当前版一样），改过的稿先 save 再试读");
-    return writeVersion(a, c, tx);
+    // 选 Gemini 那版时带的 test_read 是它那版的试读，正文本来就和当前版不同
+    const rivalBody = typeof a.rivalPick === "object" && a.rivalPick.picked === "rival";
+    if (a.testRead && a.body !== c.body && real && !rivalBody) return fail("bad_param", "test_read 要附在它读的那一版上：body 传试读时读的那一版正文原文（和当前版一样），改过的稿先 save 再试读");
+    return a.rivalPick ? pickVersion(a, c, tx) : writeVersion(a, c, tx);
   });
   // 已出过定稿清单的稿又改了：退回写作中（锁外推进，状态机照常校验）
   if (r.ok && r.status === "draft_ready" && r.body_changed) await transitionStatus(a.contentId!, "drafting", { host: a.host }, a.dataDir);
   if (!r.ok) return r;
   const note = draftNextNote({ id: a.contentId!, status: r.status === "draft_ready" && !r.body_changed ? "draft_ready" : "drafting", needsAngle: false, hasBody: true, reviewed: r.reviewed as boolean, checklistCurrent: !r.body_changed });
-  return { ...r, status: undefined, reviewed: undefined, workbench_url: workbenchUrl(a.contentId!), next_action: { note } };
+  const tally = a.rivalPick ? { tally: await rivalTally(a.dataDir) } : {};
+  return { ...r, ...tally, status: undefined, reviewed: undefined, workbench_url: workbenchUrl(a.contentId!), next_action: { note } };
 }

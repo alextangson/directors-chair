@@ -81,3 +81,27 @@ export function parseCites(raw: unknown): Cite[] | string | undefined {
   }
   return out;
 }
+
+export interface RivalPickInput {
+  rival_id: string;
+  picked: "host" | "rival" | "merged";
+  founder_words: string;
+  /** 两版试读的状态（ok / failed / unsupported）；不传按已附的试读推 */
+  test_reads?: { host?: string; rival?: string };
+}
+const PICKS = ["host", "rival", "merged"];
+
+/** save.rival_pick：{rival_id, picked: host | rival | merged, founder_words, test_reads?} */
+export function parseRivalPick(raw: unknown): RivalPickInput | string | undefined {
+  if (absent(raw)) return undefined;
+  const v = maybeJson(raw);
+  if (v === UNPARSABLE) return "rival_pick 看着是 JSON，但修过引号也解析不了";
+  if (!isObj(v)) return "rival_pick 要是对象 {rival_id, picked: host | rival | merged, founder_words}";
+  if (typeof v.rival_id !== "string" || !v.rival_id.trim()) return "rival_pick.rival_id 必填：rival 回执里的 rival_id";
+  if (typeof v.picked !== "string" || !PICKS.includes(v.picked)) return "rival_pick.picked 只能是 host / rival / merged";
+  if (typeof v.founder_words !== "string" || !v.founder_words.trim()) return "rival_pick.founder_words 必填：创始人选时的原话，逐字";
+  const tr = maybeJson(v.test_reads);
+  const st = (x: unknown) => (typeof x === "string" && STATUSES.includes(x) ? x : undefined);
+  const test_reads = isObj(tr) ? { host: st(tr.host), rival: st(tr.rival) } : undefined;
+  return { rival_id: v.rival_id.trim(), picked: v.picked as RivalPickInput["picked"], founder_words: v.founder_words, ...(test_reads ? { test_reads } : {}) };
+}
