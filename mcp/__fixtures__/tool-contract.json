@@ -575,7 +575,8 @@
        "verify_quote",
        "prepare_final",
        "feedback_history",
-       "propose_promotion"
+       "propose_promotion",
+       "rival"
       ],
       "type": "string"
      },
@@ -669,6 +670,10 @@
       "type": "string"
      },
      "review_notes": {},
+     "rival_id": {
+      "type": "string"
+     },
+     "rival_pick": {},
      "target": {
       "type": "string"
      },
@@ -3519,7 +3524,8 @@
        "verify_quote",
        "prepare_final",
        "feedback_history",
-       "propose_promotion"
+       "propose_promotion",
+       "rival"
       ],
       "type": "string"
      },
@@ -3613,6 +3619,10 @@
       "type": "string"
      },
      "review_notes": {},
+     "rival_id": {
+      "type": "string"
+     },
+     "rival_pick": {},
      "target": {
       "type": "string"
      },
