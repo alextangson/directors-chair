@@ -14,8 +14,8 @@
 
 ## 流程（write-script 第 5 步）
 
-1. 开头选定后，主会话调 `autocrew_draft{action:"rival", content_id, base_version}` 启动 Gemini 写稿，立即返回 `rival_id`，不等结果。
-2. 主会话照常写自己那版并 `save` 成第 1 版（不变）。
+1. 主会话照常写自己那版并 `save` 成第 1 版（不变）。
+2. 随即调 `autocrew_draft{action:"rival", content_id, base_version}` 启动 Gemini 写稿，立即返回 `rival_id`；主会话接着给自己那版做试读，不等结果。没存第 1 版时拒 `needs_host_draft`。
 3. 主会话用 `rival{content_id, rival_id}` 取结果：`running` / `done{body}` / `failed{reason}`，最多等 10 分钟。
 4. 两版各做一次观众试读（各起一个不继承会话的新子代理，只给正文）。
 5. 主会话用同一标准检查两版：编造的亲历（不在 `firsthand` 和创始人原话里的「我/我们做过」）、证据台账以外的数字和引述、`format_warnings`。只标出来，不改。
@@ -34,7 +34,8 @@ Gemini 没配好（没 key）时整节跳过，只在本篇告诉创始人一次
 ### `rival` 动作
 
 - **前置**：已记立意、已选开头；否则按现有 `needs_angle` / `needs_opening` 拒。
-- **简报由服务端拼**，只用锁住的依据，和主会话拿到的同源：档案底线（`rules` / `never`）、立意（主线、给谁看、论证链、为什么可能爆、创始人原话）、选定开头、锁定的体裁手册全文、锁定范文全文、锁定写法全文、`founder_edits` 改稿对照、`voice_refs`、`firsthand`、证据台账里已核验的引文和数字。写作指令：只出能直接念的正文；开头原样用；没有素材不编亲历；台账以外的数字和引述不写。简报不含主会话的稿。
+- **简报由服务端拼**，只用锁住的依据，和主会话拿到的同源：档案底线（`rules` / `never`）、立意（主线、给谁看、论证链、为什么可能爆、创始人原话）、选定开头、锁定的体裁手册全文、锁定范文全文、锁定写法全文、`founder_edits` 改稿对照、`voice_refs`、`firsthand`、证据台账里已核验的引文和数字。写作指令：只出能直接念的正文；开头原样用；没有素材不编亲历；台账以外的数字和引述不写；开头和立意许诺的内容必须讲完。简报不含主会话的稿，只给它的字数当篇幅（上下 20%）。
+  - 2026-11-06 真稿实测加的：不给篇幅时 Gemini 只写了主会话一半的字数，开头许诺的「从夯到拉排一遍」没兑现，盲选时比的就不是写法了。
   - 主会话还有对话上下文（调研过程、创始人随口说的话），Gemini 没有。这是有意的：试行要回答的是「加上 Gemini 能不能比现在更好」。
 - **模型**：默认 `gemini-3.1-pro-preview`（这把 key 已实测可用），环境变量 `AUTOCREW_RIVAL_MODEL` 可换。
 - **Key**：`GEMINI_API_KEY` 环境变量 → 设置·封面生成里的 Gemini Key（`cover.json` 的 `geminiApiKey`）。设置页那一栏的说明改成「封面和比稿共用」。
@@ -55,15 +56,17 @@ Gemini 没配好（没 key）时整节跳过，只在本篇告诉创始人一次
 1. 没配 key：`rival` 回 `not_configured`，主会话照常单稿，只告诉创始人一次。
 2. 402、超时、连续 5xx：回 `failed` 和原因，主会话说出来；不会悄悄只给一版。
 3. 重复调 `rival`：同一个 `rival_id`，Gemini 只被请求一次。
-4. 立意或开头改了：旧 Gemini 稿 `stale`，选它被拒。
+4. 立意或开头改了：旧 Gemini 稿 `stale`，选它被拒；拼简报期间改了，回 `angle_changed`，不登记旧简报。
 5. 选 Gemini 版但正文改过：拒 `rival_body_mismatch`。
 6. 同一比稿选第二次：拒。
 7. 服务重启：`running` 变 `interrupted`，能重新发起。
 8. 选中的 Gemini 版 provenance 是 Gemini；创始人之后改它，改稿对照照常记录。
 9. 给创始人看的 A/B 不带作者，不带推荐。
 10. 战绩数字和各稿记录一致。
-11. 简报里没有主会话的稿。
+11. 简报里没有主会话的稿，只有字数；锁定的写法或范文读不出来就拒，不调 Gemini。
 12. 单测全部 mock Gemini HTTP；真模型验收跑一篇真实稿。
+13. Gemini 没正常写完（`finishReason` 不是 `STOP`，或简报被拒）：回 `failed` 和原因，半截稿不能选。
+14. 选中 Gemini 版后，正文不变只附试读或意见：作者仍记 Gemini。
 
 ## 已知取舍
 

@@ -57,8 +57,11 @@ function testReadRecord(t: TestReadInput, version: number, body: string): TestRe
 async function saveBody(a: DraftArgs, c: Content, tx: ContentTx, by?: Author): Promise<Content | R> {
   const angle = c.draftPath?.angle;
   const provenance = modelWrite(by?.host ?? a.host, angle ? { direction: angle.main_line } : undefined);
+  // 正文没变（只附试读 / 意见）不出新版本，作者也不能被改成调用方：选中的 Gemini 版要一直记在 Gemini 名下
+  const sameText = a.body === c.body && !(a.title && a.title !== c.title);
+  const writtenBy = by?.writtenBy ?? (sameText && c.writtenBy ? c.writtenBy : { kind: "host" as const, host: a.host });
   try {
-    const saved = await tx.write({ ...(a.title ? { title: a.title } : {}), body: a.body!, writtenBy: by?.writtenBy ?? { kind: "host", host: a.host },
+    const saved = await tx.write({ ...(a.title ? { title: a.title } : {}), body: a.body!, writtenBy,
       // 看板交出去的稿没调 start 直接存了一版，也算接手（spec 2026-10-15 §B5）
       ...(c.writingHandoff && !c.writingHandoff.pickedUpAt ? { writingHandoff: { ...c.writingHandoff, pickedUpAt: new Date().toISOString(), pickedUpBy: a.host } } : {}),
       _versionNote: a.note ?? by?.note ?? "AI 写入", _editor: "agent", _provenance: provenance });

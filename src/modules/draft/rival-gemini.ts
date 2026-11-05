@@ -41,10 +41,14 @@ function usageOf(m: Record<string, unknown> | undefined): RivalUsage {
 }
 
 function parseReply(json: Record<string, unknown>): RivalResult {
+  const blocked = (json.promptFeedback as { blockReason?: string } | undefined)?.blockReason;
+  if (blocked) return { ok: false, reason: `Gemini 拒绝了这份简报（blockReason: ${blocked}）` };
   const cand = (json.candidates as Array<Record<string, unknown>> | undefined)?.[0];
   const parts = ((cand?.content as { parts?: Array<{ text?: string; thought?: boolean }> } | undefined)?.parts ?? []);
   const body = parts.filter((p) => !p.thought && typeof p.text === "string").map((p) => p.text).join("").trim();
-  if (!body) return { ok: false, reason: `Gemini 没返回正文（finishReason: ${String(cand?.finishReason ?? "无")}）` };
+  // 只认正常写完：MAX_TOKENS / SAFETY 等停下的半截稿不能当成写完、被拿去盲选
+  if (cand?.finishReason !== "STOP") return { ok: false, reason: `Gemini 没写完（finishReason: ${String(cand?.finishReason ?? "无")}${body ? `，只写了 ${body.length} 字` : ""}）` };
+  if (!body) return { ok: false, reason: "Gemini 没返回正文（finishReason: STOP）" };
   const usage = usageOf(json.usageMetadata as Record<string, unknown> | undefined);
   return { ok: true, body, usage, cost_usd_estimate: estimateCost(usage) };
 }

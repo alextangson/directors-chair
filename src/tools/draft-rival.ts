@@ -6,6 +6,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { getContent, type Content, type ContentTx } from "../storage/local-store.js";
+import { isRealDraft } from "../storage/first-body-guard.js";
 import { needsOpening } from "../modules/draft/draft-types.js";
 import { angleKey, briefHash, buildRivalBrief, RIVAL_SYSTEM } from "../modules/draft/rival-brief.js";
 import { callGemini, NOT_CONFIGURED_HINT, rivalKey, rivalModel } from "../modules/draft/rival-gemini.js";
@@ -54,17 +55,22 @@ async function start(a: DraftArgs): Promise<R> {
   const pre = await getContent(a.contentId!, a.dataDir);
   const bad = startRefusal(pre, a);
   if (bad) return bad;
+  // 篇幅按主会话第 1 版定，所以先等它存下
+  if (!(await isRealDraft(pre!, a.dataDir))) return fail("needs_host_draft", "先存你那版第 1 版再发起比稿：Gemini 的篇幅按你那版的字数定（只给字数，不给正文）");
   const key = await rivalKey(a.dataDir);
   if (!key) return fail("not_configured", NOT_CONFIGURED_HINT);
   let brief: string;
   try { brief = await buildRivalBrief(pre!, a.dataDir); } catch (err) { return fail("failed", `比稿简报拼不出来：${err instanceof Error ? err.message : String(err)}`); }
   const hash = briefHash(brief);
+  const snapKey = angleKey(pre!.draftPath!.angle!);
   let created: RivalRecord | null = null;
   // 在写锁里就登记为在跑：否则锁一放、任务还没挂上，并发的第二次调用会把它读成 interrupted 再请求一次
   let release!: () => void;
   const gate = new Promise<void>((done) => { release = done; });
   const r = await withVersion(a, async (c, tx) => {
     const ak = angleKey(c.draftPath!.angle!);
+    // 拼简报时读的是锁外快照；改立意 / 开头不涨版本号，这里再核一次，免得旧简报挂到新立意名下
+    if (ak !== snapKey || needsOpening(c.draftPath!.angle)) return fail("angle_changed", "拼简报期间立意或开头改过了：重新发起 rival{content_id, base_version}");
     const same = (c.draftPath!.rivals ?? []).find((x) => x.brief_hash === hash && ["running", "done"].includes(viewOf(x, ak)));
     if (same) return { ok: true, reused: true, ...receipt(same, c) };
     const rec: RivalRecord = { id: `rival-${randomUUID().slice(0, 8)}`, status: "running", brief_hash: hash, angle_key: ak, model: rivalModel(), started_at: new Date().toISOString() };
@@ -75,7 +81,7 @@ async function start(a: DraftArgs): Promise<R> {
   });
   if (created) void runJob(pre!, created, key, brief, a.dataDir).finally(release);
   else release();
-  return r.ok ? { ...r, tally: await rivalTally(a.dataDir), next_action: { note: "照常写你那版并 save；之后用 rival{content_id, rival_id} 取 Gemini 稿（最多等 10 分钟）" } } : r;
+  return r.ok ? { ...r, tally: await rivalTally(a.dataDir), next_action: { note: "接着给你那版做试读；之后用 rival{content_id, rival_id} 取 Gemini 稿（最多等 10 分钟）" } } : r;
 }
 
 async function status(a: DraftArgs): Promise<R> {

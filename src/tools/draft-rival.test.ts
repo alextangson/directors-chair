@@ -2,12 +2,24 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pickOpening, OPENINGS } from "./draft-test-helpers.js";
 import { executeDraft } from "./draft.js";
 import { setQuoteFetch } from "../modules/draft/verify-quote.js";
 import { setRivalFetch, setRivalTimeoutMs } from "../modules/draft/rival-gemini.js";
 import { settleRivalJob } from "../modules/draft/rival-store.js";
+import { targetChars } from "../modules/draft/rival-brief.js";
+
+/** 拼完简报、进写锁之前插一脚（测「拼简报期间立意改了」） */
+const hooks = vi.hoisted(() => ({ afterBrief: null as null | (() => Promise<void>) }));
+vi.mock("../modules/draft/rival-brief.js", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("../modules/draft/rival-brief.js")>();
+  return { ...orig, buildRivalBrief: async (...args: Parameters<typeof orig.buildRivalBrief>) => {
+    const brief = await orig.buildRivalBrief(...args);
+    if (hooks.afterBrief) await hooks.afterBrief();
+    return brief;
+  } };
+});
 import { contrastContext } from "../modules/draft/draft-context.js";
 import { getContent, updateContent } from "../storage/local-store.js";
 import { buildIpcHandlers } from "../desktop/ipc.js";
@@ -64,6 +76,7 @@ beforeEach(async () => {
   }) as typeof fetch);
 });
 afterEach(async () => {
+  hooks.afterBrief = null;
   setQuoteFetch(undefined); setRivalFetch(undefined); setRivalTimeoutMs(undefined);
   delete process.env.GEMINI_API_KEY;
   await fs.rm(dir, { recursive: true, force: true });
@@ -246,6 +259,66 @@ describe("比稿 rival", () => {
     expect((last.tally as { hint?: string }).hint).toContain("定去留");
   });
 
+  it("没存第 1 版不能比稿：needs_host_draft，不发请求", async () => {
+    const s = await run("start", { inspiration: "用了 AI 反而更忙" });
+    const id = s.content_id as string;
+    const v = (s.progress as { version: number }).version;
+    await run("angle", { content_id: id, base_version: v, ...ANGLE });
+    await pickOpening(run, id, v);
+    expect(await run("rival", { content_id: id, base_version: v })).toMatchObject({ ok: false, code: "needs_host_draft" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("4b 拼简报期间立意改了：angle_changed，不登记旧简报、不发请求", async () => {
+    const { id, version } = await hostSaved();
+    hooks.afterBrief = async () => {
+      const c = (await getContent(id, dir))!;
+      await updateContent(id, { draftPath: { ...c.draftPath!, angle: { ...c.draftPath!.angle!, main_line: "改过的主线" } } }, dir);
+    };
+    expect(await run("rival", { content_id: id, base_version: version })).toMatchObject({ ok: false, code: "angle_changed" });
+    expect((await getContent(id, dir))!.draftPath!.rivals ?? []).toHaveLength(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("11b 锁定的写法读不出来：failed，不把错误当依据发给 Gemini", async () => {
+    const { id, version } = await hostSaved();
+    const c = (await getContent(id, dir))!;
+    await updateContent(id, { draftPath: { ...c.draftPath!, angle: { ...c.draftPath!.angle!, method: { version: "no-such-version" } } as never } }, dir);
+    const r = await run("rival", { content_id: id, base_version: version });
+    expect(r).toMatchObject({ ok: false, code: "failed" });
+    expect(r.error).toContain("写法");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("13 Gemini 没写完（MAX_TOKENS）：failed 带原因，半截稿不能选", async () => {
+    const { id, version } = await hostSaved();
+    replies.push(() => new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "写到一半" }] }, finishReason: "MAX_TOKENS" }] }), { status: 200 }));
+    const rid = await rivalDone(id, version);
+    const st = await run("rival", { content_id: id, rival_id: rid });
+    expect(st).toMatchObject({ status: "failed", pickable: false });
+    expect(st.reason).toContain("MAX_TOKENS");
+    expect(st.body).toBeUndefined();
+  });
+
+  it("13b 简报被 Gemini 拒（blockReason）：failed 带原因", async () => {
+    const { id, version } = await hostSaved();
+    replies.push(() => new Response(JSON.stringify({ promptFeedback: { blockReason: "SAFETY" } }), { status: 200 }));
+    const rid = await rivalDone(id, version);
+    const st = await run("rival", { content_id: id, rival_id: rid });
+    expect(st).toMatchObject({ status: "failed" });
+    expect(st.reason).toContain("SAFETY");
+  });
+
+  it("14 选中 Gemini 版后正文不变只附意见：作者仍记 Gemini", async () => {
+    const { id, version } = await hostSaved();
+    const rid = await rivalDone(id, version);
+    const r = await run("save", { content_id: id, base_version: version, body: GEMINI_BODY, rival_pick: { rival_id: rid, picked: "rival", founder_words: "B" } });
+    expect(r.ok).toBe(true);
+    const again = await run("save", { content_id: id, base_version: r.version, body: GEMINI_BODY, feedback: { founder_words: "第二段再短一点" } });
+    expect(again.ok).toBe(true);
+    expect((await getContent(id, dir))!.writtenBy).toEqual({ kind: "engine", provider: "gemini", model: "gemini-3.1-pro-preview" });
+  });
+
   it("11 简报只有锁住的依据：有开头、立意、已核验引文，没有主会话的稿", async () => {
     const { id, version } = await hostSaved();
     await rivalDone(id, version);
@@ -255,6 +328,7 @@ describe("比稿 rival", () => {
     expect(brief).toContain(ANGLE.main_line);
     expect(brief).toContain(QUOTE);
     expect(brief).not.toContain("主会话独有的一句");
+    expect(brief).toContain(`约 ${targetChars(HOST_BODY)} 字`);
     expect(sent.systemInstruction.parts[0].text).toContain("Chinese body text");
   });
 });
