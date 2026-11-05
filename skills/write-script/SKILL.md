@@ -138,9 +138,9 @@ description: |
 
 - 开头选定后、动笔前先调 `rival{content_id, base_version}`，拿到 `rival_id` 就接着写自己那版、照常存第 1 版和试读，不等它。之后用 `rival{content_id, rival_id}` 取结果，最多等 10 分钟。
 - 回 `not_configured`：这篇跳过比稿，把回执里的配置位置告诉创始人一次，照常单稿。`failed` / `interrupted`：把原因照实告诉他，只交你那版，不要假装比过。
-- Gemini 那版也起一个不继承会话的子代理试读（只给正文），并用同一标准检查两版：不在 `firsthand` 和创始人原话里的「我/我们做过」、证据台账以外的数字和引述、`format_warnings` 那类格式问题。只标出来，两版都不改——改了就不是在比原稿。
+- Gemini 那版也起一个不继承会话的子代理试读（只给正文），并用同一标准检查两版：不在 `firsthand` 和创始人原话里的「我/我们做过」、证据台账以外的数字和引述、`format_warnings` 那类格式问题。只标出来，两版都不改——改了就不是在比原稿。上面「划走点超过 2 处先自己改一次」这次也不做，等他选完再按第 6 步改。
 - 随机排成 A / B 给他：两版全文、各自试读、标出的问题。不说哪版是谁写的，不给推荐。
-- 他选你那版：`save{body:<你第 1 版原文>, rival_pick:{rival_id, picked:"host", founder_words}}`；选 Gemini 那版：`save{body:<Gemini 原文逐字>, rival_pick:{rival_id, picked:"rival", founder_words}, test_read:<它的试读>}`；要拼：按他的话拼好再存，`picked:"merged"`。之后照第 6 步改。
+- 他选你那版：`save{body:<你那版当前正文，不改>, rival_pick:{rival_id, picked:"host", founder_words}}`；选 Gemini 那版：`save{body:<Gemini 原文逐字>, rival_pick:{rival_id, picked:"rival", founder_words}, test_read:<它的试读>}`；要拼：按他的话拼好再存，`picked:"merged"`。之后照第 6 步改。
 - 回执里的 `tally` 每篇告诉他一句（几篇里各赢几次）；带 `hint` 时请他定去留。
 
 ## 6 改

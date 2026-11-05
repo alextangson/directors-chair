@@ -60,15 +60,21 @@ async function start(a: DraftArgs): Promise<R> {
   try { brief = await buildRivalBrief(pre!, a.dataDir); } catch (err) { return fail("failed", `比稿简报拼不出来：${err instanceof Error ? err.message : String(err)}`); }
   const hash = briefHash(brief);
   let created: RivalRecord | null = null;
+  // 在写锁里就登记为在跑：否则锁一放、任务还没挂上，并发的第二次调用会把它读成 interrupted 再请求一次
+  let release!: () => void;
+  const gate = new Promise<void>((done) => { release = done; });
   const r = await withVersion(a, async (c, tx) => {
     const ak = angleKey(c.draftPath!.angle!);
     const same = (c.draftPath!.rivals ?? []).find((x) => x.brief_hash === hash && ["running", "done"].includes(viewOf(x, ak)));
     if (same) return { ok: true, reused: true, ...receipt(same, c) };
-    created = { id: `rival-${randomUUID().slice(0, 8)}`, status: "running", brief_hash: hash, angle_key: ak, model: rivalModel(), started_at: new Date().toISOString() };
-    await tx.write({ draftPath: { ...c.draftPath!, rivals: [...(c.draftPath!.rivals ?? []), created] } });
-    return { ok: true, reused: false, rival_id: created.id, status: "running", model: created.model };
+    const rec: RivalRecord = { id: `rival-${randomUUID().slice(0, 8)}`, status: "running", brief_hash: hash, angle_key: ak, model: rivalModel(), started_at: new Date().toISOString() };
+    await tx.write({ draftPath: { ...c.draftPath!, rivals: [...(c.draftPath!.rivals ?? []), rec] } });
+    created = rec;
+    trackJob(rec.id, gate);
+    return { ok: true, reused: false, rival_id: rec.id, status: "running", model: rec.model };
   });
-  if (created) trackJob((created as RivalRecord).id, runJob(pre!, created, key, brief, a.dataDir));
+  if (created) void runJob(pre!, created, key, brief, a.dataDir).finally(release);
+  else release();
   return r.ok ? { ...r, tally: await rivalTally(a.dataDir), next_action: { note: "照常写你那版并 save；之后用 rival{content_id, rival_id} 取 Gemini 稿（最多等 10 分钟）" } } : r;
 }
 

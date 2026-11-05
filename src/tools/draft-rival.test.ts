@@ -150,6 +150,15 @@ describe("比稿 rival", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("3b 同时调两次：第二次不会把刚建的记录读成 interrupted 再请求一次", async () => {
+    const { id, version } = await hostSaved();
+    const [a, b] = await Promise.all([run("rival", { content_id: id, base_version: version }), run("rival", { content_id: id, base_version: version })]);
+    expect(a.ok && b.ok).toBe(true);
+    expect(b.rival_id).toBe(a.rival_id);
+    await settleRivalJob(a.rival_id as string);
+    expect(calls).toHaveLength(1);
+  });
+
   it("4 改了开头：旧 Gemini 稿 stale，选它被拒", async () => {
     const { id, version } = await hostSaved();
     const rid = await rivalDone(id, version);
