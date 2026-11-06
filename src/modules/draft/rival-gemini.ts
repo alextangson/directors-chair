@@ -2,7 +2,7 @@
  * 比稿（spec 2026-11-06）：调 Gemini 官方 API 写一版全文。
  * key 只放请求头 x-goog-api-key，不进 URL。402 = 余额不足；429/5xx 按 Retry-After 重试一次；其他错误和超时如实回原因。
  */
-import { loadCoverSettings } from "../cover/provider.js";
+import { loadRivalSettings } from "./rival-settings.js";
 
 export const DEFAULT_RIVAL_MODEL = "gemini-3.1-pro-preview";
 const API = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -19,13 +19,13 @@ export function setRivalFetch(fn: Fetch | undefined): void { fetchOverride = fn;
 export function setRivalTimeoutMs(ms: number | undefined): void { timeoutMs = ms ?? 10 * 60_000; }
 
 export const rivalModel = () => process.env.AUTOCREW_RIVAL_MODEL?.trim() || DEFAULT_RIVAL_MODEL;
-export const NOT_CONFIGURED_HINT = "没配 Gemini Key：在 设置·封面生成 填「Gemini Key」（封面和比稿共用），或设环境变量 GEMINI_API_KEY。这篇只交主会话那一版";
+export const NOT_CONFIGURED_HINT = "没配 Gemini Key：在 设置·写稿比稿 填「Gemini Key（写稿比稿用）」，或设环境变量 GEMINI_API_KEY。这篇只交主会话那一版";
 
-/** 环境变量优先，再看设置里封面那把 */
+/** 环境变量优先，再看设置·写稿比稿（rival.json）；不读封面设置 */
 export async function rivalKey(dataDir?: string): Promise<string | null> {
   const env = process.env.GEMINI_API_KEY?.trim();
   if (env) return env;
-  return (await loadCoverSettings(dataDir)).geminiApiKey?.trim() || null;
+  return (await loadRivalSettings(dataDir)).geminiApiKey?.trim() || null;
 }
 
 export interface RivalUsage { prompt_tokens: number; output_tokens: number; thought_tokens: number; total_tokens: number }

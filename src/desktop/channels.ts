@@ -76,6 +76,8 @@ export const IPC_CHANNELS = [
   "cover:identity",
   "settings:cover_get",
   "settings:cover_set",
+  "settings:rival_get",
+  "settings:rival_set",
   "logs:list",
   "logs:get_run",
   "skills:list",

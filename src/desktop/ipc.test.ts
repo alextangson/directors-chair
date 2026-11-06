@@ -73,6 +73,8 @@ describe("IPC_CHANNELS", () => {
     "cover:ratios",
     "settings:cover_get",
     "settings:cover_set",
+    "settings:rival_get",
+    "settings:rival_set",
     "logs:list",
     "logs:get_run",
     "skills:list",
@@ -156,8 +158,9 @@ describe("IPC_CHANNELS", () => {
   // 2026-10-04 薄路径定稿：draft:final_get / draft:finalize（draft-handlers.ts）
   // 2026-10-15 试跑示例一键删：topic:delete_example（ipc.ts 直连 deleteExampleTopic）
   // 2026-10-25 在 ego lite 里打开平台后台：ego:open_console（ego-open-console.ts）；2026-10-26 顶栏定稿：script:final_get / script:finalize
-  it("has exactly 177 channels", () => {
-    expect(IPC_CHANNELS).toHaveLength(177);
+  // 2026-11-06 比稿 Gemini Key 独立设置：settings:rival_get / settings:rival_set → 179
+  it("has exactly 179 channels", () => {
+    expect(IPC_CHANNELS).toHaveLength(179);
   });
 
   it.each(EXPECTED)("contains %s", (ch) => {
@@ -306,6 +309,8 @@ describe("CHANNEL_ACTIONS — channel→action bindings", () => {
           ch !== "cover:ratios" &&
           ch !== "settings:cover_get" &&
           ch !== "settings:cover_set" &&
+          ch !== "settings:rival_get" &&
+          ch !== "settings:rival_set" &&
           ch !== "logs:list" &&
           ch !== "logs:get_run" &&
           ch !== "skills:list" &&

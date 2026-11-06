@@ -104,6 +104,7 @@ import {
   coverSettingsGetHandler,
   coverSettingsSetHandler,
 } from "./cover-handlers.js";
+import { rivalSettingsGetHandler, rivalSettingsSetHandler } from "./rival-handlers.js";
 import { coverIdentityHandler } from "./cover-identity-handlers.js";
 import {
   articleImagesGenerateHandler,
@@ -1335,6 +1336,8 @@ export function buildIpcHandlers(deps?: Partial<Record<IpcChannel, IpcHandler>>)
     "cover:identity": coverIdentityHandler,
     "settings:cover_get": coverSettingsGetHandler,
     "settings:cover_set": coverSettingsSetHandler,
+    "settings:rival_get": rivalSettingsGetHandler,
+    "settings:rival_set": rivalSettingsSetHandler,
     "logs:list": logsListHandler,
     "logs:get_run": logsGetRunHandler,
     "skills:list": skillsListHandler,

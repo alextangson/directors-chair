@@ -67,7 +67,7 @@ export const SHORT_CHANNELS: ReadonlySet<string> = new Set([
   "settings:engine_attach_preset", "settings:offer_set",
   "hosts:list", "hosts:revoke",
   "settings:publish_get", "settings:publish_set",
-  "persona:save", "cover:get", "settings:cover_get", "settings:cover_set",
+  "persona:save", "cover:get", "settings:cover_get", "settings:cover_set", "settings:rival_get", "settings:rival_set",
   "logs:list", "logs:get_run", "skills:list", "goal:get", "goal:set", "retro:list", "retro:get", "onboarding:status",
   "flywheel:import_csv", "flywheel:record", "flywheel:pull_status", "flywheel:pull_toggle", "flywheel:hypotheses_list", "calibration:ledger",
   "dialog:pick_file", "dialog:pick_media", "knowledge:status", "radar:status", "radar:sources_set", "profile:update",

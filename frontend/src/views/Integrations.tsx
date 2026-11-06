@@ -46,6 +46,13 @@ interface CoverView {
   gemini: { configured: boolean; apiKeyMasked: string | null; source: string; model: string };
 }
 
+interface RivalView {
+  configured: boolean;
+  apiKeyMasked: string | null;
+  source: "file" | "env" | "none";
+  model: string;
+}
+
 interface InboxSettingsView {
   configured: boolean;
   botTokenMasked: string | null;
@@ -154,6 +161,8 @@ export function Integrations() {
   const [pForm, setPForm] = useState({ ...EMPTY_PUBLISH_FORM });
   const [cover, setCover] = useState<CoverView | null>(null);
   const [cForm, setCForm] = useState({ provider: "", relay_model: "", gemini_api_key: "", gemini_model: "" });
+  const [rival, setRival] = useState<RivalView | null>(null);
+  const [rForm, setRForm] = useState({ gemini_api_key: "" });
   const [sources, setSources] = useState<RadarSource[]>([]);
   const [inbox, setInbox] = useState<InboxSettingsView | null>(null);
   const [inboxRuntime, setInboxRuntime] = useState<InboxRuntimeView | null>(null);
@@ -161,9 +170,10 @@ export function Integrations() {
   const [ws, setWs] = useState<{ active: string; workspaces: Array<{ id: string; name: string }> } | null>(null);
 
   const load = async () => {
-    const [pr, cr, rr, ir, runtime, wr] = await Promise.all([
+    const [pr, cr, rvr, rr, ir, runtime, wr] = await Promise.all([
       invoke("settings:publish_get"),
       invoke("settings:cover_get"),
+      invoke("settings:rival_get"),
       invoke("radar:status"),
       invoke("inbox:settings_get"),
       invoke("inbox:status"),
@@ -171,6 +181,7 @@ export function Integrations() {
     ]);
     if (pr.ok) setPub((pr as unknown as { data: PublishView }).data);
     if (cr.ok) setCover((cr as unknown as { data: CoverView }).data);
+    if (rvr.ok) setRival((rvr as unknown as { data: RivalView }).data);
     if (rr.ok) setSources((rr as unknown as { data: { sources?: RadarSource[] } }).data?.sources ?? []);
     if (ir.ok) setInbox((ir as unknown as { data: InboxSettingsView }).data);
     if (runtime.ok) setInboxRuntime((runtime as unknown as { data: InboxRuntimeView }).data);
@@ -317,8 +328,21 @@ export function Integrations() {
           </select>
         </label>
         <Field label="中转模型" value={cForm.relay_model} placeholder={cover?.relay.model ?? "gpt-image-2"} onChange={(v) => setCForm((f) => ({ ...f, relay_model: v }))} />
-        <Field label="Gemini Key（封面和比稿共用）" password value={cForm.gemini_api_key} placeholder={cover?.gemini.apiKeyMasked ?? "AIza...（封面切 Gemini、写稿比稿时需要）"} onChange={(v) => setCForm((f) => ({ ...f, gemini_api_key: v }))} />
+        <Field label="Gemini Key" password value={cForm.gemini_api_key} placeholder={cover?.gemini.apiKeyMasked ?? "AIza...（切 Gemini 才需要）"} onChange={(v) => setCForm((f) => ({ ...f, gemini_api_key: v }))} />
         <SaveRow label="保存封面配置" onSave={() => void submit("settings:cover_set", cForm, () => setCForm({ provider: "", relay_model: "", gemini_api_key: "", gemini_model: "" }))} />
+      </IntegrationCard>
+
+      <IntegrationCard
+        title="写稿比稿"
+        unlocks="写稿时让 Gemini 另写一版全文，和主会话那版盲比。"
+        ifMissing="比稿跳过，只交主会话那一版；不影响其它功能。"
+        status={integrationStatus({
+          configured: Boolean(rival?.configured),
+          okLabel: `${rival?.source === "env" ? "环境变量" : "已配置"} ${rival?.apiKeyMasked ?? ""} · ${rival?.model ?? ""}`,
+        })}
+      >
+        <Field label="Gemini Key（写稿比稿用）" password value={rForm.gemini_api_key} placeholder={rival?.apiKeyMasked ?? "AIza...（免费获取：aistudio.google.com/apikey）"} onChange={(v) => setRForm({ gemini_api_key: v })} />
+        <SaveRow label="保存比稿配置" onSave={() => void submit("settings:rival_set", rForm, () => setRForm({ gemini_api_key: "" }))} />
       </IntegrationCard>
 
       <IntegrationCard

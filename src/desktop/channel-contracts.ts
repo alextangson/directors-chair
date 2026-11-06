@@ -85,6 +85,8 @@ export const REQUIRED_FIELDS: Record<IpcChannel, readonly string[]> = {
   "cover:identity": ["action"],
   "settings:cover_get": [],
   "settings:cover_set": [],
+  "settings:rival_get": [],
+  "settings:rival_set": [],
   "logs:list": [],
   "logs:get_run": ["run_id"],
   "skills:list": [],

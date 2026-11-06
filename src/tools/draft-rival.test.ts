@@ -88,7 +88,7 @@ describe("比稿 rival", () => {
     const { id, version } = await hostSaved();
     const r = await run("rival", { content_id: id, base_version: version });
     expect(r).toMatchObject({ ok: false, code: "not_configured" });
-    expect(r.error).toContain("设置·封面生成");
+    expect(r.error).toContain("设置·写稿比稿");
     expect(calls).toHaveLength(0);
   });
 

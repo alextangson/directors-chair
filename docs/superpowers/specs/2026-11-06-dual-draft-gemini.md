@@ -38,7 +38,8 @@ Gemini 没配好（没 key）时整节跳过，只在本篇告诉创始人一次
   - 2026-11-06 真稿实测加的：不给篇幅时 Gemini 只写了主会话一半的字数，开头许诺的「从夯到拉排一遍」没兑现，盲选时比的就不是写法了。
   - 主会话还有对话上下文（调研过程、创始人随口说的话），Gemini 没有。这是有意的：试行要回答的是「加上 Gemini 能不能比现在更好」。
 - **模型**：默认 `gemini-3.1-pro-preview`（这把 key 已实测可用），环境变量 `AUTOCREW_RIVAL_MODEL` 可换。
-- **Key**：`GEMINI_API_KEY` 环境变量 → 设置·封面生成里的 Gemini Key（`cover.json` 的 `geminiApiKey`）。设置页那一栏的说明改成「封面和比稿共用」。
+- **Key**：`GEMINI_API_KEY` 环境变量 → 设置·写稿比稿里的「Gemini Key（写稿比稿用）」（独立文件 `rival.json`，0600，IPC `settings:rival_get/set`，get 只回掩码）。不读 `cover.json`。
+  - 11-06 创始人定：封面不用 Gemini，继续走 Codex 订阅，所以比稿的 key 不和封面设置耦合。
 - **异步**：启动即返回；状态和结果落盘到这篇稿的记录里。服务重启时还在跑的标 `interrupted`，可以重新发起。
 - **幂等**：同一篇、同一份简报（按简报 hash）已在跑或已完成，返回同一个 `rival_id`，不重复请求。立意或开头改过后，旧结果标 `stale`，不能被选。
 - **失败要看得见**：没 key 回 `not_configured` 加去哪配；402 回「Gemini 账户余额不足」；429/5xx 按 `Retry-After` 重试一次；其他错误或 10 分钟超时回 `failed` 加原因。主会话照实告诉创始人，只交自己那版。
