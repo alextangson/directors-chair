@@ -1,7 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { historyGuard } from "./history-guard.js";
 import { contentSummary } from "./content-summary.js";
-import { gateClaimWrite, redactClaim, type WriteGate } from "../storage/claims.js";
+import { gateClaimWrite, gateWithoutClaim, redactClaim, type WriteGate } from "../storage/claims.js";
 import {
   LOCAL_HOST,
   saveContent,
@@ -37,6 +37,8 @@ import { reconcileContentForRead } from "../modules/production/reconcile.js";
 import { newDraftAngleRefusal } from "../modules/research/angle-gate.js";
 import { sameVideoRefusal } from "./variant-guard.js";
 import { boardTrashRefusal } from "../modules/production/trash-guard.js";
+import { executeWechatArticle, WECHAT_ARTICLE_ACTION_DOC } from "./wechat-article.js";
+import { executeEnEdition, EN_EDITION_ACTION_DOC } from "./en-edition.js";
 import { FirstBodyRefusedError, provenanceOf } from "../storage/first-body-guard.js";
 
 const ALL_STATUSES = [
@@ -50,17 +52,17 @@ const ALL_STATUSES = [
 /** autocrew_content 里会写稿件的动作（对 imported_history 一律不受理） */
 const HISTORY_WRITE_ACTIONS: ReadonlySet<string> = new Set(["update", "record", "mark_ready", "ask", "answer_ask", "withdraw_ask", "delete", "restore", "adoption", "transition", "create_variant"]);
 export const contentSaveSchema = Type.Object({
-  action: Type.Unsafe<"save" | "list" | "get" | "summary" | "update" | "transition" | "create_variant" | "siblings" | "allowed_transitions" | "adoption" | "delete" | "restore" | "record" | "check_slivers" | "mark_ready" | "ask" | "answer_ask" | "withdraw_ask">({
+  action: Type.Unsafe<"save" | "list" | "get" | "summary" | "derivative_status" | "update" | "transition" | "create_variant" | "siblings" | "allowed_transitions" | "adoption" | "delete" | "restore" | "record" | "check_slivers" | "mark_ready" | "ask" | "answer_ask" | "withdraw_ask" | "wechat_article" | "en_edition">({
     type: "string",
-    enum: ["save", "list", "get", "summary", "update", "transition", "create_variant", "siblings", "allowed_transitions", "adoption", "delete", "restore", "record", "check_slivers", "mark_ready", "ask", "answer_ask", "withdraw_ask"],
+    enum: ["save", "list", "get", "summary", "derivative_status", "update", "transition", "create_variant", "siblings", "allowed_transitions", "adoption", "delete", "restore", "record", "check_slivers", "mark_ready", "ask", "answer_ask", "withdraw_ask", "wechat_article", "en_edition"],
     description:
       "Action: 'save' new content, 'list' all, 'get' by id, 'update' existing, " +
       "'transition' change status via state machine, 'create_variant' create platform variant from topic, " +
-      "'siblings' list sibling content, 'allowed_transitions' show valid next statuses, " +
+      "'siblings' list sibling content, 'allowed_transitions' show valid next statuses, 'derivative_status' 只读后台派生策略与真实会话任务，不创建会话, " +
       "'adoption' record adoption verdict (采纳率北极星读数)——仅工作台可用，宿主调用会被服务端拒绝（采纳不能由模型代填）, " +
       "'record' 报制作事实（原片 aroll / 成片 cut / 字幕 srt / 封面 cover / ChatCut 工程 chatcut_project）：只报盘上有什么，不带任何批准；认稿、成片通过、选封面只能创始人点; " +
       "'check_slivers' 导出前自查抽帧缝（两段 B-roll / 动效之间露出 <1 秒的真人），只读、不写任何记录，可带 chatcut_project_id / timeline_id; " +
-      "'mark_ready' 成片可以审了（配乐、混音都好了才标）; 'ask' 剪辑途中请示创始人（进「等你拍板」，并马上在聊天里把问题和附件给他看）; 'answer_ask' 记创始人在聊天里的回答（founder_quote 逐字，任何请示都收）; 'withdraw_ask' 撤回请示.",
+      "'mark_ready' 成片可以审了（配乐、混音都好了才标）; 'ask' 剪辑途中请示创始人（进「等你拍板」，并马上在聊天里把问题和附件给他看）; 'answer_ask' 记创始人在聊天里的回答（founder_quote 逐字，任何请示都收）; 'withdraw_ask' 撤回请示; " + WECHAT_ARTICLE_ACTION_DOC + "; " + EN_EDITION_ACTION_DOC + ".",
   }),
   id: Type.Optional(Type.String({ description: "Content id (for get/update/transition/siblings/allowed_transitions)" })),
   content_id: Type.Optional(Type.String({ description: "Alias of `id` — other AutoCrew tools call it content_id" })),
@@ -68,7 +70,7 @@ export const contentSaveSchema = Type.Object({
   import_reason: Type.Optional(Type.String({ description: "save/create_variant：用户提供已有稿件并要求导入的说明；不能用于绕过 AI 交稿门。" })),
   title: Type.Optional(Type.String({ description: "Content title" })),
   body: Type.Optional(Type.String({ description: "Content body (markdown)" })),
-  platform: Type.Optional(Type.String({ description: "Target platform: xhs, douyin, wechat_video, wechat_mp, bilibili" })),
+  platform: Type.Optional(Type.String({ description: "Target platform: douyin, xiaohongshu, wechat_mp, wechat_video, bilibili, twitter, reddit, toutiao" })),
   topicId: Type.Optional(Type.String({ description: "Related topic id (for save/create_variant)" })),
   distinct_video: Type.Optional(Type.Boolean({ description: "create_variant：同选题另做一条内容不同的新视频时才填 true。同一条视频发多平台不建变体，在发布计划里加平台。" })),
   status: Type.Optional(Type.Unsafe<string>({
@@ -108,22 +110,25 @@ export const contentSaveSchema = Type.Object({
   })),
   kind: Type.Optional(Type.Unsafe<string>({
     type: "string",
-    enum: ["aroll", "cut", "srt", "cover", "chatcut_project", "publish", "storyboard", "粗剪", "分镜", "样片", "花费", "配乐", "其他"],
-    description: "record：事实种类；ask：请示种类（粗剪 / 分镜 / 样片 / 花费 / 配乐 / 其他）。aroll 原片、cut 成片、srt 字幕、cover 封面、chatcut_project ChatCut 工程、publish 发布回执（带本平台 url 或报定时的直接算已投出，其余待核）、storyboard 分镜（只收 build_material_review.py 生成的 03-broll/review-vNNN/*.html）.",
+    enum: ["aroll", "cut", "srt", "cover", "chatcut_project", "publish", "storyboard", "clean_master", "粗剪", "分镜", "样片", "花费", "配乐", "其他"],
+    description: "record：事实种类；ask：请示种类（粗剪 / 分镜 / 样片 / 花费 / 配乐 / 其他）。aroll 原片、cut 成片、srt 字幕、cover 封面、chatcut_project ChatCut 工程、publish 发布回执（带本平台 url 或报定时的直接算已投出，其余待核）、storyboard 分镜（只收 build_material_review.py 生成的 03-broll/review-vNNN/*.html）、clean_master 无字幕母版（审过的成片关字幕导出的 1920×1080，英文版画面来源，要带 captions_off=true）.",
   })),
   request_id: Type.Optional(Type.String({ description: "record：这次报告的请求号；重试用同一个，服务端直接重放上次结果." })),
   since_seq: Type.Optional(Type.Integer({ minimum: 0, description: "summary：只要这个时间线序号之后的变化；翻页用上次回的 next_since_seq（has_more=true 就接着翻）." })),
   aroll_offset: Type.Optional(Type.Integer({ minimum: 0, description: "summary：原片列表（本轮全部原片，按时间排）的游标，和 since_seq 各管各的；aroll_has_more=true 时用上次回的 aroll_next_offset 接着读." })),
   path: Type.Optional(Type.String({ description: "record：文件的本机路径（可 ~ 开头）。项目内原地收；原片收件箱、ChatCut / 剪映导出目录会挪 / 克隆进项目；其他位置只记候选." })),
   ratio: Type.Optional(Type.String({ description: "record kind=cover：3:4 或 4:3（按像素核对）." })),
+  article: Type.Optional(Type.Unknown({ description: "wechat_article 的参数对象 {op, …}（见 action 说明）" })),
+  edition: Type.Optional(Type.Unknown({ description: "en_edition 的参数对象 {op, …}（见 action 说明）" })),
   version: Type.Optional(Type.Integer({ minimum: 1, description: "record kind=cover：封面版本号；不填就放新一版." })),
   cover_text: Type.Optional(Type.String({ description: "record kind=cover：封面上的字（只是默认值，不是批准）." })),
-  for_cut: Type.Optional(Type.String({ description: "record kind=srt：这份字幕属于哪版成片（成片 fact_id 或 sha256）；不填 = 本轮最新成片." })),
+  for_cut: Type.Optional(Type.String({ description: "record kind=srt / clean_master：属于哪版成片（成片 fact_id 或 sha256）；不填 = 本轮最新成片." })),
   uses_aroll: Type.Optional(Type.Array(Type.String(), { description: "record kind=chatcut_project：工程里用到的原片 fact_id." })),
   chatcut_project_id: Type.Optional(Type.String({ description: "record kind=chatcut_project / check_slivers：ChatCut 工程 id." })),
   timeline_id: Type.Optional(Type.String({ description: "record kind=chatcut_project / check_slivers：时间线 id（可选）." })),
   note: Type.Optional(Type.String({ description: "record：一句备注（可选）." })),
   review: Type.Optional(Type.Boolean({ description: "record kind=cut：这版可以审了." })),
+  captions_off: Type.Optional(Type.Boolean({ description: "record kind=clean_master：声明字幕轨已关、画面无烧录字幕." })),
   paths: Type.Optional(Type.Array(Type.String(), { description: "record kind=cover：一组 [3:4, 4:3]." })),
   pair_with: Type.Optional(Type.String({ description: "record kind=cover：和这张封面 fact_id 成对." })),
   fact_id: Type.Optional(Type.String({ description: "mark_ready：成片 fact_id；ask kind=分镜：分镜 fact_id." })),
@@ -203,9 +208,12 @@ function gateContentWrite(
   params: Record<string, unknown>,
   id: string,
   dataDir: string | undefined,
+  founderDecision = false,
 ): Promise<WriteGate> {
   const host = typeof params._host === "string" && params._host.trim() ? params._host.trim() : LOCAL_HOST;
   const token = typeof params.claim_token === "string" ? params.claim_token.trim() : "";
+  // 创始人认稿 / 退回修改（收件箱决定）：过门不占认领。只走函数参数——params 里的键模型调用能带进来（OpenClaw 不剥 `_`）
+  if (founderDecision) return gateWithoutClaim(id, { host, token: token || undefined }, dataDir);
   return gateClaimWrite(id, { host, token: token || undefined }, dataDir);
 }
 
@@ -224,6 +232,8 @@ function rejectedTransition(pre: { error?: string; blocked?: boolean; code?: str
 export async function executeContentSave(
   params: Record<string, unknown>,
   deps?: {
+    /** 收件箱里创始人的认稿 / 退回修改：流转过令牌门但不占认领（只由 inbox-decide 传） */
+    founderDecision?: boolean;
     recordDiffImpl?: typeof recordDiff;
     shouldDistillImpl?: typeof shouldDistillStyle;
     distillImpl?: typeof distillStyleRules;
@@ -258,6 +268,10 @@ export async function executeContentSave(
 
   // 只读进度摘要（v1.3）：查「这篇到哪了」不用拉 16KB 的整篇
   if (action === "summary") return contentSummary(String(params.id ?? "").trim(), dataDir, Date.now(), params.since_seq, params.aroll_offset, params.asks_offset);
+  if (action === "derivative_status") {
+    const { dispatchStatus } = await import("../modules/derivative-dispatch/service.js");
+    return dispatchStatus(String(params.id ?? "").trim(), getDataDir(dataDir));
+  }
 
   // 历史作品记录：所有写动作不受理（改正文、报制作事实、推进、删除……）；删除只走 autocrew_insights history_delete
   if (HISTORY_WRITE_ACTIONS.has(String(action))) {
@@ -267,6 +281,8 @@ export async function executeContentSave(
 
   // 本体 §3：agent 只报事实（原片 / 成片 / 字幕 / 封面 / ChatCut 工程），不要认领、不要交接
   if (action === "record") return executeRecord(params);
+  if (action === "wechat_article") return executeWechatArticle(params);
+  if (action === "en_edition") return executeEnEdition(params);
   if (action === "mark_ready") return executeMarkReady(params);
   // 等你拍板 §5：剪辑途中的请示（agent 发起 / 撤回 / 转述创始人在聊天里的回答）
   if (action === "ask") return executeAsk(params);
@@ -304,6 +320,10 @@ export async function executeContentSave(
       error: "这篇仍是空白稿或尚未交稿的写作占位，不能通过 content update 填正文绕过交稿。请走 writer pack/submit；已有成稿需要导入时请另用 save 并注明 manual_import。",
       next_action: { tool: "autocrew_writer", params: { action: "pack", content_id: id, topic_id: oldContent.topicId, platform: oldContent.platform } },
     };
+    // 英文版的正文 = 双语脚本的英文（唯一来源）：只能经 en_edition set_script 改
+    if (oldContent.derivedFrom?.kind === "en_edition" && typeof params.body === "string" && params.body !== oldContent.body) {
+      return { ok: false, code: "en_script_is_source", error: "英文版的正文由双语脚本生成，不能直接改：用 autocrew_content en_edition set_script 改对应的段" };
+    }
     const platformLock = platformLockCheck(params, dataDir);
     if (platformLock && await platformLock(oldContent)) return { ok: false, code: "platform_locked", error: PLATFORM_LOCKED_ERROR };
     // 带 status 的 update 先预检流转：被拒就原样返回，认领门和正文都不动
@@ -436,7 +456,7 @@ export async function executeContentSave(
     // 状态机和阶段门先于认领门：被拒的流转不新占、不续约认领
     const pre = await transitionPreflight(id, normalizeLegacyStatus(targetStatus), { force: params.force as boolean, decidedBy: decidedBy(params) }, dataDir);
     if (!pre.ok) return rejectedTransition(pre);
-    const gate = await gateContentWrite(params, id, dataDir);
+    const gate = await gateContentWrite(params, id, dataDir, deps?.founderDecision === true);
     if ("denied" in gate) return gate.denied;
     // from_status：调用方手里那一版的状态。旧标签页/双击推进时后端据此人话拒绝，不硬盖
     const from = typeof params.from_status === "string" ? normalizeLegacyStatus(params.from_status) : undefined;

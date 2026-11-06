@@ -91,7 +91,7 @@ describe("P1 宿主走 /mcp 的长动作也算在跑", () => {
       ["publish:digest", "autocrew_publish", "digest"],
       ["style:distill", "autocrew_style", "distill"],
       ["style:absorb", "autocrew_style", "absorb_samples"],
-      ["radar:refresh", "autocrew_research", "discover"],
+      ["radar:refresh", "autocrew_topic", "radar_pool"],
       ["draft:rewrite_selection", "autocrew_rewrite", "x"],
     ];
     for (const [ch, tool, action] of pairs) {

@@ -25,6 +25,7 @@ import { buildSnapshot, probePixFmt, readTimeline, videoTiming, type Read } from
 import { detectSlivers, type DetectOutcome } from "./detect.js";
 import { CHECKER_VERSION, type ArollIdentity, type Fps, type Snapshot } from "./snapshot-types.js";
 import { withSuggestions } from "./suggest.js";
+import { cachedSha } from "../hash-cache.js";
 
 const KEEP = 30;
 const sha256 = (s: string | Buffer) => crypto.createHash("sha256").update(s).digest("hex");
@@ -94,6 +95,12 @@ async function snapshotFor(root: string, cut: Fact, cc: Fact): Promise<Read<Snap
 
 const realOr = async (p: string) => fs.realpath(p).catch(() => path.resolve(p));
 
+/** 后补路径上的文件：不在了照旧认（ChatCut 引用的就是这个路径）；还在就必须是同一份字节 */
+async function stillSameFootage(file: string, sha: string | undefined): Promise<boolean> {
+  try { return (await cachedSha(file)).sha256 === sha; }
+  catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT"; }
+}
+
 /** 逐份原片的路径身份：项目里那份文件的真实路径 + 记录 / 挪入前的原始路径（创始人 09-30：只按路径认） */
 export async function arollIdentity(root: string, facts: Fact[]): Promise<ArollIdentity> {
   const out: ArollIdentity = { facts: [] };
@@ -101,6 +108,8 @@ export async function arollIdentity(root: string, facts: Fact[]): Promise<ArollI
     const paths = new Set<string>();
     if (f.path) { const a = abs(root, f.path); paths.add(a); paths.add(await realOr(a)); }
     if (f.source_path) { paths.add(f.source_path); paths.add(await realOr(f.source_path)); }
+    // 后补的原始路径要还是这份原片才算：文件还在但字节变了（被覆盖 / 换成别的片）就不认（Codex 审）
+    for (const s of f.source_paths ?? []) if (await stillSameFootage(s, f.sha256)) { paths.add(s); paths.add(await realOr(s)); }
     out.facts.push({ id: f.id, label: f.path ? path.basename(f.path) : f.id, paths: [...paths] });
   }
   return out;
@@ -112,7 +121,9 @@ async function evaluate(content: Content, doc: ProductionDoc, cut: Fact, dataDir
   const root = contentRoot(content.id, dataDir);
   const cc = chatcutFact(doc), arolls = arollFacts(doc);
   const arollIds = arolls.map((f) => f.id).sort();
-  const fp = (snapSha: string | null) => sha256(JSON.stringify([CHECKER_VERSION, doc.round, cut.sha256, cc ? [cc.project_id, cc.timeline_id ?? null] : null, snapSha, arollIds]));
+  // 指纹带上后补的原始路径：路径变了，认原片的口径就变了，旧的放行决定不能沿用（Codex 审）
+  const arollKeys = arolls.map((f) => [f.id, ...(f.source_paths ?? [])].join("|")).sort();
+  const fp = (snapSha: string | null) => sha256(JSON.stringify([CHECKER_VERSION, doc.round, cut.sha256, cc ? [cc.project_id, cc.timeline_id ?? null] : null, snapSha, arollKeys]));
   const early = (reason: string, transient = true, snapSha: string | null = null): Inputs =>
     ({ fingerprint: fp(snapSha), snapshotSha: snapSha, arollIds, ccId: cc?.id ?? null, outcome: { status: "unchecked", slivers: [], reason }, transient, fps: null });
   if (!cc?.project_id) return early("没有 ChatCut 工程记录（剪辑没报 chatcut_project，或不是 ChatCut 剪的）");

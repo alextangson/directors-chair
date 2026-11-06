@@ -78,7 +78,13 @@ export interface BoardItem {
   active?: boolean;
   /** 真有问题的提示（卡上标红）；中性信息在 badges */
   alerts?: string[];
+  /** 派生稿（英文版 / 公众号文章）的源成片换了：人话原因；没过期 = null */
+  derivedStale?: string | null;
+  /** 这张卡能列的发布平台（服务端按语言与勾选算好）；旧服务端没给 = 按语言回退 */
+  kitPlatforms?: string[];
   badges?: string[];
+  /** explain 给的「还差什么」（剪辑中等你审 / 你说还要改…） */
+  missing?: string[];
   /** 本轮候选 / 核对中的事实（本体 explain 给的；写稿段也带） */
   candidates?: Array<{ kind: string; state?: string }>;
   reason?: string;
@@ -117,6 +123,10 @@ export interface BoardTopic {
   renewedAt: string | null;
   /** 本周片单（选题会选中）：置顶 + 标签；选中≠开工 */
   inSlate?: boolean;
+  /** 创始人打的星（1–5）；没打 = null */
+  stars?: number | null;
+  /** 还剩几天进回收站；不老化 = null */
+  agingDaysLeft?: number | null;
 }
 
 
@@ -145,7 +155,9 @@ export interface OntologyState {
   report: { at: string; enabled: boolean; moves: OntologyMove[]; errors: Array<{ id: string; title: string; error: string }>; warnings: string[] } | null;
 }
 
-export interface BoardData { items: BoardItem[]; topics: BoardTopic[]; wordsPerMinute: number | null; ontology?: OntologyState }
+/** 开着自动回流、上次判定要重新登录的平台（服务端 /api/board 的 pullLogin） */
+export interface PullLoginTodo { platform: string; label: string; consoleUrl: string; action: string; lastSuccessAt: string | null }
+export interface BoardData { items: BoardItem[]; topics: BoardTopic[]; wordsPerMinute: number | null; ontology?: OntologyState; pullLogin?: PullLoginTodo[] | null }
 
 /** 看板顶部的本体提示：未启用且有要挪的卡 → 「要挪 N 张卡」；对账失败逐条可见；什么都没有 → null */
 export function ontologyNotice(o: OntologyState | undefined): { moves: OntologyMove[]; errors: number; warnings: string[]; text: string } | null {

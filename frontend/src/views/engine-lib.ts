@@ -12,14 +12,20 @@
  *    前端只负责摆位置，不再改写一个字。
  */
 
-export interface ProbeHealth {
+/** 失败的结构化分类（后端 error-kind 的 kind + 上游状态码）；老记录没有 = 认不出 */
+export interface FailureFacts {
+  kind?: string;
+  status?: number;
+}
+
+export interface ProbeHealth extends FailureFacts {
   at: string;
   ok: boolean;
   ms: number;
   error?: string;
 }
 
-export interface LiveHealth {
+export interface LiveHealth extends FailureFacts {
   at: string;
   ok: boolean;
   role: string;
@@ -64,7 +70,7 @@ export type RoleKey = (typeof ROLE_KEYS)[number];
 export const ROLE_LABEL: Record<RoleKey, string> = {
   writer: "写稿专线",
   reviewer: "审稿专线",
-  scout: "调研专线",
+  scout: "雷达专线",
   analytics: "复盘专线",
 };
 
@@ -72,7 +78,7 @@ export const ROLE_LABEL: Record<RoleKey, string> = {
 export const ROLE_SHORT: Record<RoleKey, string> = {
   writer: "写稿",
   reviewer: "审稿",
-  scout: "调研",
+  scout: "雷达",
   analytics: "复盘",
 };
 
@@ -80,14 +86,14 @@ export const ROLE_SHORT: Record<RoleKey, string> = {
 export const ROLE_ACTION: Record<RoleKey, string> = {
   writer: "写稿",
   reviewer: "审稿",
-  scout: "深调研",
+  scout: "雷达筛选",
   analytics: "复盘",
 };
 
 export const ROLE_NOTE: Record<RoleKey, string> = {
   writer: "生成初稿、改稿、平台适配",
   reviewer: "AI 审稿、去 AI 味复核",
-  scout: "雷达筛选、灵感提炼、深调研",
+  scout: "雷达筛选、灵感提炼",
   analytics: "复盘报告、campaign 重排",
 };
 
@@ -229,13 +235,37 @@ function outcomeClause(view: EngineHealthView, providerId: string, actions: stri
 export interface BannerLine {
   providerId: string;
   text: string;
+  /** 这条失败证据的时间 = 上次检查这条线的时间 */
+  checkedAt: string;
+}
+
+/** 与后端 STALE_FAILURE_MS 同值：失败过了这么久没新证据，就该复探一次 */
+export const STALE_FAILURE_MS = 5 * 60_000;
+
+/** 挂着红点时多久问一次后端（后端按 5 分钟过时阈值决定真探不探，不过时就是读一下内存） */
+export const RECHECK_TICK_MS = 60_000;
+
+/**
+ * 红点挂着期间的复查节拍：立刻一次，之后每 RECHECK_TICK_MS 一次，**不依赖重渲染**——
+ * 刚失败的线会在过时后被探到；复探失败刷新了时间，节拍也照走，恢复后下一拍就清掉。
+ * 返回停表函数。
+ */
+export function startStaleRecheck(tick: () => void, everyMs = RECHECK_TICK_MS): () => void {
+  tick();
+  const timer = setInterval(tick, everyMs);
+  return () => clearInterval(timer);
+}
+
+/** 有没有挂着红点、但证据已经过时的线 */
+export function hasStaleFailure(lines: BannerLine[], now: number): boolean {
+  return lines.some((l) => now - new Date(l.checkedAt).getTime() > STALE_FAILURE_MS);
 }
 
 /**
  * 顶栏横幅（spec §4.3）：任一**被引用**的端点最近状态为坏就出一行，恢复即消失。
  * 未配置引擎时不出——那是首次开机卡的活，不是横幅的活。
  */
-const ROLE_PREFIX_RE = /^(端点|主端点|写稿专线|审稿专线|调研专线|复盘专线)\s+/;
+const ROLE_PREFIX_RE = /^(端点|主端点|写稿专线|审稿专线|雷达专线|复盘专线)\s+/;
 const OUTCOME_TAIL_RE = /[^。]*已中断。\s*$/;
 
 /** 「主端点 dead（host）连不上：…。这次没有备用端点，写稿已中断。」→「dead（host）连不上：…。」 */
@@ -258,7 +288,7 @@ export function engineBannerLines(view: EngineHealthView | null, now: number): B
     // 去掉开头的角色词和结尾的「已中断」句，免得读成「主端点：主端点 …已中断。下次由备用顶上」
     const reason = stripRoleAndOutcome(last.error ?? "调用失败，原因未记录");
     const actions = affectedActions(id, pointers);
-    lines.push({ providerId: id, text: `${who}：${reason}（${relativeTime(last.at, now)}）${outcomeClause(view, id, actions)}` });
+    lines.push({ providerId: id, checkedAt: last.at, text: `${who}：${reason}${outcomeClause(view, id, actions)}上次检查：${relativeTime(last.at, now)}。` });
   }
   return lines;
 }

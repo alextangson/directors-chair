@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import type { DraftFeedbackRecord } from "./draft-feedback.js";
 import type { PlaybookPin } from "../playbook/types.js";
 import type { ExemplarPin, MethodPin } from "../exemplar/types.js";
+import type { RivalRecord } from "./rival-store.js";
 
 /** 先磨开头（spec 2026-10-15 §7、§15.13）：每一轮 3 个候选；创始人选中（或改一句）才写全文 */
 export interface OpeningPick {
@@ -71,6 +72,8 @@ export interface DraftPathRecord {
   feedback?: DraftFeedbackRecord[];
   /** 最近一次 prepare_final 出清单的时间：稿件随之更新，工作台面板据此重读清单 */
   checklistAt?: string;
+  /** 比稿（试行，spec 2026-11-06）：Gemini 按同一份锁住的依据写的那版与创始人的盲选结果 */
+  rivals?: RivalRecord[];
 }
 
 /** 创始人在工作台点「定了」的记录：绑定当时的稿件指纹，正文一改即失效 */
@@ -79,6 +82,8 @@ export interface DraftFinalRecord {
   finalizedAt: string;
   source: "founder-workbench";
   kept: string[];
+  /** 顶栏「定稿」不等清单：没出清单 / 清单是旧稿的就照定，记下来（交接出处门照旧把关） */
+  checklist?: "none" | "stale";
   /** 定稿时立意记的手册版本：统计按它归属（spec 2026-10-13 §9.4） */
   playbook?: PlaybookPin;
 }

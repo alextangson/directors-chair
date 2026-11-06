@@ -9,18 +9,14 @@
  * 三处喂同一份输入拿同一句人话，不许各判一套。
  */
 import type { ContentStatus } from "./local-store.js";
+import { ALL_VIDEO_PLATFORMS } from "../modules/publish/platform-caps.js";
 
 /**
- * 视频平台清单。定义落在这里而不是 `modules/publish/video-kit`：那个文件 import 了
- * local-store，而 local-store 要 import 本文件——放那边会成运行时环。video-kit 改为
- * 从这里再导出，既有调用方一个字不用改。
+ * 视频平台清单（含英文平台）。事实源是平台能力表（modules/publish/platform-caps，零 import，不会成环）；
+ * 「一条视频默认发哪些平台」不读这里，读 kitPlatformsFor——那里按语言分开中英文。
+ * video-kit 从这里再导出，既有调用方一个字不用改。
  */
-export const VIDEO_PLATFORMS: ReadonlySet<string> = new Set([
-  "douyin",
-  "wechat_video",
-  "xiaohongshu",
-  "bilibili",
-]);
+export const VIDEO_PLATFORMS: ReadonlySet<string> = new Set(ALL_VIDEO_PLATFORMS);
 
 export function isVideoPlatform(platform?: string | null): boolean {
   return VIDEO_PLATFORMS.has(platform ?? "");
@@ -49,7 +45,7 @@ export function isModelCall(params: Record<string, unknown>): boolean {
  * 模型调用盖不出来（P6 §14.7 #1）：否则拿着令牌的宿主连调审片通过、选封面、推进，就能绕过工作台进「待发布」。
  */
 export const FOUNDER_APPROVAL_ONLY =
-  "视频稿的审片通过与封面定稿是创始人的决定，只能由创作者在 AutoCrew 工作台上点，AI 宿主不能代批。把成片 / 封面交给创作者，请创作者在工作台审；有意见照常可以替创作者报打回。";
+  "视频稿的审片通过与封面定稿是创始人的决定，只能由创作者在导演椅工作台上点，AI 宿主不能代批。把成片 / 封面交给创作者，请创作者在工作台审；有意见照常可以替创作者报打回。";
 
 /** 「剪辑中」只能由交接进入（P6 §13.4-C）：手动切换、改状态、直接建在剪辑中一律拒绝 */
 /** 启用本体后：「剪辑中」由制作事实推导，没有交接这一步 */

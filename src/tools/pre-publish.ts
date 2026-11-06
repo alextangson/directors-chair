@@ -28,11 +28,17 @@ import {
   type VideoKit,
   getDataDir,
 } from "../storage/local-store.js";
-import { gateClaimWrite, type WriteGate } from "../storage/claims.js";
+import { claimContent, gateClaimWrite, type WriteGate } from "../storage/claims.js";
 import { executeReview } from "./review.js";
 import { editorialDraftHash } from "./editorial.js";
 import { getPlatformRules } from "../modules/writing/title-hashtag.js";
-import { COVER_TEXT_MAX, publishTitleChars, videoTitleLimit } from "../modules/publish/video-kit.js";
+import { COVER_TEXT_MAX, videoTitleLimit } from "../modules/publish/video-kit.js";
+import { capsOf, countTitleChars, languageOf, titleCountNote, type PlatformId } from "../modules/publish/platform-caps.js";
+import { validateEnKit } from "../modules/publish/en-kit.js";
+import { enKitContext, enKitStaleRefusal } from "../modules/en-edition/kit-context.js";
+import { derivedPublishRefusal, derivedPublishRefusalById } from "../modules/lineage/publish-guard.js";
+import { allowedKitPlatforms } from "../modules/profile/platform-lines.js";
+import { loadProfile } from "../modules/profile/creator-profile.js";
 import { isModelCall, isVideoPlatform, VIDEO_PLATFORMS } from "../storage/stage-guard.js";
 import { kitRegisterHash } from "../modules/publish/kit-stale.js";
 import { ontologyApplies, registeredPackage } from "../modules/production/publish-gate.js";
@@ -78,7 +84,8 @@ export type PrePublishFailure = {
 
 // --- Platforms that require cover review ---
 
-const COVER_REQUIRED_PLATFORMS = new Set(["xiaohongshu", "xhs", "douyin", "wechat_video", "bilibili"]);
+/** 平台能力表 coverRequired（capsOf 认 xhs 简写） */
+const coverRequired = (platform: string): boolean => capsOf(platform)?.coverRequired === true;
 
 // --- Schema ---
 
@@ -96,9 +103,13 @@ export const prePublishSchema = Type.Object({
   content_id: Type.Optional(Type.String({ description: "AutoCrew content id；check、video_kit 必填，title_methods 不需要。" })),
   platform: Type.Optional(Type.String({ description: "video_kit 必填：要发的视频平台。同一条视频发多平台共用一条稿，每个平台各交一份包、各跑一次 check（check 不带时按稿件平台）；文字稿只能是稿件平台。" })),
   kit: Type.Optional(Type.Object({
-    post_title: Type.String({ description: "平台发布标题，独立于口播稿标题，按平台习惯重拟、自带钩子。" }),
-    caption: Type.String({ description: "平台发布简介，可直接粘贴；是让刷到的人停下的文案，不是口播稿摘要。" }),
-    cover_text: Type.String({ description: "封面大字。" }),
+    post_title: Type.Optional(Type.String({ description: "平台发布标题（中文平台、youtube），独立于口播稿标题，按平台习惯重拟、自带钩子。" })),
+    caption: Type.Optional(Type.String({ description: "平台发布简介 / youtube 描述，可直接粘贴；不是口播稿摘要。" })),
+    cover_text: Type.Optional(Type.String({ description: "封面大字（中文平台）。" })),
+    post_text: Type.Optional(Type.String({ description: "x：帖子正文。" })),
+    tags: Type.Optional(Type.Unknown({ description: "youtube：英文 tags 数组。" })),
+    chapters: Type.Optional(Type.Unknown({ description: "youtube：[{at:\"0:00\", title}]。" })),
+    ai_disclosure: Type.Optional(Type.Unknown({ description: "youtube：Studio「AI use」的答案 yes / no；英文版（克隆声音 + 对口型）不写默认 yes，填 no 被拒。" })),
     hashtags: Type.Optional(Type.Array(Type.String(), {
       description: "话题标签（不带空格）。caption 里还没有的会并到 caption 末尾，字数按合并后的简介算。",
     })),
@@ -106,17 +117,25 @@ export const prePublishSchema = Type.Object({
       description: "3 个四平台通用标题候选 [{title, method, reason}]，分属方法库 3 个不同类（方法库见 action=title_methods）。",
     })),
     title_method: Type.Optional(Type.String({ description: `本平台 post_title 用的方法 id；创始人自己写的填「${SELF_WRITTEN}」。` })),
-  }, { description: `video_kit 必填。${kitLimitsText()}。标题先按方法库出 3 个通用候选给创始人挑，再按平台落成 post_title。` })),
-  claim_token: Type.Optional(Type.String({ description: "video_kit 与会推进到待发布的 check 是写：这篇有活认领时必须带令牌（pack 或 autocrew_desk claim 回的），同宿主的另一个会话也一样。" })),
+  }, { description: `video_kit 必填，按平台给字段（中文平台 post_title/caption/cover_text；youtube post_title/caption/tags/chapters/ai_disclosure；x post_text）。${kitLimitsText()}。标题先按方法库出 3 个通用候选给创始人挑，再按平台落成 post_title。` })),
+  claim_token: Type.Optional(Type.String({ description: "video_kit 与会推进到待发布的 check 是写：这篇有活认领时必须带令牌（上一次 video_kit 回执里的 claim_token，或 pack / autocrew_desk claim 回的），同宿主的另一个会话也一样。" })),
+  takeover: Type.Optional(Type.Boolean({ description: "同宿主另一个会话的认领闲置满 10 分钟后接手（换新令牌）；没闲置照样 claim_held。" })),
 });
 
 /** 已经在发布轨上（含已发/归档）：自动流转到此为止，重跑预检不许把已发布的稿倒拨回待发布 */
 const ON_PUBLISH_TRACK = new Set(["publish_ready", "publishing", "published", "archived"]);
 
 /** 写门（P6 §3.8）：交包、预检推进状态都是写。不带 `_host` 的内部调用（工作台、发布门）按 local-user 越门记账 */
-function gatePublishWrite(params: Record<string, unknown>, contentId: string, dataDir?: string): Promise<WriteGate> {
+async function gatePublishWrite(params: Record<string, unknown>, contentId: string, dataDir?: string): Promise<WriteGate> {
   const host = typeof params._host === "string" && params._host.trim() ? params._host.trim() : LOCAL_HOST;
-  const token = typeof params.claim_token === "string" ? params.claim_token.trim() : "";
+  let token = typeof params.claim_token === "string" ? params.claim_token.trim() : "";
+  // takeover:true 和别的写口同一条规矩（claimContent）：同宿主、持有会话闲置满 10 分钟才换新令牌，否则照样 claim_held
+  if (params.takeover === true || params.takeover === "true") {
+    const held = (await getContent(contentId, dataDir))?.claim?.employee ?? "editor";
+    const t = await claimContent(contentId, held, host, dataDir, { token: token || undefined, takeover: true });
+    if (!t.ok) return { denied: { ok: false, error: t.error, ...(t.code ? { code: t.code } : {}), ...(t.holder ? { holder: t.holder } : {}) } };
+    if (t.claim.token) token = t.claim.token;
+  }
   return gateClaimWrite(contentId, { host, token: token || undefined }, dataDir);
 }
 
@@ -152,7 +171,7 @@ function titleCheck(surface: PublishSurface, platform: string): CheckItem {
   if (!title) return { name: "标题规范", status: "fail", detail: "无标题", fix: "设置标题" };
   if (!surface.fromKit) return draftTitleCheck(title, platform);
   // 发布包标题按平台硬上限算（与交包时同一口径），超了平台会截断——截断等于改意
-  const chars = publishTitleChars(title);
+  const chars = countTitleChars(platform, title);
   const limit = videoTitleLimit(platform);
   return chars > limit
     ? { name: "标题规范", status: "fail", detail: `发布标题「${title}」(${chars}字，超出 ${limit} 上限)`, fix: "用 autocrew_pre_publish video_kit 重交更短的 post_title" }
@@ -227,10 +246,10 @@ function validateKit(raw: unknown, platform: string, lib: TitleMethod[]): { fail
   const text = (key: string) => (typeof obj[key] === "string" ? (obj[key] as string).trim() : "");
   const failures: KitFailure[] = [];
   const postTitle = text("post_title");
-  const titleChars = publishTitleChars(postTitle);
+  const titleChars = countTitleChars(platform, postTitle);
   const titleLimit = videoTitleLimit(platform);
   if (!postTitle) failures.push({ field: "post_title", detail: "缺发布标题：按平台习惯重拟一句带钩子的标题，别照搬口播稿标题" });
-  else if (titleChars > titleLimit) failures.push({ field: "post_title", detail: `${titleChars} 字，超出 ${platform} 上限 ${titleLimit}（中文 1 字、英文数字半字）：压缩后重交，别靠省略号硬截` });
+  else if (titleChars > titleLimit) failures.push({ field: "post_title", detail: `${titleChars} 字，超出 ${platform} 上限 ${titleLimit}（${titleCountNote(platform)}）：压缩后重交，别靠省略号硬截` });
   const tags = readTags(obj.hashtags, failures);
   const caption = text("caption") ? mergeTags(text("caption"), tags) : "";
   const [minLen, maxLen] = captionBounds(platform);
@@ -245,14 +264,15 @@ function validateKit(raw: unknown, platform: string, lib: TitleMethod[]): { fail
 }
 
 /** 平台前置核对：发布包按平台定字数，必须明说是哪个视频平台；视频稿四平台共用一条稿 */
-function kitPlatform(content: Content, requested: unknown): string | Record<string, unknown> {
+function kitPlatform(content: Content, requested: unknown, allowed: string[]): string | Record<string, unknown> {
   const own = content.platform || "";
   if (!isVideoPlatform(own)) {
     return { ok: false, code: "not_video_platform", error: `视频发布包只服务视频平台（${[...VIDEO_PLATFORMS].join(" / ")}），这篇是 ${own || "未知平台"}` };
   }
-  if (typeof requested !== "string" || !isVideoPlatform(requested.trim())) {
+  // 只收与稿件同语言的视频平台（英文版稿件再收窄到用户勾了的英文平台）：中文成片不交 youtube / x 的包
+  if (typeof requested !== "string" || !allowed.includes(requested.trim())) {
     const got = typeof requested === "string" && requested ? requested : "空";
-    return { ok: false, code: "platform_required", error: `platform 要写这份包发到哪个视频平台（${[...VIDEO_PLATFORMS].join(" / ")}；收到 ${got}）`, expected_platform: own };
+    return { ok: false, code: "platform_required", error: `platform 要写这份包发到哪个视频平台（${allowed.join(" / ")}；收到 ${got}）`, expected_platform: own };
   }
   return requested.trim();
 }
@@ -263,7 +283,7 @@ async function saveHostVideoKit(params: Record<string, unknown>): Promise<Record
   if (!contentId) return { ok: false, code: "missing_content_id", error: "content_id 必填" };
   const content = await getContent(contentId, dataDir);
   if (!content) return { ok: false, code: "not_found", error: `稿件不存在：${contentId}` };
-  const platform = kitPlatform(content, params.platform);
+  const platform = kitPlatform(content, params.platform, allowedKitPlatforms(content.platform, await loadProfile(dataDir)));
   if (typeof platform !== "string") return platform;
   // P6-e narration-not-state（2/3）：模型听 Codex 一句「已登记」就出了发布包。发布包只跟着成片走：
   // 成片戳（register 或内置线审片）没盖，就没有发布包可出——状态由产品说了算，不由转述说了算。
@@ -275,14 +295,20 @@ async function saveHostVideoKit(params: Record<string, unknown>): Promise<Record
       next_action: { tool: "autocrew_content", params: { action: "get", id: contentId }, message: "只看 content 状态与 video.final 判断成片是否登记；未登记就继续等，不出发布包。" },
     };
   }
-  const { failures, fields, title } = validateKit(params.kit, platform, await activeTitleMethods(dataDir));
+  // 英文平台（youtube / x）按自己的 kitFields 校验（Phase 3）；中文四平台照旧
+  const enPre = languageOf(platform) === "en" ? await enKitContext(contentId, getDataDir(dataDir)) : null;
+  if (enPre && "no" in enPre) return enPre.no;
+  const en = enPre ? validateEnKit(params.kit, platform as PlatformId, enPre.ctx) : null;
+  const { failures, fields, title } = en
+    ? { ...en, title: null }
+    : validateKit(params.kit, platform, await activeTitleMethods(dataDir));
   if (failures.length > 0) {
     return { ok: false, code: "kit_invalid", error: `发布包有 ${failures.length} 处要改：按 failures 逐条改完整包重交`, failures };
   }
   const gate = await gatePublishWrite(params, contentId, dataDir);
   if ("denied" in gate) return gate.denied;
   const kit: VideoKit = {
-    platform, ...fields, titleMethod: title.method, titleCandidates: title.candidates, storyboard: [], coverPrompt: "",
+    platform, coverText: "", ...fields, ...(title ? { titleMethod: title.method, titleCandidates: title.candidates } : {}), ...(enPre ? enPre.binding : {}), storyboard: [], coverPrompt: "",
     generatedAt: new Date().toISOString(), source: "host", draftHash: editorialDraftHash(content), ...kitRegisterHash(content),
   };
   // 指纹与落盘同锁核对：读稿到写包之间稿件被改，就不能把旧稿的指纹钉到新稿上
@@ -309,6 +335,10 @@ export async function executePrePublishTool(params: Record<string, unknown>): Pr
   const history = await historyGuard(params.content_id, (params._dataDir as string) || undefined);
   if (history) return history;
   if (params.action === "title_methods") return titleMethodsAction(params);
+  if (params.action === "video_kit") {
+    const derived = await derivedPublishRefusalById(params.content_id, getDataDir((params._dataDir as string) || undefined), { exit: "kit" });
+    if (derived) return { ok: false, ...derived };
+  }
   return params.action === "video_kit" ? saveHostVideoKit(params) : executePrePublish(params);
 }
 
@@ -325,17 +355,22 @@ export async function executePrePublish(params: Record<string, unknown>): Promis
   // GUI 与发布门直接调这里，不经 executePrePublishTool
   const history = historyRefusal(content);
   if (history) return { ok: false, code: "imported_history", error: history };
+  const derived = await derivedPublishRefusal(content, getDataDir(dataDir));
+  if (derived) return { ok: false, ...derived };
 
   const target = targetPlatform(content, params.platform);
   if (typeof target !== "string") return target;
   const platform = target;
   // 本体视频稿出包（_ontologyGated 只由 ToolRunner 带，参数本身不可信，要这条真按本体走）：
   // 标题 / 标签 / 字数按发布计划在 autocrew_publish check 里核，这里不再按旧稿件 / 旧发布包重复拦
-  const ontologyGated = params._ontologyGated === true && COVER_REQUIRED_PLATFORMS.has(platform) && (await ontologyApplies(content, getDataDir(dataDir)));
+  const ontologyGated = params._ontologyGated === true && coverRequired(platform) && (await ontologyApplies(content, getDataDir(dataDir)));
   const stale = ontologyGated ? null : staleKit(content, platform);
   if (stale) return stale;
+  const enStale = await enKitStaleRefusal(content, platform, getDataDir(dataDir));
+  if (enStale) return enStale;
   const surface = publishSurface(content, platform);
   const checks: CheckItem[] = [];
+  const enEdition = content.derivedFrom?.kind === "en_edition";
 
   // --- Check 1: Content review ---
   try {
@@ -373,9 +408,9 @@ export async function executePrePublish(params: Record<string, unknown>): Promis
 
   // --- Check 2: Cover review (all video platforms) ---
   // 启用本体的稿出包（_ontologyGated，只由 ToolRunner 内部带）：封面由登记记录 + 发布前把关（槽位 / 登记那一对）核，旧封面审核不再适用
-  if (ontologyGated) {
-    checks.push({ name: "封面审核", status: "skip", detail: "本体稿：封面由登记记录与发布前把关核对" });
-  } else if (COVER_REQUIRED_PLATFORMS.has(platform)) {
+  if (ontologyGated || enEdition) {
+    checks.push({ name: "封面审核", status: "skip", detail: enEdition ? "英文版：16:9 缩略图随英文发布包一起批" : "本体稿：封面由登记记录与发布前把关核对" });
+  } else if (coverRequired(platform)) {
     const coverReview = await getCoverReview(contentId, dataDir);
     if (coverReview && (coverReview.status === "approved" || coverReview.status === "publish_ready") && coverReview.approvedLabel) {
       checks.push({ name: "封面审核", status: "pass", detail: `已选定 ${coverReview.approvedLabel.toUpperCase()} 方案` });
@@ -397,8 +432,7 @@ export async function executePrePublish(params: Record<string, unknown>): Promis
   checks.push(ontologyGated ? byPlan("标题规范") : titleCheck(surface, platform));
 
   // --- Check 5: Platform set ---
-  const supportedPlatforms = ["xiaohongshu", "xhs", "douyin", "wechat_mp", "wechat_video", "bilibili"];
-  if (platform && supportedPlatforms.includes(platform)) {
+  if (platform && capsOf(platform)) {
     checks.push({ name: "平台设置", status: "pass", detail: platform });
   } else if (platform) {
     checks.push({ name: "平台设置", status: "warn", detail: `${platform} (非标准平台)` });
@@ -410,7 +444,9 @@ export async function executePrePublish(params: Record<string, unknown>): Promis
   checks.push(ontologyGated ? byPlan("正文字数") : lengthCheck(surface, platform));
 
   // --- Check 6b: 发布出口（本体 §5）：按本体走的视频稿只发当前有效登记记录里的成片与封面 ---
-  const gated = isVideoPlatform(platform) ? await registeredPackage(content, getDataDir(dataDir), { fresh: true }) : null;
+  // 英文版（方案 (b)）：发布出口是批过的英文发布包（上面 derivedPublishRefusal 已核），不走中文登记
+  if (enEdition) checks.push({ name: "英文发布包（发布出口）", status: "pass", detail: "发批过的英文发布包里的成片、缩略图和文案" });
+  const gated = isVideoPlatform(platform) && !enEdition ? await registeredPackage(content, getDataDir(dataDir), { fresh: true }) : null;
   if (gated) checks.push(gated.ok
     ? { name: "登记（发布出口）", status: "pass", detail: `发当前登记的成片与封面（${gated.files.registration.id}）` }
     : { name: "登记（发布出口）", status: "fail", detail: gated.error, fix: "在对话里调 autocrew_review_inbox list，把缺的批准给创始人定；批准齐了登记会自动完成" });
@@ -426,7 +462,8 @@ export async function executePrePublish(params: Record<string, unknown>): Promis
   // 真要推进才过令牌门（P6 §3.8）：推进是写，只读的预检谁都能跑
   const current = normalizeLegacyStatus(content.status);
   let grant: { claim_token?: string } = {};
-  if (checks.every((c) => c.status !== "fail") && !ON_PUBLISH_TRACK.has(current)) {
+  // 英文版的「能不能发」只看英文发布包批准，不推中文的阶段状态
+  if (!enEdition && checks.every((c) => c.status !== "fail") && !ON_PUBLISH_TRACK.has(current)) {
     const gate = params._readOnly === true ? null : await gatePublishWrite(params, contentId, dataDir);
     if (gate && "denied" in gate) return gate.denied;
     grant = gate?.grant ?? {};

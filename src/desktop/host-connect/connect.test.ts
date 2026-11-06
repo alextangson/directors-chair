@@ -1,4 +1,5 @@
 /** 一键接入 / 断开（onboarding-connect §3，边界 O2–O12）。全程临时 HOME + 假 claude/codex + 假 AutoCrew。 */
+import { codexApprovalMode, codexApprovalStatus, ensureCodexAutoApprove } from "./codex-approval.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -158,6 +159,28 @@ describe("接上 Codex", () => {
     const add = sb.argv("codex").find((a) => a[1] === "add")!;
     expect(add.slice(0, 3)).toEqual(["mcp", "add", "autocrew"]);
     expect(add[add.indexOf("--env") + 1]).toBe("AUTOCREW_HOST=codex");
+    expect(r.skills?.linked).toEqual(["personal-ip-video-loop", "publish-content", "cover-generator"]);
+    expect(fs.readlinkSync(path.join(sb.home, ".codex", "skills", "publish-content"))).toBe(path.join(sb.env.skillsRoot, "publish-content"));
+    expect(r.message).toContain("已把 Codex 技能链到本安装");
+    // AutoCrew 这一段设成免审批（后台 Codex 任务审批策略 never 也能调 AutoCrew 工具）；别的服务、全局策略不动
+    expect(codexApprovalMode(sb.env)).toBe("approve");
+    expect(codexApprovalStatus(sb.env, true)).toMatchObject({ ok: true });
+  });
+  it("免审批只写 autocrew 那一段；已经是 approve 不重写；其它值改成 approve", () => {
+    fs.mkdirSync(path.join(sb.home, ".codex"), { recursive: true });
+    const file = path.join(sb.home, ".codex", "config.toml");
+    fs.writeFileSync(file, 'approval_policy = "never"\n\n[mcp_servers.other]\ncommand = "x"\n\n[mcp_servers.autocrew]\ncommand = "node"\ndefault_tools_approval_mode = "prompt"\n\n[mcp_servers.autocrew.env]\nA = "1"\n');
+    expect(codexApprovalStatus(sb.env, true)).toMatchObject({ ok: false });
+    expect(ensureCodexAutoApprove(sb.env)).toEqual({ ok: true, changed: true });
+    const raw = fs.readFileSync(file, "utf-8");
+    expect(raw).toContain('approval_policy = "never"');
+    expect(raw.match(/default_tools_approval_mode/g)).toHaveLength(1);
+    expect(raw).toMatch(/\[mcp_servers\.autocrew\]\ncommand = "node"\ndefault_tools_approval_mode = "approve"/);
+    expect(raw).toMatch(/\[mcp_servers\.other\]\ncommand = "x"\n\n/);
+    expect(ensureCodexAutoApprove(sb.env)).toEqual({ ok: true, changed: false });
+    fs.writeFileSync(file, '[mcp_servers.other]\ncommand = "x"\n');
+    expect(ensureCodexAutoApprove(sb.env)).toMatchObject({ ok: false });
+    expect(codexApprovalStatus(sb.env, false)).toBeNull();
   });
   it("没登录 → 不写配置，说怎么登录", async () => {
     const env = { ...sb.env, run: sb.env.runWith({ ...sb.env.childEnv, FAKE_CODEX_LOGGED: "0" }) };
@@ -190,11 +213,17 @@ describe("断开（O9）", () => {
     for (const host of ["claude-code", "codex", "workbuddy"]) {
       expect(resolveForwarderToken(sb.dataDir, { AUTOCREW_HOST: host, AUTOCREW_TOKEN: "inherited" }, host)).toBe("");
     }
-    expect(await handshake("claude", sb.env)).toContain("还没接上 AutoCrew");
+    expect(await handshake("claude", sb.env)).toContain("还没接上导演椅");
   });
   it("Codex 断开走 codex mcp remove", async () => {
     await connectHost("codex", sb.env);
-    expect(await disconnectHost("codex", sb.env)).toMatchObject({ ok: true });
+    const mine = path.join(sb.home, ".codex", "skills", "cover-generator");
+    fs.unlinkSync(mine);
+    fs.mkdirSync(mine); // 用户自己的真目录：断开不能动
+    const r = await disconnectHost("codex", sb.env);
+    expect(r).toMatchObject({ ok: true });
+    expect(r.message).toContain("已删掉 Codex 技能链接：personal-ip-video-loop、publish-content");
+    expect(fs.readdirSync(path.join(sb.home, ".codex", "skills"))).toEqual(["cover-generator"]);
     expect(sb.argv("codex").at(-1)).toEqual(["mcp", "remove", "autocrew"]);
     expect(fs.readFileSync(path.join(sb.home, ".codex", "config.toml"), "utf-8")).not.toContain("autocrew");
   });

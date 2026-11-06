@@ -13,12 +13,11 @@ const GUIDE = (name: string) => `完整用法：${TOOL_GUIDE_PREFIX}${name}`;
 
 export const MCP_TOOL_DOCS: Readonly<Record<string, string>> = {
   autocrew_topic: "选题库。create 建选题；list 列选题；radar_pool 冻结雷达候选池给你打分；radar_score 交分（≥70 入库，同一池重交幂等）；delete 删选题（有稿件时拒绝，需审批）。",
-  autocrew_research: "找新选题（不是给写作需求做调研，那个用 autocrew_workflow prepare）。discover 发现并可存选题；session_status 查浏览器登录。",
-  autocrew_content: "管理已有稿件。list / get / siblings / allowed_transitions 查询；summary 看进度、请示答复、创始人修改意见 rejections；update 改稿；transition 推进；create_variant 派生平台版；adoption 仅工作台；delete / restore；save 仅手动导入；record 报制作事实；check_slivers 自查抽帧缝；mark_ready 成片可以审了；ask / answer_ask / withdraw_ask 请示创始人（进「等你拍板」，别在聊天里问）。批准只归创始人。新 AI 稿走 workflow → writer。",
+  autocrew_content: "管理已有稿件。list / get / siblings / allowed_transitions 查询；summary 看进度、请示答复、创始人修改意见 rejections；derivative_status 只读后台派生任务；update 改稿；transition 推进；create_variant 派生平台版；adoption 仅工作台；delete / restore；save 仅手动导入；record 报制作事实；check_slivers 自查抽帧缝；mark_ready 成片可以审了；ask / answer_ask / withdraw_ask 请示创始人（进「等你拍板」，别在聊天里问）。批准只归创始人。新 AI 稿走 workflow → writer。",
   autocrew_workflow: "创作统一入口。prepare 开选题会（可只给 inspiration）；select_angle 须带创始人原话 founder_words；新稿没定角度会回 needs_founder_angle；research 领调研任务；status 查进度；select_angle 选定角度（带 brief_revision）；write / draft 由 next_action 引导；doctor 自检。每步按返回的 next_action 走。",
   autocrew_draft: "抖音口播新稿（write-script 技能）。start 建稿或接手；exemplars 按体裁预览范文；angle 记立意并锁手册、范文、写法版本；opening 先磨开头（选了才收第一版）；save 存一版（可附 test_read 观众试读、feedback 原话）；prepare_final 出出处清单，「定了」只由创始人点；feedback_history 跨稿读意见，propose_promotion 两篇稿都出现过才提升级。写入带 base_version。",
   autocrew_playbook: "体裁手册。list 版本与待批数；get 读全文与历史；propose 交整本修订待批；rollback 仅创始人说回滚时调。",
-  autocrew_scout: "宿主执行的调研。prepare / pack 领任务；status 查进度；search 搜索（要搜索 key，没配就用你自己的搜索找网址）；read_page{perspective,url} 抓页；cite 登记逐字引文；claim_offline 登记未核验说法；perspective 交视角；synthesize 综合；angles 交角度候选。prepare 之后都带 topic_id + task_id。",
+  autocrew_scout: "宿主执行的调研。prepare / pack 领任务；status 查进度；用你自己的搜索找网址，read_page{perspective,url} 抓页；cite 登记逐字引文；claim_offline 登记未核验说法；perspective 交视角；synthesize 综合；angles 交角度候选。prepare 之后都带 topic_id + task_id。",
   autocrew_review_desk: "宿主审稿。pack 领审稿材料；submit 交审稿意见（带 review_pack_id、attempt、issues）。",
   autocrew_writer: "宿主写稿。pack 领写作包；pack_status 查备包；find_evidence 补证据；submit 交稿；submit_status 查交稿；gap / technique 缺口与技法参考。领包后的每次写都带 claim_token。",
   autocrew_review_inbox: "对话里处理「等你拍板」。list{preview_dir:会话工作目录} 列事（含认稿、闪帧、请示、发前检查、规则与手册改动）：brief 原样转述，preview 路径写成链接，多件编号；decide 照抄他原话记决定，话有歧义先问；revoke 撤回刚才的批准；inbox_list/inbox_attach 收他点名的原片；sync 同步。",
@@ -27,7 +26,7 @@ export const MCP_TOOL_DOCS: Readonly<Record<string, string>> = {
   autocrew_editorial: "编辑档案与改稿反馈。profile 读档案；update_profile 改档案（需确认）；inspect 读稿与 draft_hash；feedback 记改稿要求并领改稿包。",
   autocrew_insights: "账号洞察。prepare 备料（内容、定位、回流数据）；submit 保存宿主写的报告；list / get 查看历史报告。meeting_* 选题会。calib_* 判断要对账（预测、复盘、升级）。work_bind / work_claim / history_create / history_delete 作品归属（创始人确认后调）。",
   autocrew_cover_review: "封面。按 action 生成、查看、批准或修改封面；批准前先看图。",
-  autocrew_publish: "发布。check 发布前把关（被拦平台不提交）；propose_preference 提议偏好；wechat_mp_draft 推公众号草稿（需审批）；clipboard 复制；ego_lite_prepare 备上传包；confirm_published 标记已发布（需审批）；digest 摘要。",
+  autocrew_publish: "发布。check 发布前把关（被拦平台不提交）；propose_preference 提议偏好；wechat_mp_draft 推公众号草稿（需审批）；clipboard 复制；ego_lite_prepare 备上传包；confirm_published 标记已发布（需审批）；digest 摘要；activities/activity_record 活动台账。",
   autocrew_pre_publish: "发布前检查：check 逐项核对标题、正文、封面、平台要求，全过才能发布；video_kit 交发布包；title_methods 读标题方法库与试用期统计。",
   autocrew_asset: "稿件素材。add 登记；list 列；remove 删（需审批）；versions / get_version / revert 版本查看与回滚。",
   autocrew_status: "编辑部概览：选题与稿件数量、状态分布、最近动态。",
@@ -76,7 +75,7 @@ export const PARAM_HINTS: Readonly<Record<string, string>> = {
   approval_id: "被要求审批时返回的 id，批准后带上重调",
   confirmation_id: "confirm 后创始人在 Mac 上确认得到的 id",
   force: "明确要重来时才用",
-  perspective: "audience / evidence / counter / benchmark 之一；search、read_page 必带",
+  perspective: "audience / evidence / counter / benchmark 之一；read_page 必带",
   user_confirmed: "创作者已明确确认",
   request_id: "请求号，重试用同一个",
   for_cut: "字幕所属成片（fact_id 或 sha）",
@@ -104,7 +103,7 @@ export function toolGuideText(name: string, description: string, parameters: unk
  * 说明跟着资料库的启用状态走，不留两套口径。长度不超过原说明（M7 预算）。
  */
 export const ONTOLOGY_TOOL_DOCS: Readonly<Record<string, string>> = {
-  autocrew_content: "管理已有稿件。record 报制作事实（原片 / 成片 / 字幕 / 封面 / ChatCut 工程 / 发布回执 / 分镜），名字对不上的原片先回 pending_match（summary 带 since_seq 等结果）；封面用 paths 一次记一对；mark_ready 成片可以审了；ask / answer_ask / withdraw_ask 请示创始人（进「等你拍板」）；summary 看进度、asks[] 与创始人修改意见 rejections[]（交新版前先读）；check_slivers 自查抽帧缝；get / update / list / siblings。批准只归创始人。新 AI 稿走 workflow → writer。",
+  autocrew_content: "管理已有稿件。record 报制作事实（原片 / 成片 / 字幕 / 封面 / ChatCut 工程 / 发布回执 / 分镜），名字对不上的原片先回 pending_match（summary 带 since_seq 等结果）；封面用 paths 一次记一对；mark_ready 成片可以审了；ask / answer_ask / withdraw_ask 请示创始人（进「等你拍板」）；summary 看进度、asks[] 与创始人修改意见 rejections[]（交新版前先读）；derivative_status 只读后台派生任务；check_slivers 自查抽帧缝；get / update / list / siblings。批准只归创始人。新 AI 稿走 workflow → writer。",
   autocrew_video: "剪辑台内置剪辑线（start / transcript / review 等按 status 的 next 做）。交接 / 认稿 / 汇报 / 登记 / 撤回已关：原片、成片、字幕、封面改用 autocrew_content record。",
   autocrew_asset: "稿件素材。add 登记库内素材（封面与库外文件改用 autocrew_content record）；list 列；remove 删（需审批）；versions / get_version / revert 版本。",
 };

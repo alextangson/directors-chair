@@ -5,14 +5,13 @@ import {
   digestItemsSent,
   formatDigestDate,
   interpretDigestReply,
-  jobStatusReply,
   layoutDigest,
   outOfRangeReply,
   pickDigestTopics,
   renderDigest,
   renderEmptyDigest,
   staleDigestPrefix,
-  startedReply,
+  meetingQueuedReply,
   truncate,
   type DigestCandidate,
   type LastDigest,
@@ -94,11 +93,11 @@ describe("renderDigest · 纯文本与截断（spec §2.2）", () => {
 
   it("头 · 条目 · 尾三段齐全，一条 = 标题/理由·源·时间/链接", () => {
     const text = renderDigest(pickDigestTopics([candidate()], { now: NOW }), opts);
-    expect(text).toContain("AutoCrew 今日选题 · 9 月 7 日");
+    expect(text).toContain("导演椅今日选题 · 9 月 7 日");
     expect(text).toContain("1. DeepSeek Harness 开源实战");
     expect(text).toContain("命中「Agent 落地」 · 36氪 · 3h 前");
     expect(text).toContain("https://example.com/a");
-    expect(text).toContain("回复数字起深调研（1–1）；回 0 = 今天都不做。");
+    expect(text).toContain("回复数字记成「待开选题会」（1–1）；回 0 = 今天都不做。");
   });
 
   it("标题截 60、理由截 80（含省略号，总长恰好在线上）", () => {
@@ -126,9 +125,9 @@ describe("renderDigest · 纯文本与截断（spec §2.2）", () => {
   });
 
   it("空摘要照发一行，扫了几个源不知道就不写数字", () => {
-    expect(renderEmptyDigest(opts)).toBe("AutoCrew 今日选题 · 9 月 7 日\n\n今天雷达没有新的命中定位的选题（扫了 9 个源）。");
+    expect(renderEmptyDigest(opts)).toBe("导演椅今日选题 · 9 月 7 日\n\n今天雷达没有新的命中定位的选题（扫了 9 个源）。");
     expect(renderEmptyDigest({ date: "2026-09-07" })).toBe(
-      "AutoCrew 今日选题 · 9 月 7 日\n\n今天雷达没有新的命中定位的选题。",
+      "导演椅今日选题 · 9 月 7 日\n\n今天雷达没有新的命中定位的选题。",
     );
   });
 
@@ -167,17 +166,14 @@ describe("interpretDigestReply · 回复映射（spec §2.4）", () => {
     expect(outOfRangeReply(2)).toBe("清单里只有 1–2");
   });
 
-  it("同一个数字再回一次 = repeat（查进度，不是再起一轮）", () => {
+  it("同一个数字再回一次 = repeat（已记过）", () => {
     const r = interpretDigestReply("1", { ...last, picked: [1] });
     expect(r).toMatchObject({ kind: "pick", n: 1, repeat: true });
   });
 
-  it("回复文案：起调研 / 进度 / 旧清单日期前缀", () => {
+  it("回复文案：待开选题会 / 旧清单日期前缀", () => {
     expect(DIGEST_SKIP_REPLY).toBe("好，今天不动");
-    expect(startedReply("甲")).toContain("已起深调研：《甲》");
-    expect(jobStatusReply("甲", "running")).toBe("《甲》的深调研：进行中");
-    expect(jobStatusReply("甲", "failed", "上游 500")).toContain("失败：上游 500");
-    expect(jobStatusReply("甲")).toContain("还没有调研记录");
+    expect(meetingQueuedReply("甲", "topic-1")).toBe("已记下《甲》，到 Claude 会话里说『给《甲》开选题会（选题 topic-1）』");
     expect(staleDigestPrefix("2026-09-07", "2026-09-07")).toBe("");
     expect(staleDigestPrefix("2026-09-06", "2026-09-07")).toBe("（这是 9 月 6 日的清单）");
   });

@@ -2,7 +2,7 @@
  * generate-script-evidence.test.ts — P1b 接进生产管线的那一刀（spec §3.3 / §4.2 / §4.4）。
  *
  * 骨架同 generate-script-angle.test.ts（全 mock、零网络、零真睡）。验六件事：
- * 1. 定向补证**只**为选中的 v3 卡跑：手写 direction、明说跳过、v2 卡、无卡都不跑；
+ * 1. 引擎代写不再定向补证（只用现有材料），明说跳过角度在准入被拒；
  * 2. 账本在写手开工**之前**就落了盘——中途崩掉也留得住「这稿手上有哪些证据」；
  * 3. 数字硬门耗尽修复轮 → 稿件落 `needs_evidence`，不是 `draft_ready`；
  * 4. 有据的数字照常转正；
@@ -18,7 +18,6 @@ import { generateScript, retryGenerateScript } from "./generate-script.js";
 import type { GeneratedScript } from "./generate-script.js";
 import { BRIEF_SCHEMA_VERSION, saveBrief, type AngleCard, type ResearchBrief } from "../research/brief-store.js";
 import { pendingPerspectives, topicHashOf, upsertJob, type ResearchJob } from "../research/research-job-store.js";
-import { saveSearchConfig } from "../research/search-provider.js";
 import { getContent, saveTopic, updateTopic, type Topic, getTopic } from "../../storage/local-store.js";
 import type { LoopOptions, LoopResult, LoopTool } from "../../engine/loop.js";
 import type { EngineConfig } from "../../engine/config.js";
@@ -210,72 +209,26 @@ async function write(
   return { res, seen, warns };
 }
 
-/** 搜索配好 = 补证与 find_evidence 都可用（未配是另一条分支，单独验） */
-async function configureSearch(): Promise<void> {
-  await saveSearchConfig({ provider: "bocha", apiKey: "sk-search" }, testDir);
-}
+// ─── 1. 引擎代写只用现有材料（定向补证已下线） ──────────────────────────────
 
-// ─── 1. 定向补证的触发条件（§4.2 调用点） ────────────────────────────────────
-
-describe("定向补证只为选中的 v3 卡跑", () => {
-  it("选了 v3 卡 → 按卡上的 evidenceNeeds 跑一轮补证，写手也拿到 find_evidence", async () => {
-    await configureSearch();
-    const topic = await seedResearched();
-    await pick(topic.id, V3_CARD);
-
-    const { seen } = await write({ ...TEST_REQ, topicId: topic.id });
-
-    expect(seen.targeted).toHaveLength(1);
-    expect(seen.targeted[0].userMessage).toContain(V3_CARD.evidenceNeeds[0]);
-    expect((seen.writer[0].tools ?? []).map(nameOf)).toEqual(["submit_script", "find_evidence"]);
-  });
-
-  it("选了 v2 卡 → 不补证（v2 卡没有「这个主张缺什么证据」这个字段）", async () => {
-    await configureSearch();
-    const topic = await seedResearched();
-    await pick(topic.id, V2_CARD);
-
-    const { seen } = await write({ ...TEST_REQ, topicId: topic.id });
-    expect(seen.targeted).toHaveLength(0);
-  });
-
-  it("手写 direction 压过选中卡 → 不补证（角度是创始人自己定的）", async () => {
-    await configureSearch();
-    const topic = await seedResearched();
-    await pick(topic.id, V3_CARD);
-    await recordFounderAngle((await getTopic(topic.id, testDir))!, "就写我自己那次翻车", "就写这个", testDir);
-
-    const { seen } = await write({ ...TEST_REQ, topicId: topic.id, direction: "就写我自己那次翻车" });
-    expect(seen.targeted).toHaveLength(0);
-  });
-
-  it("明说跳过角度点选 → 不补证，原话进结构化 run-log（不只是一句 warn）", async () => {
-    await configureSearch();
-    const topic = await seedResearched();
-
-    // 跳过选卡的通道已关闭：第一篇带 angleSkipReason 在准入就被拒，补证链和写手都不会跑
-    await expect(write({ ...TEST_REQ, topicId: topic.id, angleSkipReason: "这条我心里有数，先写了再说" }))
-      .rejects.toMatchObject({ refusal: { code: "skip_removed" } });
-  });
-
-  it("压根没有选题 → 整条补证链不参与，写手也没有 find_evidence", async () => {
-    await configureSearch();
-    const { seen } = await write(TEST_REQ);
-    expect(seen.targeted).toHaveLength(0);
-    // 搜索配好了就给写手查证工具：写到一半缺个数据是所有稿都会遇到的事
-    expect((seen.writer[0].tools ?? []).map(nameOf)).toEqual(["submit_script", "find_evidence"]);
-  });
-
-  it("搜索未配置 → warn + 跳过补证 + 版本注记「未补证」，写手没有查证工具（§5）", async () => {
+describe("引擎代写不再定向补证", () => {
+  it("选了 v3 卡（带 evidenceNeeds）→ 不跑补证、写手没有 find_evidence、也不留「未补证」注记", async () => {
     const topic = await seedResearched();
     await pick(topic.id, V3_CARD);
 
     const { res, seen, warns } = await write({ ...TEST_REQ, topicId: topic.id });
     expect(seen.targeted).toHaveLength(0);
     expect((seen.writer[0].tools ?? []).map(nameOf)).toEqual(["submit_script"]);
-    expect(warns.some((w) => w.includes("搜索未配置"))).toBe(true);
+    expect(warns.some((w) => w.includes("补证"))).toBe(false);
     const saved = await getContent(res.contentId, testDir);
-    expect(saved!.versions?.at(-1)?.note).toContain("未补证");
+    expect(saved!.versions?.at(-1)?.note).not.toContain("补证");
+  });
+
+  it("明说跳过角度点选 → 第一篇在准入就被拒", async () => {
+    const topic = await seedResearched();
+    // 跳过选卡的通道已关闭：第一篇带 angleSkipReason 在准入就被拒，写手不会跑
+    await expect(write({ ...TEST_REQ, topicId: topic.id, angleSkipReason: "这条我心里有数，先写了再说" }))
+      .rejects.toMatchObject({ refusal: { code: "skip_removed" } });
   });
 });
 
@@ -283,7 +236,6 @@ describe("定向补证只为选中的 v3 卡跑", () => {
 
 describe("账本在写手开工之前就落盘", () => {
   it("写手拿到工具那一刻，磁盘上的占位稿已经带着账本与角度归因", async () => {
-    await configureSearch();
     const topic = await seedResearched();
     await pick(topic.id, V3_CARD);
 
@@ -306,9 +258,9 @@ describe("账本在写手开工之前就落盘", () => {
     expect(atStart).not.toBeNull();
     expect(atStart!.status).toBe("drafting"); // 还没转正
     expect(atStart!.evidenceLedger).toBeDefined();
-    // 简报证据 ev-1 已经在账本里；补证那一条查空了但留了痕
+    // 简报证据 ev-1 已经在账本里；引擎代写不再补证，账本里没有查证记录
     expect(atStart!.evidenceLedger!.entries.map((e) => e.id)).toContain("ev-1");
-    expect(atStart!.evidenceLedger!.lookups.map((l) => l.need)).toEqual(V3_CARD.evidenceNeeds);
+    expect(atStart!.evidenceLedger!.lookups).toEqual([]);
     expect(atStart!.usedAngle).toEqual({ id: "angle-1", cardVersion: 3, hash: expect.any(String) });
   });
 });

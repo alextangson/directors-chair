@@ -20,8 +20,7 @@ description: |
 
 ## 查资料与存证
 
-- 已知网址，或宿主有自己的搜索工具时：先找到相关来源，再 `autocrew_scout {action:"read_page", topic_id, task_id, perspective, url}`。`read_page` 直接抓网址，不要求第三方搜索 key。
-- 需要 AutoCrew 的第三方搜索时：`action:"search"`，传 `perspective` 和 `query`。它使用独立搜索服务的额度，不能说消耗的是 Claude 订阅；无配置时改用实际可用的宿主搜索、直接网址或用户材料，不自动要求配 engine。
+- 用你自己（宿主）的搜索工具找来源，或用已知网址、用户给的材料；再 `autocrew_scout {action:"read_page", topic_id, task_id, perspective, url}` 抓原文。导演椅不做搜索，也不需要任何搜索 key。
 - 读到来源后用 `action:"cite"`，传 `source_id`、`claim`、逐字 `quote`。产品仅在抓取正文确实含有引文时认可；搜索摘要、聊天里的引文或模型记忆不等于已验证。
 - 无法抓取的亲历、用户材料或其他离线主张，用 `action:"claim_offline"` 传 `claim`、可选 `quote` 与 `reason`，明确标记未核验。不得为了凑证据伪装成网页引文。
 
@@ -37,4 +36,4 @@ description: |
 
 然后回 `autocrew_workflow {action:"prepare", topic_id, platform, requirements}`，按实际 `next_action` 交给写作包。用户已有材料可用 `research_mode=provided` 并传 `research`，仍要出卡、由创始人定，并披露材料是否验证；没有跳过调研的模式。
 
-只有用户明确选择 `execution=engine` 的后台流程或已授权的无人值守后台执行才另用后台研究能力；默认不调用模型探测，也不把 engine 配置当作普通 MCP 写作前提。图像、视频和第三方搜索仍按各自服务额度计费。
+调研只由宿主完成，没有后台调研通道；不调用模型探测，也不把 engine 配置当作普通 MCP 写作前提。图像、视频仍按各自服务额度计费。

@@ -2,7 +2,7 @@
 import { LOCAL_HOST } from "../storage/local-store.js";
 import { maybeJson, UNPARSABLE } from "../modules/publish/review-gate/plan.js";
 import { parseFeedback, type DraftFeedbackInput } from "../modules/draft/draft-feedback.js";
-import { parseCandidates, parseCites, parsePins, parseTestRead, type Cite, type TestReadInput } from "../modules/draft/draft-args-extra.js";
+import { parseCandidates, parseCites, parsePins, parseRivalPick, parseTestRead, type Cite, type RivalPickInput, type TestReadInput } from "../modules/draft/draft-args-extra.js";
 import type { ExemplarPin } from "../modules/exemplar/types.js";
 
 export interface DraftArgs {
@@ -48,6 +48,9 @@ export interface DraftArgs {
   cites?: Cite[] | string;
   text?: string;
   exemplarId?: string;
+  /** rival：取哪次比稿的状态；save.rival_pick：创始人盲选的结果（string = 解析不了的原因） */
+  rivalId?: string;
+  rivalPick?: RivalPickInput | string;
 }
 
 const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
@@ -134,6 +137,8 @@ export function draftArgs(p: Record<string, unknown>): DraftArgs {
     cites: parseCites(p.cites),
     text: typeof p.text === "string" && p.text.trim() ? p.text : undefined,
     exemplarId: str(p.exemplar_id),
+    rivalId: str(p.rival_id),
+    rivalPick: parseRivalPick(p.rival_pick),
   };
 }
 

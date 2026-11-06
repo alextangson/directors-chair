@@ -18,25 +18,35 @@ async function call<T>(url: string, init?: RequestInit): Promise<ApiResult<T>> {
   } catch (e) {
     // 会话交换失败（地址栏 token 与 cookie 都无效）不是「连不上」：原样给怎么拿新链接
     if (e instanceof Error && e.message === SESSION_EXPIRED) return { ok: false, error: SESSION_EXPIRED };
-    return { ok: false, error: `连不上 AutoCrew 服务：${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, error: `连不上导演椅服务：${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
 const post = <T>(url: string, payload: Json) => call<T>(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 
 export const loadBoard = () => call<BoardData>("/api/board");
+/** 内容管线（一个主题一张卡）；标不出 / 恢复要发、重拍都要原话 */
+export const loadPipeline = () => call<import("./pipeline-model").PipelineData>("/api/pipeline");
+/** 首页「让 AI 看看」：服务端拼分析指令，走写稿交接同一个 deliver() */
+export type AskKind = "insights" | "meeting" | "retro";
+export const askAI = (kind: AskKind, contentId?: string | null) => post<Delivery & { kind: AskKind }>("/api/home/ask-ai", { kind, ...(contentId ? { content_id: contentId } : {}) });
+export const setDestination =(contentId: string, platform: string, skip: boolean, founderWords: string) =>
+  post<{ platform: string; required: boolean }>("/api/pipeline/destination", { content_id: contentId, platform, skip, founder_words: founderWords });
+export const reshootTheme = (contentId: string, round: number, founderWords: string) =>
+  post<{ round: number; published: Array<{ platform: string }>; to_cancel: Array<{ platform: string; at?: string }>; warning?: string }>("/api/pipeline/reshoot", { content_id: contentId, round, founder_words: founderWords, confirm: true });
 
 /** 交给某个 AI 的结果（spec 2026-10-15 §B2）：paste = 指令要放进剪贴板让人粘贴（Codex / WorkBuddy / 没打开） */
 export interface Delivery { host: string; label: string; prompt: string; opened: boolean; paste: boolean; open_error?: string }
 export interface StartReply extends Partial<Delivery> { created: boolean; content_id: string; needs_angle?: boolean; code?: string }
 export const startWriting = (topicId: string, host?: string | null) => post<StartReply>("/api/board/start-writing", { topic_id: topicId, ...(host ? { host } : {}) });
 
-/** 已有稿件「交给 X 写 / 看」：host 不给 = 默认写稿 AI */
-export const handOffContent = (contentId: string, mode: "write" | "look", host?: string | null) =>
-  post<Delivery & { content_id: string }>("/api/board/hand-off", { content_id: contentId, mode, ...(host ? { host } : {}) });
+/** 已有稿件「交给 X 写 / 看」、选题「交给 X 调研」（id 是 topic id）：host 不给 = 默认写稿 AI */
+export const handOffContent = (id: string, mode: "write" | "look" | "research", host?: string | null) =>
+  post<Delivery>("/api/board/hand-off", { ...(mode === "research" ? { topic_id: id } : { content_id: id }), mode, ...(host ? { host } : {}) });
 
-export const markPublished = (contentId: string, platform: string, url?: string) =>
-  post<Json>("/api/board/mark-published", { content_id: contentId, platform, ...(url ? { url } : {}) });
+/** round：带上就由服务端核对是不是这一轮（重开 / 重拍过 = 拒） */
+export const markPublished = (contentId: string, platform: string, url?: string, round?: number) =>
+  post<Json>("/api/board/mark-published", { content_id: contentId, platform, ...(url ? { url } : {}), ...(round !== undefined ? { round } : {}) });
 export const unmarkPublished = (contentId: string, platform: string) =>
   post<Json>("/api/board/mark-published", { content_id: contentId, platform, undo: true });
 
@@ -49,7 +59,7 @@ export async function enableOntology(exclude: string[] = []): Promise<{ ok: bool
     if (!r.ok || !body) return { ok: false, error: r.status === 403 ? SESSION_EXPIRED : `服务没响应（HTTP ${r.status}）`, failures: [] };
     return { ok: body.ok === true, ...(body.error ? { error: body.error } : {}), failures: body.failures ?? [] };
   } catch (e) {
-    return { ok: false, error: `连不上 AutoCrew 服务：${e instanceof Error ? e.message : String(e)}`, failures: [] };
+    return { ok: false, error: `连不上导演椅服务：${e instanceof Error ? e.message : String(e)}`, failures: [] };
   }
 }
 

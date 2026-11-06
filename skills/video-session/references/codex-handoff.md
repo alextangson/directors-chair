@@ -14,8 +14,15 @@
 8. 成片和封面都通过后，Codex 从 autocrew_video status 读取服务的 approvals，连同当前 manifest_hash、claim_token、final_path（`07-delivery/` 里那份）、covers 调 register；两张封面分别为 3:4 与 4:3。登记在项目里原地核字节，不复制。成功才算已登记，发布仍由原发布流程处理。素材用 `autocrew_asset add{source_path}` 只登记路径：库内原地记相对路径，库外文件挪进项目。
 9. 会话恢复先查服务，保持原编辑器 project/timeline ID。项目信息、导航、workflow-state 是生成的只读视图，不手改状态。活动资料库未连接、绑定改变、stale_handoff、approval_mismatch、claim_held 时报告原因并停下，不建替代目录或自行补审批。
 
-当前用户以本地 `~/AutoCrew资料库` 为活动资料库，NAS 仅作完成项目的归档目的地。开工路径始终取服务回执，写稿和剪辑共用一个活动项目；完成后按 video-project-lifecycle 复制到 `/Volumes/<NAS 卷>/<账号>/Account/YYYY/<EnglishMonth>/<project-folder>`，逐文件校验并验证工程恢复后再处理已授权的冗余文件。AutoCrew 业务记录、归档位置和恢复说明留本机；不能先删文件再留下失效绑定。当前服务尚不能解析的归档引用先保留本地文件。NAS 断开不阻止本地写稿和剪辑，只阻止归档及依赖 NAS 的读取。
+活动资料库以 `~/.autocrew/storage.json` 的 `root` 为准，NAS（`archiveRoot`）只作完成项目的归档目的地。开工路径始终取服务回执，写稿和剪辑共用一个活动项目；完成后按 video-project-lifecycle 复制到 `<archiveRoot>/YYYY/<EnglishMonth>/<project-folder>`，逐文件校验并验证工程恢复后再处理已授权的冗余文件。AutoCrew 业务记录、归档位置和恢复说明留本机；不能先删文件再留下失效绑定。当前服务尚不能解析的归档引用先保留本地文件。NAS 断开不阻止本地写稿和剪辑，只阻止归档及依赖 NAS 的读取。
 
 产品仍支持其他用户把资料库直接放 NAS；其正本以 storage 配置和项目绑定为准。未迁移的历史 v1 包仅用于原流程兼容；必须通过迁移清单切换，不能直接改旧包或沿用已撤销凭据。
 
-Codex 白名单只有 autocrew_video match/confirm/handoff（必须带 confirmation_id）/register/status/revoke/report、autocrew_asset add、autocrew_content get、autocrew_desk inbox/claim/release 和 autocrew_status。共用文件夹不扩大写稿、审稿或外部发布权限。
+Codex 白名单：autocrew_video match/confirm/handoff（必须带 confirmation_id）/register/status/revoke/report、autocrew_asset add、autocrew_content get、autocrew_desk inbox/claim/release 和 autocrew_status。
+
+Claude 只写文案，出图、制作、发布由 Claude 派给 Codex（模型分配见 video-session 开头分工表）。被派到这些活时，白名单另加对应工具，只限任务里点名的 content_id：
+- 出图：`autocrew_content` 的 wechat_article `generate_images` / `attach_web_image` / `set_cover`、en_edition `set_thumbnail`。
+- 英文版成片（前台）：`autocrew_content` 的 en_edition `status` / `dub` / `set_placements` / `captions`、`record`、`mark_ready`，照[英文版制作做法](en-edition-recipe.md)。
+- 发布：`autocrew_publish`（`check` / `activities` / `activity_record` / `ego_lite_prepare` / `wechat_mp_draft`；不用 `confirm_published`）、`autocrew_content record kind:publish`、wechat_article 的发布类 op（`push_draft` / `begin_editor` / `final_check` / `mark_editor_done` / `record_*` / `publish_status`）、en_edition `final_check`，照 publish-content 技能；任务里创始人的原话是本次发布授权。
+
+写稿、审稿、改标题和文案、替创始人批准（`autocrew_writer`、`autocrew_review_desk`、`autocrew_editorial`、`autocrew_review_inbox decide`、`set_script` / `set_titles` / `choose_title` / `video_kit`）始终不归 Codex；共用文件夹不扩大这些权限。

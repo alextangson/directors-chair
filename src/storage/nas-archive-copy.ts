@@ -48,6 +48,14 @@ async function hashOrNull(file: string): Promise<string | null> {
 export const PROJECT_CACHE_DIR = "99-cache";
 export const isProjectCache = (rel: string) => rel === PROJECT_CACHE_DIR || rel.startsWith(`${PROJECT_CACHE_DIR}/`);
 
+/** 任意层的这几种目录（或指向别处的同名链接）都能重建：程序依赖、审片预览（指向成片的硬链接视图） */
+export const REBUILDABLE_NAMES = new Set(["node_modules", "review-preview"]);
+/**
+ * 可重建：项目缓存 + 任意层的 node_modules / review-preview。不上 NAS、不挡归档；
+ * 归档删本机素材时一并删掉（不然素材目录永远删不空、天天重跑归档）。
+ */
+export const isRebuildable = (rel: string) => isProjectCache(rel) || rel.split("/").some((seg) => REBUILDABLE_NAMES.has(seg));
+
 /**
  * 列出项目里所有普通文件（相对路径）；符号链接等特殊条目单独返回，由调用方决定是否挡删除。
  * skip 命中的目录 / 文件整个不看（目录不进去，省掉几万次 stat）。
@@ -162,7 +170,8 @@ export async function copyProject(
 ): Promise<{ files: ArchivedFile[]; errors: string[]; links: ProjectLink[] }> {
   const { files, special } = await walkProject(root, opts.exclude);
   // 要删的目录里有链接就不删（复制不了）；其它目录里的链接留在本机，不影响
-  const blocking = special.filter((rel) => mediaDirs.some((d) => rel.startsWith(`${d}/`)));
+  // 顶层条目本身是链接也算（不然删的时候会顺着链接进到项目外）
+  const blocking = special.filter((rel) => mediaDirs.some((d) => rel === d || rel.startsWith(`${d}/`)));
   const out: ArchivedFile[] = [], errors = blocking.map((rel) => `${rel}：不是普通文件（链接等），没法归档`);
   const recorded = opts.recordSymlinks ? await recordSpecials(root, special.filter((rel) => !opts.exclude?.(rel))) : { links: [], errors: [] };
   errors.push(...recorded.errors);

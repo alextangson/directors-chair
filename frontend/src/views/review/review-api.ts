@@ -13,11 +13,12 @@ async function call<T>(url: string, init?: RequestInit): Promise<Reply<T>> {
     return { ok: true, data: body as T };
   } catch (e) {
     if (e instanceof Error && e.message === SESSION_EXPIRED) return { ok: false, error: SESSION_EXPIRED };
-    return { ok: false, error: `连不上 AutoCrew 服务：${e instanceof Error ? e.message : String(e)}` };
+    return { ok: false, error: `连不上导演椅服务：${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
-export const loadInbox = () => call<InboxView>("/api/inbox");
+export const loadInbox = (options: { includeDrafts?: boolean } = {}) =>
+  call<InboxView>(`/api/inbox${options.includeDrafts ? "?with_drafts=1" : ""}`);
 
 /** 条目的动作：params 原样来自后端给的 actions[i].params，再加 item_id / gen / 一句话等可编辑字段 */
 export const decideItem = (payload: Json) =>
@@ -47,6 +48,17 @@ export interface InboxOpenDetail { content_id: string; types?: string[] }
 export function openInboxItem(contentId: string, types?: string[]): void {
   window.dispatchEvent(new CustomEvent<InboxOpenDetail>(INBOX_OPEN_EVENT, { detail: { content_id: contentId, ...(types ? { types } : {}) } }));
 }
+
+/** 派生稿（英文版 / 公众号文章）认稿那件的正文：中英对照 / 标题 + 正文 + 还差什么；读不出来回原因 */
+export interface EnSegmentView {
+  index: number; startMs: number; endMs: number; zh: string; en: string; keyword: string | null; changed: string | null;
+  slotS: number; estimatedS: number; words: number; over: boolean;
+  swaps: Array<{ from: string; to: string; reason: string; factual: boolean; verified: boolean; evidenceId: string | null }>;
+}
+export type DerivedReview =
+  | { ok: true; kind: "en_edition"; title: string; segments: EnSegmentView[]; problems: string[]; approval: string; hash: string }
+  | { ok: true; kind: "wechat_article"; title: string; chosenTitle: string | null; titleOptions: string[]; body: string; chars: number; images: number; problems: string[]; approval: string; sourceNote: string | null; hash: string };
+export const loadDerived = (contentId: string) => call<DerivedReview>(`/api/inbox/derived?content_id=${encodeURIComponent(contentId)}`);
 
 /** 改稿经验组（spec 2026-10-15 §A）：规则走工作台规则路由，手册走手册路由；eventId 由面板按条固定，双击 / 重试不重复记 */
 export const decideRule = (body: { ruleId: string; revision: number; decision: "active" | "rejected"; eventId: string; replaces?: string }) =>

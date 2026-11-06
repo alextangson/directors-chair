@@ -5,7 +5,7 @@
 
 export type InboxType =
   | "ask" | "ask_reported" | "cut_review" | "cover_pick" | "candidate" | "sliver"
-  | "register_blocked" | "publish_check" | "published_ask" | "publish_claim" | "draft" | "writing_rule" | "playbook_change" | "writing_promotion" | "other";
+  | "register_blocked" | "publish_check" | "published_ask" | "publish_claim" | "draft" | "en_package" | "writing_rule" | "playbook_change" | "writing_promotion" | "other";
 
 export interface InboxAction {
   action: string;
@@ -30,6 +30,9 @@ export interface InboxItem {
   actions: InboxAction[];
   blocked_reason?: string;
   detail: Record<string, unknown>;
+  /** 属于哪个主题（服务端按 derivedFrom 反查源视频）：只用来分组显示，每件照旧按自己的身份关 */
+  theme_id?: string;
+  theme_title?: string;
 }
 
 export interface InboxView { items: InboxItem[]; count: number; agent_waiting: number; generated_at: string }
@@ -155,6 +158,7 @@ export const DONE_TEXT: Record<string, string> = {
   confirm_candidate: "记下了，就是它", reject_candidate: "记下了，不是它", answer_ask: "已经回复了", undo_ask_answer: "撤回了转述的回答",
   i_published: "记下了，已经发出去了", confirm_receipt: "记下了，发了", correct_publish: "记下了，没发", approve_script: "稿子定了", revise_script: "已经告诉写稿的了",
   publish_check_confirm: "记下了，没问题", publish_check_revise: "已经告诉发布的了", publish_check_override: "按你的原话重新检查了", waive_sliver: "这处放行了",
+  approve_en_package: "英文发布包定了", revise_en_package: "已经告诉做英文版的了",
   waive_sliver_check: "这条不查了", ack: "记下了", nudge: "已经催了", undo_auto_attach: "挪回去了",
 };
 
@@ -191,14 +195,14 @@ export function toNotify(items: InboxItem[], state: NotifyState, now: number): I
 
 /** 标签页标题：「(3) AutoCrew」；没事时就是「AutoCrew」 */
 /** stale：列表没刷新成（连不上 / 登录过期）——保留上次的件数、加问号「(2?) AutoCrew」 */
-export const tabTitle = (n: number, stale = false) => (n > 0 ? `(${n}${stale ? "?" : ""}) AutoCrew` : stale ? "(?) AutoCrew" : "AutoCrew");
+export const tabTitle = (n: number, stale = false) => (n > 0 ? `(${n}${stale ? "?" : ""}) 导演椅` : stale ? "(?) 导演椅" : "导演椅");
 
 /** 列表停住时列表头的那句：登录过期 → 刷新页面；其他 → 连不上、停在几点几分 */
 export function staleLine(error: string, lastOkAt: number | null, expired: boolean): string {
   if (expired) return "登录过期，刷新页面";
   const t = lastOkAt ? new Date(lastOkAt) : null;
   const hm = t ? `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}` : "";
-  return hm ? `连不上 AutoCrew，列表停在 ${hm}` : `连不上 AutoCrew：${error}`;
+  return hm ? `连不上导演椅，列表停在 ${hm}` : `连不上导演椅：${error}`;
 }
 
 /** 行上直接能点的主按钮（不开面板）：只给封面挑组和候选确认——成片要看片，带一句话的动作要写，都不给 */
@@ -209,3 +213,15 @@ export function quickAction(row: Pick<Row, "items">): InboxAction | null {
   const want = i.type === "cover_pick" ? "pick_cover" : i.type === "candidate" ? "confirm_candidate" : null;
   return i.actions.find((a) => a.action === want && a.role === "primary" && !a.note) ?? null;
 }
+
+/** 首页「要你做的」行首的动词（管线重规划 §1 第 3 期）：一眼看出要你做哪种事 */
+const VERB: Record<InboxType, string> = {
+  draft: "认稿", cut_review: "看成片", cover_pick: "挑封面", candidate: "认素材", sliver: "看闪帧",
+  publish_check: "发前核对", published_ask: "确认发布", publish_claim: "确认发布", ask: "回答", ask_reported: "回答",
+  register_blocked: "补登记", writing_rule: "定规则", playbook_change: "定规则", writing_promotion: "定写法", other: "看看",
+  en_package: "看英文发布包",
+};
+/** 由视频派生的英文版 / 公众号文章的认稿：说清认的是哪种稿（2026-10-25：首页写「认稿」看不出是英文稿） */
+export const isDerivedDraft = (i: Pick<InboxItem, "type" | "detail"> | undefined): boolean => i?.type === "draft" && (i.detail.derived === "en_edition" || i.detail.derived === "wechat_article");
+export const derivedVerb = (i: Pick<InboxItem, "detail">): string => (i.detail.derived === "en_edition" ? "认英文稿" : "认公众号稿");
+export const rowVerb = (r: Pick<Row, "key" | "items">): string => (isLessonRow(r) ? "定规则" : isDerivedDraft(r.items[0]) ? derivedVerb(r.items[0]) : VERB[r.items[0]?.type] ?? "看看");

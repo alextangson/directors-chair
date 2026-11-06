@@ -10,8 +10,9 @@ import { draftAngle, draftExemplars } from "./draft-angle.js";
 import { draftOpening } from "./draft-opening.js";
 import { draftFeedbackHistory, draftProposePromotion } from "./draft-learn.js";
 import { draftPrepareFinal } from "./draft-prepare.js";
+import { draftRival } from "./draft-rival.js";
 
-const ACTIONS = ["start", "exemplars", "angle", "opening", "save", "verify_quote", "prepare_final", "feedback_history", "propose_promotion"] as const;
+const ACTIONS = ["start", "exemplars", "angle", "opening", "save", "verify_quote", "prepare_final", "feedback_history", "propose_promotion", "rival"] as const;
 
 export const DRAFT_DESCRIPTION =
   "抖音口播从灵感写到定稿（write-script 技能按步骤调用）。start{inspiration,topic_id?} 建稿或 start{content_id} 接手，返回档案、爆款、同系列、一手材料（firsthand）、口吻参考（voice_refs）、锁住的范文与写法和当前 version；" +
@@ -19,7 +20,8 @@ export const DRAFT_DESCRIPTION =
   "exemplars{genre,content_id?} 出立意卡前按体裁预览范文全文（只读）；" +
   "angle{content_id,base_version,genre,exemplars,main_line,for_whom,opening,why_viral,chain,founder_words,chosen_option?} 记立意与体裁，锁住手册、卡上引用的范文和写法版本；" +
   "opening{content_id,base_version,candidates|opening+founder_words} 先磨开头：记一轮候选或他选中的开头，选了才收第一版全文；" +
-  "save{content_id,base_version,body,title?,note?,test_read?,feedback?} 存一版（test_read 附观众试读；feedback 记创始人原话，正文没改也能记）；" +
+  "save{content_id,base_version,body,title?,note?,test_read?,feedback?,rival_pick?} 存一版（test_read 附观众试读；feedback 记创始人原话，正文没改也能记；rival_pick 记比稿盲选结果）；" +
+  "rival{content_id,base_version} 比稿（试行）：开头选定后让 Gemini 按同一份锁住的依据写一版，立即回 rival_id；rival{content_id,rival_id} 取 running / done{body} / failed{reason} / interrupted / stale；回执带战绩 tally；" +
   "prepare_final{content_id,base_version,citations} 出出处清单推到等你认稿，「定了」只由创始人在工作台点；" +
   "feedback_history{genre?} 跨稿读意见；propose_promotion{content_id,target,cites,text,note,genre+base_version(手册版本)?|exemplar_id?} 两篇不同稿都出现过的意见才提升级。base_version 对不上回 version_conflict。";
 
@@ -53,6 +55,8 @@ export const draftSchema = Type.Object({
   note: Type.Optional(Type.String({ description: "save：这一版改了什么；propose_promotion：为什么升级" })),
   review_notes: Type.Optional(Type.Unknown({ description: "save：旧版 Codex 审稿结果（已由观众试读替代，旧会话照收）" })),
   feedback: Type.Optional(Type.Unknown({ description: "save：创始人这次的意见 {founder_words: 原话逐字, chosen_option?: 原话只是选项代号时带那个选项全文}；第一版不收，开头阶段的意见用 opening 记" })),
+  rival_id: Type.Optional(Type.String({ description: "rival：取哪次比稿的结果（启动时回的 rival_id）" })),
+  rival_pick: Type.Optional(Type.Unknown({ description: "save：比稿盲选结果 {rival_id, picked: host | rival | merged, founder_words: 原话逐字, test_reads?: {host?, rival?}}；picked=rival 时 body 必须是 Gemini 原文" })),
   citations: Type.Optional(Type.Array(Type.Object({
     text: Type.String(),
     evidence_ids: Type.Array(Type.String()),
@@ -62,7 +66,7 @@ export const draftSchema = Type.Object({
 
 const HANDLERS: Record<string, (a: ReturnType<typeof draftArgs>) => Promise<Record<string, unknown>>> = {
   start: draftStart, exemplars: draftExemplars, angle: draftAngle, opening: draftOpening, save: draftSave, verify_quote: draftVerifyQuote,
-  prepare_final: draftPrepareFinal, feedback_history: draftFeedbackHistory, propose_promotion: draftProposePromotion,
+  prepare_final: draftPrepareFinal, feedback_history: draftFeedbackHistory, propose_promotion: draftProposePromotion, rival: draftRival,
 };
 
 export async function executeDraft(params: Record<string, unknown>): Promise<Record<string, unknown>> {

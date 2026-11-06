@@ -27,7 +27,7 @@ import { explainContent } from "./read.js";
 import { hiddenUntilScriptApproved } from "./ready.js";
 import { approvedCoverShas, ensureProductionReady, mutateProduction } from "./service.js";
 import { commitRegistration } from "./registration.js";
-import { canonPlatform, claimAccepted, observationFact, slotGate } from "./receipts.js";
+import { claimAccepted, observationFact, slotGate } from "./receipts.js";
 import { gateFromPlan } from "./publish-check-link.js";
 import { dropTxn, isCommitted, rollbackTxn, runMove, saveTxn, type ReleaseOp, type Txn, type TxnOp } from "./txn.js";
 import { applyRelease } from "./release.js";
@@ -35,6 +35,8 @@ import { STORYBOARD_HINT, validateStoryboard } from "./storyboard.js";
 import { currentCut, triggerSliverCheck } from "./sliver/check.js";
 import { latestCheck } from "./sliver/verdict.js";
 import { chatcutHold, inUseEvidence } from "./chatcut-refs.js";
+import { publicationNext, publicationOverviewOf } from "./publication-overview.js";
+import { normalizePlatform } from "../publish/review-gate/platforms.js";
 
 type Receipt = Record<string, unknown>;
 const fail = (code: string, error: string, extra: Receipt = {}): Receipt => ({ ok: false, code, error, ...extra });
@@ -47,8 +49,9 @@ const fail = (code: string, error: string, extra: Receipt = {}): Receipt => ({ o
 class StaleRound extends Error {}
 
 export async function recordPublishClaim(content: Content, dataDir: string, a: Pick<RecordArgs, "platform" | "account" | "url" | "item_id" | "host" | "request_id" | "note" | "pub_state" | "scheduled_at"> & { round?: number }): Promise<Receipt> {
-  const platform = a.platform || content.platform ? canonPlatform((a.platform || content.platform)!) : undefined;
-  if (!platform) return fail("bad_param", "kind=publish 要带 platform");
+  const rawPlatform = a.platform || content.platform;
+  const platform = normalizePlatform(rawPlatform);
+  if (!platform) return fail("bad_param", rawPlatform ? `不认识发布平台「${rawPlatform}」：请使用支持的平台名称` : "kind=publish 要带 platform");
   const scheduled = a.pub_state === "scheduled" && a.scheduled_at;
   if (!a.url && !a.item_id && !scheduled) return fail("bad_param", "kind=publish 要带作品链接 url 或平台作品 id item_id（定时的报 pub_state=scheduled + scheduled_at）");
   if (a.url && !/^https?:\/\//.test(a.url)) return fail("bad_param", `url 只接受 http/https：${a.url.slice(0, 80)}`);
@@ -76,7 +79,10 @@ export async function recordPublishClaim(content: Content, dataDir: string, a: P
   if (!r) return fail("stale", "这条已经重开过，报的是上一轮：刷新再看");
   // 回执说的以实际用上的那条事实为准（重复提交复用的旧事实可能没被直接认）
   const used = r.value.claim_accepted === true;
-  return { ok: true, content_id: content.id, fact_id: r.value.id, kind: "publish", verified: used, stage: r.explanation.stage ?? r.explanation.column, badges: r.explanation.badges,
+  const publication = await publicationOverviewOf(r.content, dataDir, r.doc);
+  return { ok: true, content_id: content.id, fact_id: r.value.id, kind: "publish", verified: used,
+    stage: r.explanation.stage === "已发布" ? publication.label : r.explanation.stage ?? r.explanation.column,
+    production_stage: r.explanation.stage, publication, next: publicationNext(publication), badges: r.explanation.badges,
     next_action: used
       ? "已直接记为已投出（带了本平台作品链接 / 报了定时），不用创始人确认；定时的过了定时时间一天还没核到公开会再问他。不要再改状态。"
       : "已记成待核的发布回执，卡上会问创始人。下次报发布带上这个平台的作品链接 url（或定时的报 pub_state=scheduled + scheduled_at），带了就直接算已投出。不要再改状态。" };
@@ -267,8 +273,15 @@ function factFrom(a: RecordArgs, p: FilePlan, doc: ProductionDoc, relPath: strin
     request_id: a.request_id, evidence: p.evidence, ...(txnId ? { txn_id: txnId } : {}),
     path: relPath ?? p.source, sha256: p.sha256, size: p.id.size, mtime_ms: p.id.mtime_ms,
     ...(p.duration_ms ? { duration_ms: p.duration_ms } : {}), ...(p.kind === "cut" ? { export_mtime_ms: p.id.mtime_ms } : {}), ...(p.kind === "aroll" ? { source_path: p.source } : {}), ...(p.ratio ? { ratio: p.ratio } : {}), ...(p.version ? { version: p.version } : {}),
-    ...(a.cover_text && p.kind === "cover" ? { text: a.cover_text } : {}), ...(p.for_cut ? { for_cut: p.for_cut } : {}), ...(a.note ? { note: a.note } : {}),
+    ...(a.cover_text && p.kind === "cover" ? { text: a.cover_text } : {}), ...(p.for_cut ? { for_cut: p.for_cut } : {}), ...(a.note ? { note: a.note } : {}), ...(a.captions_off && p.kind === "clean_master" ? { captions_off: true as const } : {}),
   };
+}
+
+/** 原片的又一个原始路径：和已记的路径 / 原始路径都不同才补（绝对路径） */
+export function addSourcePath(fact: Fact, source: string, projectRoot: string): void {
+  const abs = path.resolve(source);
+  const known = new Set([fact.path ? path.resolve(projectRoot, fact.path) : null, fact.source_path ? path.resolve(fact.source_path) : null, ...(fact.source_paths ?? []).map((s) => path.resolve(s))]);
+  if (!known.has(abs)) fact.source_paths = [...(fact.source_paths ?? []), abs];
 }
 
 /** 已有候选被再次报成可收的：原地升级（挪了的改路径），不另起一条 */
@@ -278,6 +291,9 @@ function upsertFact(doc: ProductionDoc, fact: Fact, existing: Fact | undefined):
   // 导出时间与原始路径随升级带上（Codex 审 sliver P1）：克隆后的 mtime_ms 是落位时间，不能拿来比时间线保存时间
   Object.assign(target, { state: fact.state, path: fact.path, availability: "present", evidence: fact.evidence, size: fact.size, mtime_ms: fact.mtime_ms, ...(fact.txn_id ? { txn_id: fact.txn_id } : {}),
     ...(fact.export_mtime_ms !== undefined ? { export_mtime_ms: target.export_mtime_ms ?? fact.export_mtime_ms } : {}), ...(fact.source_path ? { source_path: target.source_path ?? fact.source_path } : {}) });
+  // 候选升级时这次报的原始路径和原来的不同：补成又一个原始路径，不丢（Codex 审）
+  if (fact.kind === "aroll" && fact.source_path && target.source_path && path.resolve(fact.source_path) !== path.resolve(target.source_path)
+    && !(target.source_paths ?? []).includes(path.resolve(fact.source_path))) target.source_paths = [...(target.source_paths ?? []), path.resolve(fact.source_path)];
   return target;
 }
 
@@ -331,10 +347,25 @@ export async function commitFile(a: RecordArgs, content: Content, p: FilePlan, d
     r = await mutateProduction(content.id, dataDir, (doc) => {
       const fact = reuse ? doc.facts.find((f) => f.id === p.existing!.id)! : upsertFact(doc, { ...factFrom(a, p, doc, rel, moves ? txn.id : undefined), ...(placed ?? {}) }, p.existing);
       if (opts.patch) Object.assign(fact, opts.patch);
+      // A duplicate A-roll explicitly reported at another path has the same full SHA-256.
+      // Fill a missing origin only when the existing origin merely repeats the project copy.
+      // Never replace an already recorded distinct origin or move the reported file.
+      let sourceCorrected = false;
+      if (reuse && p.action === "existing" && fact.kind === "aroll" && fact.state === "accepted" && fact.path) {
+        const stored = path.resolve(p.projectRoot, fact.path);
+        const origin = fact.source_path ? path.resolve(p.projectRoot, fact.source_path) : stored;
+        if (origin === stored && p.source !== stored) {
+          fact.source_path = p.source;
+          sourceCorrected = true;
+        }
+      }
       // 封面记进组（review-inbox §6.1）：项目内原地收的按所在目录；其余按计划的组。同 sha 进新组 = 新成员关系
       const coverEvents = fact.kind === "cover" && fact.state === "accepted" ? joinCoverGroup(doc, fact, p, a) : [];
+      // 同一份原片（SHA 一致）换了个路径再报：把这个路径补成它的又一个原始路径，不当重复丢掉——
+      // 项目里登记的是副本、ChatCut 引用的是原始路径时，抽帧检查才认得出（2026-10-31 两个月100万播放那条）
+      if (reuse && fact.kind === "aroll") addSourcePath(fact, p.source, p.projectRoot);
       // 已有字幕没绑成片、这次报了 for_cut：补上绑定，不丢新信息（Codex 审 P2）
-      if (reuse && p.for_cut && fact.kind === "srt" && !fact.for_cut) fact.for_cut = p.for_cut;
+      if (reuse && p.for_cut && (fact.kind === "srt" || fact.kind === "clean_master") && !fact.for_cut) fact.for_cut = p.for_cut;
       const core: ReceiptCore = { fact_id: fact.id, kind: fact.kind, state: fact.state, ...(fact.path ? { path: fact.path } : {}), ...(fact.state === "candidate" ? { reason: p.evidence } : {}) };
       const args = opts.keepArgs ? doc.requests?.[a.request_id]?.args ?? requestArgs(a) : requestArgs(a);
       // group_id 先写进 core 再落盘（整分支审 14 P2）：重放 / 中断后恢复读到的回执要带组
@@ -342,7 +373,7 @@ export async function commitFile(a: RecordArgs, content: Content, p: FilePlan, d
       doc.requests = { ...(doc.requests ?? {}), [a.request_id]: { at: new Date().toISOString(), args, receipt: { ...core }, ...(opts.pairArgs ? { pair_args: opts.pairArgs } : {}) } };
       if (journaled) doc.txns = [...(doc.txns ?? []), txn.id];
       if (a.review && fact.kind === "cut" && fact.state === "accepted") coverEvents.push(...addReadyMark(doc, fact, a));
-      return { value: core, events: [...(reuse ? [] : [{ type: opts.event ?? "fact_recorded", detail: { fact_id: fact.id, kind: fact.kind, state: fact.state, by: a.host } }]), ...coverEvents] };
+      return { value: core, events: [...(reuse ? [] : [{ type: opts.event ?? "fact_recorded", detail: { fact_id: fact.id, kind: fact.kind, state: fact.state, by: a.host } }]), ...(sourceCorrected ? [{ type: "aroll_source_corrected", detail: { fact_id: fact.id, source_path: p.source, sha256: p.sha256, by: a.host } }] : []), ...coverEvents] };
     });
   } catch (err) { return commitFailed(a, content, dataDir, txn, journaled, err); }
   if (release) await applyRelease(dataDir, release);
@@ -487,6 +518,7 @@ function nextAction(core: ReceiptCore, exp: Explanation): string {
   if (core.kind === "aroll") return `原片已在项目里（path）。从这个新路径导入 ChatCut，导入后 record kind=chatcut_project chatcut_project_id=<工程 id> uses_aroll=["${core.fact_id}"]。`;
   if (core.kind === "storyboard") return `分镜已收下。要创始人拍板就用 ask kind=分镜 fact_id="${core.fact_id}"（选项里放 id=approve 表示通过），它会进「等你拍板」；不要再发 MD 或文件路径当分镜，也别在聊天里问。`;
   if (core.kind === "cut") return `成片已收。把这版的字幕也报上来（record kind=srt for_cut="${core.fact_id}"）。配乐和混音都好了才算可以审：那时 mark_ready fact_id="${core.fact_id}"（或 record 时带 review=true），创始人在「等你拍板」里审——成片通过只能创始人点。`;
+  if (core.kind === "clean_master") return "无字幕母版已记下，绑在审过的那版成片上：英文版会用它当画面。成片换版后要从新时间线关掉字幕重新导出、重新报。";
   if (core.kind === "cover") return "封面已记下。一组要 3:4 + 4:3：下次用 paths 一次记一对，或第二张带 pair_with=<第一张 fact_id>。挑哪组只能创始人在「等你拍板」里点。";
   const missing = exp.missing.length ? `还差：${exp.missing.join("、")}。` : "";
   return `${missing}看 autocrew_content summary 取最新进度；批准与选封面只能创始人在「等你拍板」里点。`;
@@ -494,7 +526,13 @@ function nextAction(core: ReceiptCore, exp: Explanation): string {
 
 async function receiptFor(content: Content, dataDir: string, core: ReceiptCore): Promise<Receipt> {
   const exp = await explainContent(content, dataDir);
-  return receipt(core, exp, content, contentRoot(content.id, dataDir));
+  const base = receipt(core, exp, content, contentRoot(content.id, dataDir));
+  if (core.kind !== "publish") return base;
+  const doc = await readProductionDocOrEmpty(content.id, dataDir);
+  const publication = await publicationOverviewOf(content, dataDir, doc);
+  return { ...base, verified: doc.facts.find((f) => f.id === core.fact_id)?.claim_accepted === true,
+    stage: exp.stage === "已发布" ? publication.label : exp.stage ?? exp.column,
+    production_stage: exp.stage, publication, next: publicationNext(publication) };
 }
 
 function receipt(core: ReceiptCore, exp: Explanation, content: Content, projectRoot: string | null, note?: string): Receipt {

@@ -9,8 +9,10 @@ import { acquireLibraryLock } from "./library-lock.js";
 import { portableProjectRecord } from "./project-record.js";
 import { syncMyContentView, VIEW_DIR, ERROR_FILE } from "./my-content-view.js";
 import { archivePublished, type ArchiveOptions } from "./nas-archive.js";
+import { loadUnfinishedChildren } from "./archive-in-progress.js";
+import { ARCHIVE_ROOT_UNSET } from "./storage-roots.js";
 import { withFileOwnership } from "./file-ownership.js";
-import { writeProductionDoc } from "./production-store.js";
+import { productionFile, writeProductionDoc } from "./production-store.js";
 import { emptyProductionDoc } from "./production-types.js";
 import { HUMAN_WRITE } from "./first-body-guard.js";
 
@@ -43,7 +45,7 @@ const daysAgo = (d: number) => new Date(NOW.getTime() - d * 86400_000).toISOStri
 const exists = (p: string) => fs.lstat(p).then(() => true, () => false);
 const root = (c: Content) => resolveContentProject(c.id, data)!.project_root;
 const archive = (opts: ArchiveOptions = {}) =>
-  archivePublished(data, { now: NOW, archiveRoot: nas, freeSpace: async () => 1e12, marginBytes: 0, ...opts });
+  archivePublished(data, { now: NOW, archiveRoot: nas, freeSpace: async () => 1e12, marginBytes: 0, unfinishedChildren: async () => new Map(), ...opts });
 
 async function make(title: string, patch: Partial<Content>): Promise<Content> {
   const c = await saveContent({ _provenance: HUMAN_WRITE, title, body: `${title} 正文`, platform: "douyin", status: "drafting", tags: [] }, data);
@@ -57,8 +59,8 @@ async function make(title: string, patch: Partial<Content>): Promise<Content> {
 }
 const published = (title: string, days: number, extra: Partial<Content> = {}) =>
   make(title, { status: "published", publishedAt: daysAgo(days), ...extra });
-/** 最近 5 条已发布（1–5 天前），占满保留名额 */
-async function fiveRecent(): Promise<void> { for (let i = 1; i <= 5; i++) await published(`新${i}`, i); }
+/** 5 条刚发布（不到 24 小时）的稿：还在发布后核对期，不归档 */
+async function fiveRecent(): Promise<Content[]> { const out: Content[] = []; for (let i = 1; i <= 5; i++) out.push(await published(`新${i}`, i * 0.15)); return out; }
 const nasDir = (c: Content) => path.join(nas, "2026", "September", path.basename(root(c)));
 
 describe("NAS 归档", () => {
@@ -89,7 +91,7 @@ describe("NAS 归档", () => {
   it("archives only the 6th-newest+ published ≥7 days, not busy in production（本体 §7：排除改成未完成事务 / 30 分钟内 record）", async () => {
     await fiveRecent();
     const old = await published("旧稿", 8);
-    const young = await published("三天稿", 3.5);
+    const young = await published("半天稿", 0.5);
     const draft = await make("未发布", { status: "publish_ready" });
     // 活认领不再挡归档；30 分钟内有 record 的才挡
     const claim = { token: "clm-x", host: "codex", leaseUntil: new Date(NOW.getTime() + 3600_000).toISOString() } as unknown as Content["claim"];
@@ -108,19 +110,61 @@ describe("NAS 归档", () => {
     for (const c of [young, draft, claimed]) expect(await exists(path.join(root(c), "02-aroll/raw.mov"))).toBe(true);
   });
 
-  it("keeps the newest 5 published even when they are old", async () => {
+  it("本机只留正在做的：不再保留最近 5 条，发布满 24 小时就归档", async () => {
     for (let i = 0; i < 5; i++) await published(`老${i}`, 20 + i);
+    await published("刚满一天", 1.01);
+    await published("差一点满一天", 0.99);
+    const r = await archive();
+    expect(r.archived.map((a) => a.title).sort()).toEqual(["老0", "老1", "老2", "老3", "老4", "刚满一天"].sort());
+  });
+
+  it("imported history records are never archived", async () => {
+    await published("历史作品", 30, { source: "imported_history" });
     const r = await archive();
     expect(r.archived).toEqual([]);
     expect(r.pending).toBe(0);
   });
 
-  it("a newer imported history record does not take one of the 5 kept slots", async () => {
-    for (let i = 0; i < 5; i++) await published(`老${i}`, 20 + i);
-    await published("历史作品", 1, { source: "imported_history" });
+  it("keeps a parent local while a derived 公众号长文 / 英文版 is unfinished, and says why", async () => {
+    const parent = await published("源视频", 3);
+    const r = await archive({ unfinishedChildren: async () => new Map([[parent.id, ["源视频（英文版）"]]]) });
+    expect(r.archived).toEqual([]);
+    expect(r.errors).toEqual([expect.stringContaining("派生稿还没发完：源视频（英文版）")]);
+    expect(await exists(path.join(root(parent), "02-aroll/raw.mov"))).toBe(true);
+  });
+
+  it("real theme grouping: an English edition still being written keeps its source video local", async () => {
+    const parent = await published("源视频", 3);
+    await make("源视频 EN", { status: "drafting", platform: "youtube", derivedFrom: { contentId: parent.id, kind: "en_edition", sourceCutHash: "h", at: daysAgo(1) } });
+    expect((await loadUnfinishedChildren(data, NOW)).get(parent.id)).toEqual(["源视频 EN"]);
+    const r = await archive({ unfinishedChildren: loadUnfinishedChildren });
+    expect(r.archived.map((a) => a.title)).not.toContain("源视频");
+    expect(await exists(path.join(root(parent), "02-aroll/raw.mov"))).toBe(true);
+  });
+
+  it("after archiving, the board cover still shows from the kept copy", async () => {
+    const old = await published("旧稿", 3);
+    const { coverOf } = await import("../desktop/board-data.js");
+    await archive();
+    expect(await exists(path.join(root(old), "05-cover/封面-3x4.png"))).toBe(false);
+    expect(await coverOf(old.id, data)).toMatchObject({ path: "00-project/kept/05-cover/封面-3x4.png" });
+  });
+
+  it("archives nothing when derived progress cannot be read (cannot tell, so does not delete)", async () => {
+    const old = await published("旧稿", 3);
+    const r = await archive({ unfinishedChildren: async () => { throw new Error("看板读坏了"); } });
+    expect(r.archived).toEqual([]);
+    expect(r.errors).toEqual([expect.stringContaining("读不出派生稿进度，这次不归档：看板读坏了")]);
+    expect(await exists(path.join(root(old), "02-aroll/raw.mov"))).toBe(true);
+  });
+
+  it("reports content without a trustworthy publish time and leaves it local", async () => {
+    const c = await make("没时间", { status: "published" });
     const r = await archive();
     expect(r.archived).toEqual([]);
-    expect(r.pending).toBe(0);
+    expect(r.errors.join()).toContain("没时间");
+    expect(r.errors.join()).toContain("待确认发布时间");
+    expect(await exists(path.join(root(c), "02-aroll/raw.mov"))).toBe(true);
   });
 
   it("does nothing when the NAS is not mounted and reports pending", async () => {
@@ -132,6 +176,40 @@ describe("NAS 归档", () => {
     expect(await fs.readFile(path.join(view, ERROR_FILE), "utf8")).toContain("NAS 未连接，有 1 条待归档");
     await archive();
     expect(await exists(path.join(view, ERROR_FILE))).toBe(false);
+  });
+
+  it("refuses to archive and reports it visibly when no archive root is configured", async () => {
+    await fiveRecent();
+    const old = await published("旧稿", 8);
+    const r = await archive({ archiveRoot: undefined });
+    expect(r.archived).toEqual([]);
+    expect(r.errors).toEqual([ARCHIVE_ROOT_UNSET]);
+    expect(await exists(path.join(root(old), "02-aroll/raw.mov"))).toBe(true);
+    expect(await fs.readFile(path.join(view, ERROR_FILE), "utf8")).toContain("未配置 NAS 归档目录");
+  });
+
+  it("reads the archive root from storage.json archiveRoot", async () => {
+    await fiveRecent();
+    await published("旧稿", 8);
+    const machine = path.join(temp, "machine");
+    await fs.writeFile(path.join(machine, "storage.json"), JSON.stringify({ version: 1, id: "lib-deadbeef", root: lib, archiveRoot: nas }));
+    const r = await archive({ archiveRoot: undefined });
+    expect(r.errors).toEqual([]);
+    expect(r.archived.map((a) => a.title)).toEqual(["旧稿"]);
+  });
+
+  it("refuses and deletes nothing when the archive month dir is a symlink back into the project's parent", async () => {
+    await fiveRecent();
+    const old = await published("旧稿", 8);
+    const at = new Date(old.publishedAt!);
+    const month = path.join(nas, String(at.getFullYear()), at.toLocaleString("en-US", { month: "long" }));
+    await fs.mkdir(path.dirname(month), { recursive: true });
+    await fs.symlink(path.dirname(root(old)), month);
+    const r = await archive();
+    expect(r.archived).toEqual([]);
+    expect(r.pending).toBe(1);
+    expect(r.errors.join("\n")).toContain("实际落在本机");
+    expect(await fs.readFile(path.join(root(old), "02-aroll/raw.mov"), "utf8")).toBe("旧稿-raw");
   });
 
   it("deletes nothing when a copy does not verify", async () => {
@@ -195,6 +273,178 @@ describe("NAS 归档", () => {
     const r = await archive({ copyImpl: copy });
     expect(r).toEqual({ archived: [], pending: 0, errors: [] });
     expect(copy).not.toHaveBeenCalled();
+  });
+
+  it("node_modules（目录或链接）和 review-preview 不挡归档、不上 NAS，归档后一并删掉", async () => {
+    await fiveRecent();
+    const old = await published("旧稿", 8);
+    const r0 = root(old);
+    await fs.mkdir(path.join(r0, "03-broll/delivery/v1"), { recursive: true });
+    await fs.mkdir(path.join(temp, "elsewhere"), { recursive: true });
+    await fs.symlink(path.join(temp, "elsewhere"), path.join(r0, "03-broll/delivery/v1/node_modules"));
+    await fs.mkdir(path.join(r0, "04-edit/motion/node_modules/x"), { recursive: true });
+    await fs.writeFile(path.join(r0, "04-edit/motion/node_modules/x/index.js"), "js");
+    await fs.mkdir(path.join(r0, "06-publish/review-preview"), { recursive: true });
+    await fs.writeFile(path.join(r0, "06-publish/review-preview/成片.mp4"), "preview");
+    const r = await archive();
+    expect(r.archived.map((a) => a.title)).toEqual(["旧稿"]);
+    expect(await exists(path.join(r0, "03-broll/delivery/v1/node_modules"))).toBe(false);
+    expect(await exists(path.join(r0, "04-edit/motion/node_modules"))).toBe(false);
+    expect(await exists(path.join(r0, "06-publish/review-preview"))).toBe(false);
+    expect(await exists(path.join(temp, "elsewhere"))).toBe(true);
+    expect(await exists(path.join(nasDir(old), "04-edit/motion/node_modules"))).toBe(false);
+  });
+
+  it("按保留名单删：08-* 这类自建目录核对上 NAS 后也删，素材目录留空骨架，01-script 不动", async () => {
+    await fiveRecent();
+    const old = await published("旧稿", 8);
+    const r0 = root(old);
+    await fs.mkdir(path.join(r0, "08-lipsync"), { recursive: true });
+    await fs.writeFile(path.join(r0, "08-lipsync/a.mp4"), "lipsync");
+    await fs.mkdir(path.join(r0, "01-script"), { recursive: true });
+    await fs.writeFile(path.join(r0, "01-script/x.md"), "稿");
+    const r = await archive();
+    expect(r.archived.map((a) => a.title)).toEqual(["旧稿"]);
+    expect(await exists(path.join(r0, "08-lipsync"))).toBe(false);
+    expect(await fs.readFile(path.join(nasDir(old), "08-lipsync/a.mp4"), "utf8")).toBe("lipsync");
+    expect(await fs.readFile(path.join(r0, "01-script/x.md"), "utf8")).toBe("稿");
+    expect(await fs.readdir(path.join(r0, "02-aroll"))).toEqual([]);
+    expect((await archive()).archived).toEqual([]);
+  });
+
+  it("[Codex P1] review-preview 下原地登记过的文件照样复制核对、本机不当可重建删", async () => {
+    await fiveRecent();
+    const old = await published("旧稿", 8);
+    const r0 = root(old);
+    await fs.mkdir(path.join(r0, "04-edit/review-preview"), { recursive: true });
+    await fs.writeFile(path.join(r0, "04-edit/review-preview/cut.mp4"), "recorded");
+    await writeProductionDoc(old.id, data, { ...emptyProductionDoc(), facts: [{ id: "f1", kind: "cut", round: 1, state: "accepted", availability: "present", source: "record", at: daysAgo(8), path: "04-edit/review-preview/cut.mp4" } as never] }, 0);
+    const r = await archive();
+    expect(r.archived.map((a) => a.title)).toEqual(["旧稿"]);
+    expect(await fs.readFile(path.join(nasDir(old), "04-edit/review-preview/cut.mp4"), "utf8")).toBe("recorded");
+  });
+
+  it("[Codex P2] 顶层目录是指向项目外的链接：挡住归档，不顺着链接删东西", async () => {
+    await fiveRecent();
+    const old = await published("旧稿", 8);
+    const outside = path.join(temp, "outside-tree");
+    await fs.mkdir(path.join(outside, "empty-sub"), { recursive: true });
+    await fs.symlink(outside, path.join(root(old), "08-linked"));
+    const r = await archive();
+    expect(r.archived).toEqual([]);
+    expect(r.errors.join("\n")).toContain("08-linked");
+    expect(await exists(path.join(outside, "empty-sub"))).toBe(true);
+    expect(await exists(path.join(root(old), "02-aroll/raw.mov"))).toBe(true);
+  });
+
+  describe("99-cache", () => {
+    const putCache = async (c: Content, body: string) => {
+      await fs.mkdir(path.join(root(c), "99-cache/remotion"), { recursive: true });
+      await fs.writeFile(path.join(root(c), "99-cache/remotion/render.mp4"), body);
+    };
+
+    it("clears the project cache when it archives, counting it in freedBytes, and never copies it to the NAS", async () => {
+      await fiveRecent();
+      const old = await published("旧稿", 8);
+      await putCache(old, "render-bytes");
+      const r = await archive();
+      expect(r.archived[0].freedBytes).toBe(Buffer.byteLength("旧稿-raw") + Buffer.byteLength("旧稿-cover") + Buffer.byteLength("render-bytes"));
+      expect(await exists(path.join(root(old), "99-cache"))).toBe(false);
+      expect(await exists(path.join(nasDir(old), "99-cache"))).toBe(false);
+    });
+
+    it("clears a cache left behind by an earlier archive, even with the NAS unmounted", async () => {
+      await fiveRecent();
+      const old = await published("旧稿", 8);
+      await archive();
+      await putCache(old, "leftover");
+      const r = await archive({ archiveRoot: path.join(temp, "not-mounted") });
+      expect(r.cacheFreed).toEqual([expect.objectContaining({ title: "旧稿", freedBytes: Buffer.byteLength("leftover") })]);
+      expect(await exists(path.join(root(old), "99-cache"))).toBe(false);
+    });
+
+    it("keeps the founder's spoken transcripts (manifest + full.json) that drafting reads, and drops the rest", async () => {
+      await fiveRecent();
+      const old = await published("旧稿", 8);
+      await putCache(old, "render-bytes");
+      const t = path.join(root(old), "99-cache/edit/transcription");
+      await fs.mkdir(t, { recursive: true });
+      await fs.writeFile(path.join(t, "transcription-manifest.json"), "{}");
+      await fs.writeFile(path.join(t, "full.json"), "{\"transcription\":[]}");
+      await fs.writeFile(path.join(t, "audio.wav"), "wav");
+      await archive();
+      expect(await fs.readdir(t)).toEqual(["full.json", "transcription-manifest.json"]);
+      expect(await exists(path.join(root(old), "99-cache/remotion"))).toBe(false);
+    });
+
+    it("never follows a symlinked 99-cache out of the project", async () => {
+      await fiveRecent();
+      const old = await published("旧稿", 8);
+      const outside = path.join(temp, "outside");
+      await fs.mkdir(outside, { recursive: true });
+      await fs.writeFile(path.join(outside, "precious.mov"), "keep me");
+      await fs.symlink(outside, path.join(root(old), "99-cache"));
+      await archive();
+      expect(await fs.readFile(path.join(outside, "precious.mov"), "utf8")).toBe("keep me");
+    });
+
+    it("没配 NAS 也每天清闲置已发布稿的缓存：素材不动、照样提示未配置", async () => {
+      const old = await published("旧稿", 8, { updatedAt: daysAgo(8) });
+      await putCache(old, "render-bytes");
+      const r = await archive({ archiveRoot: undefined });
+      expect(r.cacheFreed).toEqual([expect.objectContaining({ title: "旧稿", freedBytes: Buffer.byteLength("render-bytes") })]);
+      expect(await exists(path.join(root(old), "99-cache/remotion"))).toBe(false);
+      expect(await exists(path.join(root(old), "02-aroll/raw.mov"))).toBe(true);
+      expect(r.errors).toEqual([ARCHIVE_ROOT_UNSET]);
+    });
+
+    it("24 小时内还有改动的已发布稿不清缓存（发布时间可信与否都不看）", async () => {
+      const busy = await published("刚改过", 8, { updatedAt: daysAgo(0.5) });
+      const unknownTime = await published("没时间", 8, { publishedAt: undefined, updatedAt: daysAgo(3) });
+      await putCache(busy, "keep");
+      await putCache(unknownTime, "drop");
+      const r = await archive({ archiveRoot: undefined });
+      expect(await exists(path.join(root(busy), "99-cache/remotion/render.mp4"))).toBe(true);
+      expect(r.cacheFreed?.map((x) => x.title)).toEqual(["没时间"]);
+    });
+
+    it("[Codex P1] 制作记录里原地登记在 99-cache 的成片不当缓存删", async () => {
+      const old = await published("旧稿", 8, { updatedAt: daysAgo(8) });
+      await putCache(old, "render-bytes");
+      await fs.mkdir(path.join(root(old), "99-cache/edit"), { recursive: true });
+      await fs.writeFile(path.join(root(old), "99-cache/edit/final.mp4"), "the only cut");
+      await writeProductionDoc(old.id, data, { ...emptyProductionDoc(), facts: [{ id: "f1", kind: "cut", round: 1, state: "accepted", availability: "present", source: "record", at: daysAgo(8), path: "99-cache/edit/final.mp4" } as never] }, 0);
+      await archive({ archiveRoot: undefined });
+      expect(await fs.readFile(path.join(root(old), "99-cache/edit/final.mp4"), "utf8")).toBe("the only cut");
+      expect(await exists(path.join(root(old), "99-cache/remotion"))).toBe(false);
+    });
+
+    it("[Codex 复核 P1] 素材库原地登记在 99-cache 的文件（assets.projectPath）也不当缓存删", async () => {
+      const old = await published("旧稿", 8, { updatedAt: daysAgo(8), assets: [{ filename: "bgm.mp3", type: "audio", projectPath: "99-cache/audio/bgm.mp3", addedAt: daysAgo(9) } as never] });
+      await fs.mkdir(path.join(root(old), "99-cache/audio"), { recursive: true });
+      await fs.writeFile(path.join(root(old), "99-cache/audio/bgm.mp3"), "licensed");
+      await archive({ archiveRoot: undefined });
+      expect(await fs.readFile(path.join(root(old), "99-cache/audio/bgm.mp3"), "utf8")).toBe("licensed");
+    });
+
+    it("[Codex P2] 制作记录读不出来：判断不了最近有没有动静，不清缓存并报错", async () => {
+      const old = await published("旧稿", 8, { updatedAt: daysAgo(8) });
+      await putCache(old, "keep");
+      await fs.mkdir(path.dirname(productionFile(old.id, data)), { recursive: true });
+      await fs.writeFile(productionFile(old.id, data), "{坏的");
+      const r = await archive({ archiveRoot: undefined });
+      expect(await exists(path.join(root(old), "99-cache/remotion/render.mp4"))).toBe(true);
+      expect(r.errors.some((e) => e.includes("旧稿"))).toBe(true);
+    });
+
+    it("keeps the cache of projects that are not archived (kept 5, too young, busy)", async () => {
+      const recent = await fiveRecent();
+      const young = await published("半天稿", 0.5);
+      for (const c of [...recent, young]) await putCache(c, "keep");
+      const r = await archive();
+      expect(r.cacheFreed).toBeUndefined();
+      for (const c of [...recent, young]) expect(await exists(path.join(root(c), "99-cache/remotion/render.mp4"))).toBe(true);
+    });
   });
 
   it("skips an item when the NAS lacks free space", async () => {

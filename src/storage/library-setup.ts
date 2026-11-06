@@ -48,7 +48,7 @@ export async function checkLibraryTarget(input: string, opts: { home?: string; p
   const privacy = privacyFolder(target, home, opts.platform ?? process.platform);
   if (privacy) {
     return { kind: "refused", code: "privacy_folder", target, suggestion: defaultLibraryPath(home),
-      error: `「${privacy}」文件夹受 macOS 隐私保护，AutoCrew 在后台常常读不到里面的东西。换一个位置，比如 ${defaultLibraryPath(home)}` };
+      error: `「${privacy}」文件夹受 macOS 隐私保护，导演椅在后台常常读不到里面的东西。换一个位置，比如 ${defaultLibraryPath(home)}` };
   }
   const volume = target.match(/^\/Volumes\/[^/]+/)?.[0];
   if (volume && !(await lstatOrNull(volume))) {
@@ -145,7 +145,7 @@ async function alreadyConfigured(target: string, live: boolean): Promise<SetupRe
   assertLibraryAvailable(location);
   if (canonicalTarget(location.root) !== canonicalTarget(target)) {
     return { status: "refused", code: "other_library", root: location.root,
-      error: `这台电脑已经在用 ${location.root} 这个资料库。要换位置，去 设置 → 模型 → 用户资料库 里迁移。` };
+      error: `这台电脑已经在用 ${location.root} 这个资料库。要换位置，去 设置 → 本机 → 用户资料库 里迁移。` };
   }
   await finishActivation(live);
   return { status: "already", root: location.root };

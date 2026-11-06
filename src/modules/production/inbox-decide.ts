@@ -7,6 +7,12 @@
  * 网页的旧决定路由（卡片 / 工作台）也走这里：没带代次时按页面带来的指纹找到对应条目、取它当前的代次；
  * 找不到条目的动作（撤销批准、纠正发布、挂原片…）不在列表里，直接交给创始人决定。
  */
+import { isDerivedArticle } from "../wechat-article/review.js";
+import { articleApproveGate, recordArticleApproval, type GateResult } from "../wechat-article/approve.js";
+import { withArticleLock } from "../wechat-article/package.js";
+import { enScriptApproveGate, isEnEdition, recordEnScriptApproval } from "../en-edition/review.js";
+import { withEnLock } from "../en-edition/script.js";
+import { approveEnPackage, reviseEnPackage } from "../en-edition/package.js";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { provenanceFields } from "./decision-provenance.js";
@@ -138,15 +144,32 @@ async function scriptDecision(ctx: Ctx, approve: boolean): Promise<Result> {
     const note = noteOf(ctx);
     if (!note) return fail("note_required", "写一句要改哪里");
     // 和认稿一样在写锁内核正文（整分支审 12 P2）：旧页面上的「还要改…」不能把更新的正文退回修改；先核再记意见，拒了什么都不记
-    const t = await executeContentSave({ _dataDir: ctx.dataDir, action: "transition", id: c.id, target_status: "revision", from_status: "draft_ready", force: true, expected_body_hash: str(ctx.params.expected_body_hash) || bodyHash(c.body) }) as Result;
+    const t = await executeContentSave({ _dataDir: ctx.dataDir, action: "transition", id: c.id, target_status: "revision", from_status: "draft_ready", force: true, expected_body_hash: str(ctx.params.expected_body_hash) || bodyHash(c.body) }, { founderDecision: true }) as Result;
     if (!t.ok) return fail(t.staleDraft ? "stale_draft" : "transition_failed", t.staleDraft ? "稿子刚改过，重新看一眼" : `稿子没退回修改：${String(t.error ?? "")}`);
     return { ok: true, decision: await pushDecision(c.id, ctx.dataDir, { type: "script_revise", note }, "script_revise_requested") };
   }
+  // 由视频派生的公众号文章：批的是给他看的那一整包（Phase 2a）；核包、认稿、记批准在同一把锁里，中间改不了包
+  if (isDerivedArticle(c)) return withArticleLock(c.id, () => approveScript(ctx, String(ctx.item.detail.package_hash ?? "")));
+  // 英文版：批的是给他看的那份双语脚本（Phase 3），同样在锁里核、批、记
+  if (isEnEdition(c)) return withEnLock(c.id, () => approveScript(ctx, String(ctx.item.detail.package_hash ?? ""), "en"));
+  return approveScript(ctx, null);
+}
+
+async function approveScript(ctx: Ctx, expectedPackage: string | null, kind: "article" | "en" = "article"): Promise<Result> {
+  const c = ctx.content!;
+  const expected = expectedPackage || undefined;
+  const article = expectedPackage === null ? null : kind === "en" ? await enScriptApproveGate(c.id, ctx.dataDir, expected) : await articleApproveGate(c.id, ctx.dataDir, expected);
+  if (article && !article.ok) return fail(article.code, article.error);
   // 写锁内再核一次正文：就是创始人看着的那一版（代次里的正文哈希）
   // 页面交来的是它屏幕上那份正文的哈希（整分支审 5 P1）；没带就用代次对上那一刻读到的正文
   const shown = str(ctx.params.expected_body_hash);
-  const t = await executeContentSave({ _dataDir: ctx.dataDir, action: "transition", id: c.id, target_status: "approved", from_status: "draft_ready", force: true, expected_body_hash: shown || bodyHash(c.body) }) as Result;
-  return t.ok ? { ok: true, status: "approved" } : fail("transition_failed", String(t.error ?? "认稿没成"));
+  const t = await executeContentSave({ _dataDir: ctx.dataDir, action: "transition", id: c.id, target_status: "approved", from_status: "draft_ready", force: true, expected_body_hash: shown || bodyHash(c.body) }, { founderDecision: true }) as Result;
+  if (!t.ok) return fail("transition_failed", String(t.error ?? "认稿没成"));
+  if (article?.ok) {
+    if (kind === "article") await recordArticleApproval(c.id, article as Extract<GateResult, { ok: true }>, ctx.dataDir);
+    else await recordEnScriptApproval(c.id, article.hash, ctx.dataDir);
+  }
+  return { ok: true, status: "approved" };
 }
 
 async function run(ctx: Ctx): Promise<Result> {
@@ -179,6 +202,9 @@ async function run(ctx: Ctx): Promise<Result> {
     }
     case "publish_check_override": return publishOverride(ctx);
     case "approve_script": return scriptDecision(ctx, true);
+    // 英文发布包（Phase 3 方案 (b)）：批的是出示时那一包（detail.package_hash）
+    case "approve_en_package": return withEnLock(c!.id, () => approveEnPackage(c!.id, String(item.detail.package_hash ?? ""), dataDir));
+    case "revise_en_package": return noteOf(ctx) ? withEnLock(c!.id, () => reviseEnPackage(c!.id, noteOf(ctx), dataDir)) : fail("note_required", "写一句要改哪里");
     case "revise_script": return scriptDecision(ctx, false);
     case "reject_cut": {
       const v = chosenVersion();

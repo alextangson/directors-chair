@@ -3,6 +3,7 @@
  * 列归属一律用 explain()（与我的内容、晨报、desk 同一个），不另立口径；本体未启用时 explain 按旧状态给列（影子模式）。
  * 发布记录已投出的待发布稿由 explain 直接归到已发布——从前在这里读时改状态（syncPublished），现已删除。
  */
+import { agingDaysLeft, readAgingStart } from "../modules/radar/topic-aging.js";
 import { cachedSha } from "../modules/production/hash-cache.js";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -14,6 +15,7 @@ import { readReconcileReport, type ReconcileReport } from "../modules/production
 import type { CandidateView } from "../modules/production/derive.js";
 import type { Column } from "../modules/production/explain.js";
 import { isMissing, resolveContentProject } from "../storage/content-project.js";
+import { KEPT_DIR } from "../storage/nas-kept.js";
 import { readPublishRecord, recordTime, type PublishRecord } from "../storage/publish-record.js";
 import { isVideoPlatform } from "../storage/stage-guard.js";
 import { readProductionDoc } from "../storage/production-store.js";
@@ -25,6 +27,11 @@ import { isBeingWritten } from "../modules/production/trash-guard.js";
 import { handoffView, type HandoffView } from "../modules/production/handoff-view.js";
 export { handoffView };
 import { publishTargets, type PublishTarget } from "../modules/production/targets.js";
+import { staleReason } from "../modules/lineage/lineage.js";
+import { loadProfile, type CreatorProfile } from "../modules/profile/creator-profile.js";
+import { allowedKitPlatforms, enKitPlatforms, lineStoppedReason } from "../modules/profile/platform-lines.js";
+import { videoKitsOf } from "../storage/video-kits.js";
+import { loadPullLoginTodos, type DashboardSummary } from "./dashboard-summary.js";
 
 export { isBeingWritten };
 
@@ -80,6 +87,10 @@ export interface BoardItem {
   noScriptApproval: boolean;
   /** 本轮轮次（按平台动作要带它）；不按本体走 = null */
   round: number | null;
+  /** 派生稿（英文版 / 公众号文章）的源成片换了：人话原因；不是派生稿或没过期 = null */
+  derivedStale: string | null;
+  /** 「在别的平台发了？」能列的平台：中文视频 = 四个中文平台；英文版 = 用户勾了的英文平台 */
+  kitPlatforms: string[];
   /** 「开始写」交给了谁、有没有 agent 接手、谁正认领着（spec 2026-10-15 §B5）；没交过 = 不带 */
   handoff?: HandoffView;
 }
@@ -96,6 +107,10 @@ export interface BoardTopic {
   inSlate: boolean;
   /** 试跑示例（O20）：卡上标「示例」并给一键删 */
   example?: boolean;
+  /** 创始人打的星（1–5）；没打 = null */
+  stars: number | null;
+  /** 还剩几天进回收站；不老化（≥3 星 / 捞回过 / 本周片单）= null */
+  agingDaysLeft: number | null;
 }
 
 export interface BoardData {
@@ -105,6 +120,8 @@ export interface BoardData {
   wordsPerMinute: number | null;
   /** 本体状态（§4.1）：是否已启用；未启用时给最近一次对账算出的「要挪 N 张卡」清单；对账失败逐条列出 */
   ontology: { enabled: boolean; report: ReconcileReport | null };
+  /** 开着自动回流、上次判定要重新登录的平台（看板顶部提醒）；null = 回流状态读不了（照实说，不当成都好着） */
+  pullLogin: DashboardSummary["pullLoginTodos"] | null;
 }
 
 /** 数字数：去掉空白与 markdown 标题记号，中文按字、英文按字母 */
@@ -118,12 +135,16 @@ const PUBLISH_STATUSES = new Set(["publish_ready", "publishing", "published"]);
 export async function coverOf(contentId: string, dataDir: string): Promise<BoardCover | null> {
   const binding = resolveContentProject(contentId, dataDir);
   if (!binding) return null;
-  let names: string[];
-  try { names = await fs.readdir(path.join(binding.project_root, "05-cover")); } catch (e) { if (isMissing(e)) return null; throw e; }
-  const name = names.find((n) => /^封面-3x4\.(png|jpe?g)$/i.test(n));
-  if (!name) return null;
-  const rel = `05-cover/${name}`;
-  return { path: rel, sha256: (await cachedSha(path.join(binding.project_root, rel))).sha256 };
+  // 归档后 05-cover 空了：用删素材前留在 00-project/kept 的那份
+  for (const dir of ["05-cover", `${KEPT_DIR}/05-cover`]) {
+    let names: string[];
+    try { names = await fs.readdir(path.join(binding.project_root, dir)); } catch (e) { if (isMissing(e)) continue; throw e; }
+    const name = names.find((n) => /^封面-3x4\.(png|jpe?g)$/i.test(n));
+    if (!name) continue;
+    const rel = `${dir}/${name}`;
+    return { path: rel, sha256: (await cachedSha(path.join(binding.project_root, rel))).sha256 };
+  }
+  return null;
 }
 
 /** 最近一条已登记成片的语速：定稿字数 ÷ 成片分钟数 */
@@ -146,7 +167,7 @@ async function productionInfo(id: string, dataDir: string): Promise<{ storyboard
   return { storyboard: latest ? versionLabel(latest.version) : null, editorLabel: doc ? editorLabel(doc) : "agent" };
 }
 
-async function itemOf(c: Content, dataDir: string, ctx: ExplainContext): Promise<BoardItem | null> {
+async function itemOf(c: Content, dataDir: string, ctx: ExplainContext, profile: CreatorProfile | null): Promise<BoardItem | null> {
   const current = c;
   // 视频稿总读发布计划：平台标签要计划里的平台清单（吸收 13）
   const publish: PublishRecord | null = PUBLISH_STATUSES.has(c.status) || c.manualPublications?.length || isVideoPlatform(c.platform)
@@ -158,26 +179,44 @@ async function itemOf(c: Content, dataDir: string, ctx: ExplainContext): Promise
   if (!col) return null;
   const doc = isVideoPlatform(current.platform) ? await readProductionDoc(current.id, dataDir).catch(() => null) : null;
   return {
-    targets: publishTargets(current, doc, publish, active), noScriptApproval: exp.no_script_approval === true, round: active ? doc?.round ?? 1 : null,
+    targets: publishTargets(current, doc, publish, active, current.derivedFrom?.kind === "en_edition" ? enKitPlatforms(profile) : []), noScriptApproval: exp.no_script_approval === true, round: active ? doc?.round ?? 1 : null,
     id: current.id, title: current.title, platform: current.platform ?? null, status: current.status,
     topicId: current.topicId ?? null, ...(current.example ? { example: true } : {}), column: col, createdAt: current.createdAt, updatedAt: current.updatedAt,
     draftReadyAt: current.draftReadyAt ?? null, chars: countChars(current.body ?? ""),
     finalDurationMs: current.video?.final?.duration_ms ?? null,
     handoffHash: current.video?.handoff?.hash ?? null,
     cover: col === "待发布" || col === "已发布" ? await coverOf(current.id, dataDir).catch(() => null) : null,
-    publish, publishTime: publish ? recordTime(publish) ?? current.publishedAt : current.publishedAt,
+    publish, publishTime: exp.published_at ?? (publish ? recordTime(publish) ?? current.publishedAt : current.publishedAt),
     lastError: current.lastError ?? null, blockedReason: current.blockedReason ?? null,
-    active, writing: isBeingWritten(current), ...(handoffView(current) ? { handoff: handoffView(current)! } : {}),
-    missing: exp.missing, badges: exp.badges, alerts: exp.alerts, reason: exp.reason, candidates: exp.candidates,
+    active, writing: isBeingWritten(current), derivedStale: await boardStale(current, dataDir), kitPlatforms: allowedKitPlatforms(current.platform, profile), ...(handoffView(current) ? { handoff: handoffView(current)! } : {}),
+    missing: exp.missing, badges: exp.badges, alerts: [...exp.alerts, ...stoppedAlerts(current, profile)], reason: exp.reason, candidates: exp.candidates,
     ...(active ? await productionInfo(current.id, dataDir) : { storyboard: null }),
     // 看板拖「写稿中 → 待录制」认稿要带它（整分支审 4 P1）
     ...(draftRef(current) ? { draftRef: draftRef(current)! } : {}),
   };
 }
 
-function topicOf(t: Topic, latestMeeting: string | null): BoardTopic {
+/** 取消勾选停掉的派生线（spec §9.2）：整条线停了 / 英文版某一路停了（交过包的那一路才提）；和出口拒收用同一句话 */
+function stoppedAlerts(c: Content, profile: CreatorProfile | null): string[] {
+  const kind = c.derivedFrom?.kind;
+  if (!kind) return [];
+  const whole = lineStoppedReason(profile, kind);
+  if (whole) return [whole];
+  if (kind !== "en_edition") return [];
+  return Object.keys(videoKitsOf(c)).map((p) => lineStoppedReason(profile, kind, p)).filter((x): x is string => Boolean(x));
+}
+
+/** 看板读源状态（走哈希缓存，不现算）；一条读坏不拖垮整板，卡上照样标出来 */
+async function boardStale(c: Content, dataDir: string): Promise<string | null> {
+  try { return await staleReason(c, dataDir); }
+  catch (e) { return `来源状态读不出来：${e instanceof Error ? e.message : String(e)}`; }
+}
+
+function topicOf(t: Topic, latestMeeting: string | null, agingStart: number, now: number): BoardTopic {
+  const inSlate = inCurrentSlate(t, latestMeeting);
   return { id: t.id, title: t.title, source: t.source ?? null, link: t.link ?? null, score: typeof t.score === "number" ? t.score : null, createdAt: t.createdAt, renewedAt: t.renewedAt ?? null,
-    inSlate: inCurrentSlate(t, latestMeeting), ...(t.example ? { example: true } : {}) };
+    inSlate, ...(t.example ? { example: true } : {}),
+    stars: typeof t.stars === "number" ? t.stars : null, agingDaysLeft: inSlate ? null : agingDaysLeft(t, agingStart, now) };
 }
 
 export async function boardData(dataDir: string): Promise<BoardData> {
@@ -185,16 +224,21 @@ export async function boardData(dataDir: string): Promise<BoardData> {
   // 历史作品记录只挂回流数据，不是生产稿，不上看板
   const contents = all.filter((c) => !isImportedHistory(c));
   const items: BoardItem[] = [];
+  const profile = await loadProfile(dataDir);
   for (const c of contents) {
-    const item = await itemOf(c, dataDir, ctx);
+    const item = await itemOf(c, dataDir, ctx, profile);
     if (item) items.push(item);
   }
   const started = new Set(contents.filter((c) => c.topicId).map((c) => c.topicId!));
   const latestMeeting = await latestMeetingDate(dataDir);
+  // 只读：还没写上线日标记（清理还没跑过）就按「今天上线」算
+  const now = Date.now();
+  const agingStart = (await readAgingStart(dataDir)) ?? now;
   return {
     items,
-    topics: topics.filter((t) => !started.has(t.id)).map((t) => topicOf(t, latestMeeting)),
+    topics: topics.filter((t) => !started.has(t.id)).map((t) => topicOf(t, latestMeeting, agingStart, now)),
     wordsPerMinute: await wordsPerMinute(contents, dataDir),
     ontology: { enabled: ctx.enabled, report: await readReconcileReport(dataDir) },
+    pullLogin: await loadPullLoginTodos(dataDir),
   };
 }

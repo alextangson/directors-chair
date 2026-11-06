@@ -4,7 +4,6 @@ import { piAgentRuntime } from "../../agents/pi-runtime.js";
 import type { AgentRuntime } from "../../agents/runtime.js";
 import { getCampaign, readCampaignArtifact } from "../../storage/campaign-store.js";
 import { fetchPageText } from "../../utils/fetch-page.js";
-import { loadSearchConfig, searchWeb, type SearchConfig, type WebSearchResult } from "../research/search-provider.js";
 import type { Campaign, CampaignArtifactKind, CampaignTask } from "./domain.js";
 
 export interface CampaignTaskOutput {
@@ -22,8 +21,6 @@ interface RunnerDeps {
   runLoopImpl?: typeof runLoop;
   configLoader?: (dataDir?: string) => Promise<EngineConfig>;
   fetchPageImpl?: typeof fetchPageText;
-  searchConfigLoader?: (dataDir?: string) => Promise<SearchConfig | null>;
-  searchImpl?: typeof searchWeb;
   readArtifactImpl?: typeof readCampaignArtifact;
 }
 
@@ -99,37 +96,14 @@ async function businessAuditEvidence(campaign: Campaign, deps: RunnerDeps): Prom
   }
 }
 
-async function marketResearchEvidence(campaign: Campaign, dataDir: string | undefined, deps: RunnerDeps): Promise<string> {
-  const config = await (deps.searchConfigLoader ?? loadSearchConfig)(dataDir);
-  if (!config) throw new Error("市场研究需要搜索能力：请先在设置中配置博查或 Tavily");
-  const queries = [...new Set([
-    `${campaign.name} alternatives competitors`,
-    `${campaign.brief.audience ?? campaign.name} pain points`,
-    `${campaign.brief.businessDescription ?? campaign.name} market trends`,
-  ])];
-  const search = deps.searchImpl ?? searchWeb;
-  const results: WebSearchResult[] = [];
-  const seen = new Set<string>();
-  for (const query of queries) {
-    for (const item of await search(query, { count: 5, dataDir, config })) {
-      if (seen.has(item.url)) continue;
-      seen.add(item.url);
-      results.push(item);
-    }
-  }
-  if (results.length === 0) throw new Error("市场搜索没有返回证据，任务未生成，避免凭空研究");
-  return [
-    `搜索词:${queries.join(" | ")}`,
-    ...results.slice(0, 15).map((item, index) =>
-      `${index + 1}. ${item.title}\nURL:${item.url}\n摘要:${item.snippet || "无摘要"}`,
-    ),
-  ].join("\n\n");
-}
+/** 后台引擎不再联网搜索（调研交给宿主）：需要搜索的任务当场失败并说清原因，绝不拿空材料硬写 */
+export const MARKET_RESEARCH_RETIRED =
+  "市场研究需要联网搜索，后台引擎搜索已下线：请把这一步交给 Claude / Codex 用宿主搜索完成";
 
 function rolePrompt(task: CampaignTask): string {
   return (
     `你是 AutoCrew 的 ${task.assigneeRole}。你正在执行「${task.title}」。` +
-    "只基于输入中的项目资料、网页/搜索证据和上游产物工作，不得编造客户、数据、竞品能力或市场规模。" +
+    "只基于输入中的项目资料、网页证据和上游产物工作，不得编造客户、数据、竞品能力或市场规模。" +
     "证据不足时明确写『待验证』以及需要用户补充什么。输出必须能直接交给下一位 Agent 使用。" +
     "任何外部发布、发消息、改网站、导出客户数据或付费动作都不得执行；本任务只生成本地 markdown 产物。" +
     "完成后调用 submit_campaign_artifact，不要只在普通回复里给结果。"
@@ -147,11 +121,10 @@ export async function executeCampaignAgentTask(
   if (!campaign) throw new Error(`Campaign 不存在:${campaignId}`);
   if (task.requiredApproval) throw new Error(`任务需要人工审批:${task.requiredApproval}`);
 
+  if (task.id.includes("market-research")) throw new Error(MARKET_RESEARCH_RETIRED);
   const evidence = task.id.includes("business-audit")
     ? await businessAuditEvidence(campaign, deps)
-    : task.id.includes("market-research")
-      ? await marketResearchEvidence(campaign, dataDir, deps)
-      : await dependencyEvidence(campaign, task, dataDir, deps.readArtifactImpl ?? readCampaignArtifact);
+    : await dependencyEvidence(campaign, task, dataDir, deps.readArtifactImpl ?? readCampaignArtifact);
   if (!evidence.trim()) throw new Error("上游产物缺失，拒绝无依据执行");
 
   const config = await (deps.configLoader ?? loadEngineConfig)(dataDir);

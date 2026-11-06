@@ -284,13 +284,16 @@ describe("LLM semantic filter (unified intel layer)", () => {
       { title: "大厂裁员潮下的自救指南", link: "https://a.example/1" },
       { title: "楼市周报", link: "https://a.example/2" },
     ]);
+    // 按标题给分而不是写死 index:两条候选粗筛同分,池序只靠 publishedAt 决胜,而 seed 逐条
+    // 取 new Date() 跨毫秒时顺序会翻——写死 index 0 就把「楼市周报」判成高分了(全量跑时偶发)。
     const judge = async (positioning, _aud, candidates) => {
       expect(positioning).toBe("职场成长");
       expect(candidates).toHaveLength(2);
-      return [
-        { index: 0, score: 9, reason: "裁员潮正是职场成长受众的核心焦虑" },
-        { index: 1, score: 2, reason: "" },
-      ];
+      return candidates.map((c, index) =>
+        c.title.includes("裁员")
+          ? { index, score: 9, reason: "裁员潮正是职场成长受众的核心焦虑" }
+          : { index, score: 2, reason: "" },
+      );
     };
     const result = await intakeRadarTopics(testDir, { judge });
 
@@ -438,5 +441,46 @@ describe("applyRadarResults(引擎与宿主共用的入库段)", () => {
     const result = await intakeRadarTopics(testDir, { judge });
     expect(result.saved.map((t) => t.title)).toEqual(["AI 七分"]);
     expect(result.saved[0].score).toBe(70);
+  });
+
+  it("星级当独立信号：按来源加减分，只影响过线与排序，落库仍是机器分", async () => {
+    const pool = await poolOf(2); // [0] = 36氪，[1] = 爱范儿
+    const disliked = await saveTopic({ title: "不喜欢的", description: "d", tags: [], source: "radar:36氪" }, testDir);
+    const liked = await saveTopic({ title: "喜欢的", description: "d", tags: [], source: "radar:爱范儿" }, testDir);
+    const { rateTopic } = await import("./topic-stars.js");
+    await rateTopic(disliked.id, 1, { via: "board" }, testDir); // -2 × 3 = -6，且进回收站
+    await rateTopic(liked.id, 5, { via: "board" }, testDir); // +6
+    const out = await applyRadarResults(pool, [
+      { candidate_id: pool[0].candidate_id, score: 72, title: "36氪的", summary: "s", angles: ["a"] },
+      { candidate_id: pool[1].candidate_id, score: 66, title: "爱范儿的", summary: "s", angles: ["a"] },
+    ], testDir);
+    expect(out.saved.map((x) => x.topic.title)).toEqual(["爱范儿的"]);
+    expect(out.saved[0].topic.score).toBe(66);
+    expect(out.rejected).toEqual([pool[0].candidate_id]);
+  });
+
+  it("撤销：捞回 1 星的选题后，同来源不再被压分", async () => {
+    const pool = await poolOf(1);
+    const t = await saveTopic({ title: "误点", description: "d", tags: [], source: "radar:36氪" }, testDir);
+    const { rateTopic, loadStarAdjustments } = await import("./topic-stars.js");
+    await rateTopic(t.id, 1, { via: "board" }, testDir);
+    expect((await loadStarAdjustments(testDir)).get("radar:36氪")).toBe(-6);
+    const { restoreTopic } = await import("../../storage/local-store.js");
+    await restoreTopic(t.id, testDir);
+    expect((await loadStarAdjustments(testDir)).size).toBe(0);
+    const out = await applyRadarResults(pool, [{ candidate_id: pool[0].candidate_id, score: 72, title: "回来了", summary: "s", angles: ["a"] }], testDir);
+    expect(out.saved).toHaveLength(1);
+  });
+
+  it("引擎路径把来源星级调整交给 judge（精修门槛也吃反馈）", async () => {
+    await poolOf(2);
+    const t = await saveTopic({ title: "喜欢", description: "d", tags: [], source: "radar:爱范儿" }, testDir);
+    const { rateTopic } = await import("./topic-stars.js");
+    await rateTopic(t.id, 5, { via: "board" }, testDir);
+    let seen: Array<{ source: string; adjust?: number }> = [];
+    const judge = (async (_i: string, _a: string, cands: Array<{ source: string; adjust?: number }>) => { seen = cands; return []; }) as unknown as typeof import("./relevance.js").judgeRelevance;
+    await intakeRadarTopics(testDir, { judge });
+    expect(seen.find((c) => c.source === "爱范儿")?.adjust).toBe(6);
+    expect(seen.find((c) => c.source === "36氪")?.adjust).toBe(0);
   });
 });

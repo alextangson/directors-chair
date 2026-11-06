@@ -11,7 +11,8 @@
        "radar_pool",
        "radar_score",
        "delete",
-       "delete_example"
+       "delete_example",
+       "rate"
       ],
       "type": "string"
      },
@@ -20,6 +21,9 @@
      },
      "example": {
       "type": "boolean"
+     },
+     "founder_words": {
+      "type": "string"
      },
      "id": {
       "type": "string"
@@ -57,6 +61,9 @@
      "source": {
       "type": "string"
      },
+     "stars": {
+      "type": "number"
+     },
      "tags": {
       "items": {
        "type": "string"
@@ -65,85 +72,6 @@
      },
      "title": {
       "type": "string"
-     }
-    },
-    "required": [
-     "action"
-    ],
-    "type": "object"
-   }
-  },
-  {
-   "name": "autocrew_research",
-   "shape": {
-    "properties": {
-     "action": {
-      "enum": [
-       "discover",
-       "session_status"
-      ],
-      "type": "string"
-     },
-     "industry": {
-      "type": "string"
-     },
-     "keyword": {
-      "type": "string"
-     },
-     "mode": {
-      "enum": [
-       "auto",
-       "browser_first",
-       "api_fallback",
-       "free",
-       "manual",
-       "overseas"
-      ],
-      "type": "string"
-     },
-     "platform": {
-      "enum": [
-       "xiaohongshu",
-       "douyin",
-       "wechat_mp",
-       "wechat_video",
-       "bilibili"
-      ],
-      "type": "string"
-     },
-     "save_topics": {
-      "type": "boolean"
-     },
-     "search_results": {
-      "items": {
-       "properties": {
-        "snippet": {
-         "type": "string"
-        },
-        "title": {
-         "type": "string"
-        },
-        "url": {
-         "type": "string"
-        }
-       },
-       "required": [
-        "title",
-        "snippet",
-        "url"
-       ],
-       "type": "object"
-      },
-      "type": "array"
-     },
-     "sources": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "topic_count": {
-      "type": "number"
      }
     },
     "required": [
@@ -165,6 +93,7 @@
        "list",
        "get",
        "summary",
+       "derivative_status",
        "update",
        "transition",
        "create_variant",
@@ -178,7 +107,9 @@
        "mark_ready",
        "ask",
        "answer_ask",
-       "withdraw_ask"
+       "withdraw_ask",
+       "wechat_article",
+       "en_edition"
       ],
       "type": "string"
      },
@@ -186,6 +117,7 @@
       "minimum": 0,
       "type": "integer"
      },
+     "article": {},
      "ask_id": {
       "type": "string"
      },
@@ -199,6 +131,9 @@
      },
      "body": {
       "type": "string"
+     },
+     "captions_off": {
+      "type": "boolean"
      },
      "chatcut_project_id": {
       "type": "string"
@@ -218,6 +153,7 @@
      "distinct_video": {
       "type": "boolean"
      },
+     "edition": {},
      "fact_id": {
       "type": "string"
      },
@@ -274,6 +210,7 @@
        "chatcut_project",
        "publish",
        "storyboard",
+       "clean_master",
        "粗剪",
        "分镜",
        "样片",
@@ -537,7 +474,6 @@
        "prepare",
        "pack",
        "status",
-       "search",
        "read_page",
        "cite",
        "claim_offline",
@@ -596,9 +532,6 @@
      "platform": {
       "type": "string"
      },
-     "query": {
-      "type": "string"
-     },
      "quote": {
       "type": "string"
      },
@@ -642,7 +575,8 @@
        "verify_quote",
        "prepare_final",
        "feedback_history",
-       "propose_promotion"
+       "propose_promotion",
+       "rival"
       ],
       "type": "string"
      },
@@ -736,6 +670,10 @@
       "type": "string"
      },
      "review_notes": {},
+     "rival_id": {
+      "type": "string"
+     },
+     "rival_pick": {},
      "target": {
       "type": "string"
      },
@@ -1384,7 +1322,10 @@
        "revoke",
        "inbox_list",
        "inbox_attach",
-       "sync"
+       "sync",
+       "theme_skip",
+       "theme_restore",
+       "theme_reshoot"
       ],
       "type": "string"
      },
@@ -1425,7 +1366,9 @@
        "waive_sliver_check",
        "waive_sliver",
        "approve_script",
-       "revise_script"
+       "revise_script",
+       "approve_en_package",
+       "revise_en_package"
       ],
       "type": "string"
      },
@@ -1465,6 +1408,9 @@
      },
      "request_id": {
       "type": "string"
+     },
+     "round": {
+      "type": "number"
      },
      "sha256": {
       "type": "string"
@@ -1851,11 +1797,10 @@
        "confirm_published",
        "digest",
        "check",
-       "propose_preference"
+       "propose_preference",
+       "activities",
+       "activity_record"
       ],
-      "type": "string"
-     },
-     "article_path": {
       "type": "string"
      },
      "author": {
@@ -1894,18 +1839,6 @@
       },
       "type": "array"
      },
-     "image_api_key": {
-      "type": "string"
-     },
-     "image_base_url": {
-      "type": "string"
-     },
-     "image_generator_script": {
-      "type": "string"
-     },
-     "image_model": {
-      "type": "string"
-     },
      "image_size": {
       "type": "string"
      },
@@ -1935,10 +1868,7 @@
      "theme": {
       "type": "string"
      },
-     "value": {},
-     "wechat_publish_script": {
-      "type": "string"
-     }
+     "value": {}
     },
     "required": [
      "action"
@@ -2534,9 +2464,11 @@
      },
      "kit": {
       "properties": {
+       "ai_disclosure": {},
        "caption": {
         "type": "string"
        },
+       "chapters": {},
        "cover_text": {
         "type": "string"
        },
@@ -2546,9 +2478,13 @@
         },
         "type": "array"
        },
+       "post_text": {
+        "type": "string"
+       },
        "post_title": {
         "type": "string"
        },
+       "tags": {},
        "title_candidates": {
         "items": {},
         "type": "array"
@@ -2557,15 +2493,13 @@
         "type": "string"
        }
       },
-      "required": [
-       "post_title",
-       "caption",
-       "cover_text"
-      ],
       "type": "object"
      },
      "platform": {
       "type": "string"
+     },
+     "takeover": {
+      "type": "boolean"
      }
     },
     "required": [
@@ -3026,7 +2960,8 @@
        "radar_pool",
        "radar_score",
        "delete",
-       "delete_example"
+       "delete_example",
+       "rate"
       ],
       "type": "string"
      },
@@ -3035,6 +2970,9 @@
      },
      "example": {
       "type": "boolean"
+     },
+     "founder_words": {
+      "type": "string"
      },
      "id": {
       "type": "string"
@@ -3072,6 +3010,9 @@
      "source": {
       "type": "string"
      },
+     "stars": {
+      "type": "number"
+     },
      "tags": {
       "items": {
        "type": "string"
@@ -3080,85 +3021,6 @@
      },
      "title": {
       "type": "string"
-     }
-    },
-    "required": [
-     "action"
-    ],
-    "type": "object"
-   }
-  },
-  {
-   "name": "autocrew_research",
-   "shape": {
-    "properties": {
-     "action": {
-      "enum": [
-       "discover",
-       "session_status"
-      ],
-      "type": "string"
-     },
-     "industry": {
-      "type": "string"
-     },
-     "keyword": {
-      "type": "string"
-     },
-     "mode": {
-      "enum": [
-       "auto",
-       "browser_first",
-       "api_fallback",
-       "free",
-       "manual",
-       "overseas"
-      ],
-      "type": "string"
-     },
-     "platform": {
-      "enum": [
-       "xiaohongshu",
-       "douyin",
-       "wechat_mp",
-       "wechat_video",
-       "bilibili"
-      ],
-      "type": "string"
-     },
-     "save_topics": {
-      "type": "boolean"
-     },
-     "search_results": {
-      "items": {
-       "properties": {
-        "snippet": {
-         "type": "string"
-        },
-        "title": {
-         "type": "string"
-        },
-        "url": {
-         "type": "string"
-        }
-       },
-       "required": [
-        "title",
-        "snippet",
-        "url"
-       ],
-       "type": "object"
-      },
-      "type": "array"
-     },
-     "sources": {
-      "items": {
-       "type": "string"
-      },
-      "type": "array"
-     },
-     "topic_count": {
-      "type": "number"
      }
     },
     "required": [
@@ -3180,6 +3042,7 @@
        "list",
        "get",
        "summary",
+       "derivative_status",
        "update",
        "transition",
        "create_variant",
@@ -3193,7 +3056,9 @@
        "mark_ready",
        "ask",
        "answer_ask",
-       "withdraw_ask"
+       "withdraw_ask",
+       "wechat_article",
+       "en_edition"
       ],
       "type": "string"
      },
@@ -3201,6 +3066,7 @@
       "minimum": 0,
       "type": "integer"
      },
+     "article": {},
      "ask_id": {
       "type": "string"
      },
@@ -3214,6 +3080,9 @@
      },
      "body": {
       "type": "string"
+     },
+     "captions_off": {
+      "type": "boolean"
      },
      "chatcut_project_id": {
       "type": "string"
@@ -3233,6 +3102,7 @@
      "distinct_video": {
       "type": "boolean"
      },
+     "edition": {},
      "fact_id": {
       "type": "string"
      },
@@ -3289,6 +3159,7 @@
        "chatcut_project",
        "publish",
        "storyboard",
+       "clean_master",
        "粗剪",
        "分镜",
        "样片",
@@ -3552,7 +3423,6 @@
        "prepare",
        "pack",
        "status",
-       "search",
        "read_page",
        "cite",
        "claim_offline",
@@ -3611,9 +3481,6 @@
      "platform": {
       "type": "string"
      },
-     "query": {
-      "type": "string"
-     },
      "quote": {
       "type": "string"
      },
@@ -3657,7 +3524,8 @@
        "verify_quote",
        "prepare_final",
        "feedback_history",
-       "propose_promotion"
+       "propose_promotion",
+       "rival"
       ],
       "type": "string"
      },
@@ -3751,6 +3619,10 @@
       "type": "string"
      },
      "review_notes": {},
+     "rival_id": {
+      "type": "string"
+     },
+     "rival_pick": {},
      "target": {
       "type": "string"
      },
@@ -4399,7 +4271,10 @@
        "revoke",
        "inbox_list",
        "inbox_attach",
-       "sync"
+       "sync",
+       "theme_skip",
+       "theme_restore",
+       "theme_reshoot"
       ],
       "type": "string"
      },
@@ -4440,7 +4315,9 @@
        "waive_sliver_check",
        "waive_sliver",
        "approve_script",
-       "revise_script"
+       "revise_script",
+       "approve_en_package",
+       "revise_en_package"
       ],
       "type": "string"
      },
@@ -4480,6 +4357,9 @@
      },
      "request_id": {
       "type": "string"
+     },
+     "round": {
+      "type": "number"
      },
      "sha256": {
       "type": "string"
@@ -4866,11 +4746,10 @@
        "confirm_published",
        "digest",
        "check",
-       "propose_preference"
+       "propose_preference",
+       "activities",
+       "activity_record"
       ],
-      "type": "string"
-     },
-     "article_path": {
       "type": "string"
      },
      "author": {
@@ -4909,18 +4788,6 @@
       },
       "type": "array"
      },
-     "image_api_key": {
-      "type": "string"
-     },
-     "image_base_url": {
-      "type": "string"
-     },
-     "image_generator_script": {
-      "type": "string"
-     },
-     "image_model": {
-      "type": "string"
-     },
      "image_size": {
       "type": "string"
      },
@@ -4950,10 +4817,7 @@
      "theme": {
       "type": "string"
      },
-     "value": {},
-     "wechat_publish_script": {
-      "type": "string"
-     }
+     "value": {}
     },
     "required": [
      "action"
@@ -5417,9 +5281,11 @@
      },
      "kit": {
       "properties": {
+       "ai_disclosure": {},
        "caption": {
         "type": "string"
        },
+       "chapters": {},
        "cover_text": {
         "type": "string"
        },
@@ -5429,9 +5295,13 @@
         },
         "type": "array"
        },
+       "post_text": {
+        "type": "string"
+       },
        "post_title": {
         "type": "string"
        },
+       "tags": {},
        "title_candidates": {
         "items": {},
         "type": "array"
@@ -5440,15 +5310,13 @@
         "type": "string"
        }
       },
-      "required": [
-       "post_title",
-       "caption",
-       "cover_text"
-      ],
       "type": "object"
      },
      "platform": {
       "type": "string"
+     },
+     "takeover": {
+      "type": "boolean"
      }
     },
     "required": [

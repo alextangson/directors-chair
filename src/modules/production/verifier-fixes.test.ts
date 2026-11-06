@@ -359,14 +359,13 @@ describe("seg12 归档口径", () => {
     return r;
   }
 
-  it("[2] 本轮时间只认可信观察里真实的公开 / 定时时间：只有「我发了」或占位时间 → 定不出，归档列「待确认发布时间」、不归档也不备份", async () => {
+  it("[2] 只有占位时间的旧回执定不出本轮时间：归档列「待确认发布时间」、不归档也不备份", async () => {
     await enable();
     const { roundPublishTime, publishedSet } = await import("../../storage/round-publish-time.js");
     const { archiveCandidates } = await import("../../storage/nas-archive.js");
     const { backupCandidates } = await import("../../storage/nas-backup.js");
     const { getContent } = await import("../../storage/local-store.js");
     const r = await registeredVideo(env);
-    await founderDecision(r.id, "i_published", { platform: "douyin" }, env.dir);
     // 旧形状回执：只有 at（排序占位会变成 1970）
     const { mutateProduction } = await import("./service.js");
     await mutateProduction(r.id, env.dir, (d) => { d.facts.push({ id: "legacy-pub", kind: "publish", round: d.round, state: "accepted", availability: "present", source: "reconcile", at: "2026-10-10T00:00:00Z", platform: "bilibili", pub_state: "public", verified: true, evidence: "发布计划里的记录" }); return { value: null, events: [] }; });
@@ -377,13 +376,51 @@ describe("seg12 归档口径", () => {
     expect(backupCandidates(set.published, new Date("2026-12-01T00:00:00Z"))).toEqual([]);
   });
 
+  it("[创始人 10-30] 点了「我发了」：那一刻就是本轮发布时间，满 24 小时进归档", async () => {
+    await enable();
+    const { roundPublishTime, publishedSet } = await import("../../storage/round-publish-time.js");
+    const { archiveCandidates } = await import("../../storage/nas-archive.js");
+    const { readProductionDoc } = await import("../../storage/production-store.js");
+    const { getContent } = await import("../../storage/local-store.js");
+    const r = await registeredVideo(env);
+    await founderDecision(r.id, "i_published", { platform: "douyin" }, env.dir);
+    const at = (await readProductionDoc(r.id, env.dir))!.decisions.find((d) => d.type === "i_published")!.at;
+    const c = (await getContent(r.id, env.dir))!;
+    expect(await roundPublishTime(c, env.dir)).toBe(new Date(at).toISOString());
+    const set = await publishedSet([c], env.dir, 0);
+    expect(archiveCandidates(set, new Date(Date.parse(at) + 25 * 3600_000)).due.map((x) => x.id)).toEqual([r.id]);
+  });
+
+  it("[创始人 10-30] 计划写着已发布、只有定时时间没写公开时间：按定时时间算（遛狗 App 那条）", async () => {
+    const { roundPublishTime } = await import("../../storage/round-publish-time.js");
+    const { getContent } = await import("../../storage/local-store.js");
+    const r = await publishedWithPlan(undefined, { status: "published", scheduled_at: "2026-09-02T10:00:00Z", submitted_at: "2026-09-01T00:00:00Z", post_id: "x1" });
+    expect(await roundPublishTime((await getContent(r.id, env.dir))!, env.dir)).toBe("2026-09-02T10:00:00.000Z");
+  });
+
+  it("[Codex P1] 确认一条「已定时」的 AI 回执：确认时刻不当发布时间（不能在公开前就归档）", async () => {
+    await enable();
+    const { roundPublishTime } = await import("../../storage/round-publish-time.js");
+    const { getContent } = await import("../../storage/local-store.js");
+    const { mutateProduction } = await import("./service.js");
+    const r = await registeredVideo(env);
+    const now = new Date().toISOString();
+    await mutateProduction(r.id, env.dir, (d) => {
+      d.facts.push({ id: "claim-1", kind: "publish", round: d.round, state: "accepted", availability: "present", source: "record", at: now, seen_at: now, platform: "youtube", pub_state: "scheduled", obs_source: "claim", verified: false, evidence: "AI 说定时了" } as never);
+      d.decisions.push({ id: "conf-1", type: "publish_confirm", round: d.round, at: now, fact_id: "claim-1" } as never);
+      return { value: null, events: [] };
+    });
+    expect(await roundPublishTime((await getContent(r.id, env.dir))!, env.dir)).toBeNull();
+  });
+
   it("[seg13 P2] 保留名单里定不出发布时间的也列进「待确认」，但仍不归档", async () => {
     await enable();
     const { publishedSet } = await import("../../storage/round-publish-time.js");
     const { archiveCandidates } = await import("../../storage/nas-archive.js");
     const { getContent } = await import("../../storage/local-store.js");
+    const { mutateProduction } = await import("./service.js");
     const r = await registeredVideo(env);
-    await founderDecision(r.id, "i_published", { platform: "douyin" }, env.dir);
+    await mutateProduction(r.id, env.dir, (d) => { d.facts.push({ id: "legacy-pub", kind: "publish", round: d.round, state: "accepted", availability: "present", source: "reconcile", at: "2026-10-10T00:00:00Z", platform: "bilibili", pub_state: "public", verified: true, evidence: "发布计划里的记录" }); return { value: null, events: [] }; });
     const set = await publishedSet([(await getContent(r.id, env.dir))!], env.dir);
     expect(set.keep.has(r.id)).toBe(true);
     const out = archiveCandidates(set, new Date("2026-12-01T00:00:00Z"));
@@ -523,14 +560,14 @@ describe("seg12 归档口径", () => {
     expect(p).toMatchObject({ time: "2026-10-08T10:00:00Z", evidenceAt: "2026-09-01T00:00:00Z", submittedAt: null });
   });
 
-  it("[3] 视图与归档同一份保留名单：视图显示的就是 keep，归档候选与它不相交", async () => {
+  it("[3] 保留名单只管视图：视图显示的就是 keep；归档不再看它（10-25 本机只留正在做的）", async () => {
     const a = await publishedWithPlan();
     const { publishedSet } = await import("../../storage/round-publish-time.js");
     const { archiveCandidates } = await import("../../storage/nas-archive.js");
     const { listContents } = await import("../../storage/local-store.js");
     const set = await publishedSet(await listContents(env.dir), env.dir, 1);
     expect([...set.keep]).toEqual([a.id]);
-    expect(archiveCandidates(set, new Date("2026-12-01T00:00:00Z")).due.map((c) => c.id)).not.toContain(a.id);
+    expect(archiveCandidates(set, new Date("2026-12-01T00:00:00Z")).due.map((c) => c.id)).toContain(a.id);
     const { buildPlan } = await import("../../storage/my-content-plan.js");
     const plan = await buildPlan(env.dir, 1);
     expect(Object.values(plan.dirs)).toContain(a.id);

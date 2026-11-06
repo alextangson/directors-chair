@@ -58,14 +58,20 @@ export const REQUIRED_FIELDS: Record<IpcChannel, readonly string[]> = {
   // 测的是**端点**不是岗位（P2 spec §4.1）：provider_id 指端点表里的一条，model 指要试的模型名。
   // **永不接受裸 baseUrl/apiKey**，见 settings-probe.ts
   "settings:test_route": ["provider_id", "model"],
+  // 只认预设 baseUrl，不写盘；base_url 可选（传了别的地址直接拒）
+  "settings:list_models": ["api_key"],
+  // 服务端「读 → 追加 → 校验 → 原子写」；revision 是 settings:get 回的修订号（写前比对）
+  "settings:engine_attach_preset": ["as", "api_key", "strong", "fast"],
+  // enabled? / dismiss? 至少一个，由 handler 判
+  "settings:offer_set": [],
   // 只读，无参：视图由服务端从配置 + 健康态派生（不含任何密钥）
   "engine:health": [],
+  // force 可选：true = 现在就探（用户点「重新检查」），缺省只探过时的失败
+  "engine:recheck": [],
   // 只读，无参：宿主名 + 发放时间 + 最后调用时间，永不含 token 值
   "hosts:list": [],
   // 撤销就是删掉 `<dataDir>/tokens/<host>.token`，那个宿主下一次调用 401
   "hosts:revoke": ["host"],
-  "settings:search_get": [],
-  "settings:search_set": ["provider", "api_key"],
   "settings:publish_get": [],
   "settings:publish_set": [],
   "style:update_rule": ["rule_id", "revision"],
@@ -79,6 +85,8 @@ export const REQUIRED_FIELDS: Record<IpcChannel, readonly string[]> = {
   "cover:identity": ["action"],
   "settings:cover_get": [],
   "settings:cover_set": [],
+  "settings:rival_get": [],
+  "settings:rival_set": [],
   "logs:list": [],
   "logs:get_run": ["run_id"],
   "skills:list": [],
@@ -97,6 +105,8 @@ export const REQUIRED_FIELDS: Record<IpcChannel, readonly string[]> = {
   "flywheel:pull_status": [],
   "flywheel:pull_now": ["platform"],
   "flywheel:pull_toggle": ["platform", "enabled"],
+  // 可选 target：data（数据后台，默认）/ publish（发布页）；地址由服务端按平台查
+  "ego:open_console": ["platform"],
   "flywheel:hypotheses_list": [],
   "calibration:ledger": [],
   "dialog:pick_file": [],
@@ -123,12 +133,15 @@ export const REQUIRED_FIELDS: Record<IpcChannel, readonly string[]> = {
   "topic:delete": ["id"],
   "topic:delete_example": ["id"],
   "topic:restore": ["id"],
+  "topic:rate": ["id"],
   // 角度点选：brief_revision 是乐观锁（必须是该选题最新版，否则用户看的是过期候选）；
   // 可选键 card = 改写后的整张卡（§1.4 改写动作），缺省则落原卡快照
   "topic:select_angle": ["topic_id", "brief_revision", "angle_id"],
   "topic:clear_angle": ["topic_id"],
   "draft:final_get": ["id"],
   "draft:finalize": ["id", "draft_hash"],
+  "script:final_get": ["id"],
+  "script:finalize": ["id", "expected_body_hash"],
   "trash:list": [],
   "content:versions": ["id"],
   "content:revert": ["id", "version"],
@@ -181,10 +194,7 @@ export const REQUIRED_FIELDS: Record<IpcChannel, readonly string[]> = {
   "patterns:list": [],
   "patterns:update": ["id"],
   "patterns:delete": ["id"],
-  // 深调研（deep-research spec §8）。brief_get 的可选键 revision（正整数）= 回溯指定版本
-  "research:deep_dive": ["topic_id"],
-  // 重新立意（P1 spec §3.5）：只在当前生效简报上重跑立意 pass，投递即返回
-  "research:regenerate_angles": ["topic_id"],
+  // 调研读口（deep-research spec §8）。brief_get 的可选键 revision（正整数）= 回溯指定版本
   "research:status": ["topic_id"],
   "research:brief_get": ["topic_id"],
   "research:list_assets": ["topic_id"],

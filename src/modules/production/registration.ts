@@ -4,7 +4,7 @@
  * 核（全部先于副作用）：视频平台要有 for_cut = 所批成片 sha 的字幕；所批文件现算 sha 与批准一致；都在项目内、无符号链接。
  *   不过 → 批准照存，doc.commit_failure 写原因，阶段 D3 显示它（E22：不借旧记录）。
  * 做（文件归属事务，按事务 id 提交，摘自 confident-raman commitCore 的思路，去掉按状态 / 无条件 restorePrev 的恢复）：
- *   成片克隆成 07-delivery/registered/final-r<N>-<sha16>（发布器按素材身份取）、选中封面克隆成 05-cover/封面-3x4.* / 封面-4x3.*
+ *   成片原地登记（素材记录的 projectPath 指向批准的那份，不另存副本：发布按登记 sha 现核）、选中封面克隆成 05-cover/封面-3x4.* / 封面-4x3.*
  *   （旧的先挪到备份，撤回时放回）→ 在 production.json 写**不可变登记记录**（提交点）。
  *   之后才做、失败只报 warning 不回滚：实拍版口播（register-spoken 的路径）、实拍版核对清单（raman retro-checklist）。
  * 稿件上的 video.final / videoDone / 成片素材由 `projectRegistration` 在投影里按当前登记记录补齐（幂等，崩了也能自愈）。
@@ -28,6 +28,9 @@ import { identityOf } from "./files.js";
 import { commitSha, metaKey, STILL_SETTLING } from "./hash-cache.js";
 import { checkTargetDir } from "./record-plan.js";
 import { isWithin } from "../../storage/storage-roots.js";
+import { cloneFile } from "../../storage/clone-file.js";
+import { purgeMixAudio } from "../../storage/mix-audio-purge.js";
+import { recordedRels } from "../../storage/recorded-files.js";
 import { mutateProduction, refreshContent } from "./service.js";
 import { dropBackups, dropTxn, isCommitted, rollbackTxn, saveTxn, type Txn, type TxnOp } from "./txn.js";
 
@@ -99,7 +102,7 @@ async function cloneTo(txn: Txn, dataDir: string, source: string, target: string
   await fs.mkdir(path.dirname(target), { recursive: true });
   if (op.backup) await fs.rename(target, op.backup);
   const id = await identityOf(source);
-  await fs.copyFile(source, target, fs.constants.COPYFILE_EXCL | fs.constants.COPYFILE_FICLONE);
+  await cloneFile(source, target);
   if ((await sha256File(target)) !== sha || !(await identityOf(source).then((x) => x.ino === id.ino && x.mtime_ms === id.mtime_ms))) throw new Error(`拷贝 ${path.basename(target)} 时源变了`);
   op.step = "placed";
   await saveTxn(dataDir, txn);
@@ -117,11 +120,9 @@ async function safeDir(root: string, rel: string): Promise<void> {
   if (!isWithin(root, await fs.realpath(path.join(root, rel)))) throw new Error(`登记目标目录出了项目：${rel}`);
 }
 
-async function placeAll(root: string, p: Picked, n: number, txn: Txn, dataDir: string): Promise<void> {
-  await safeDir(root, "07-delivery/registered");
+async function placeAll(root: string, p: Picked, txn: Txn, dataDir: string): Promise<void> {
   await safeDir(root, "05-cover");
   const ext = (f: Fact) => path.extname(f.path!).toLowerCase();
-  await cloneTo(txn, dataDir, path.join(root, p.cutFact.path!), path.join(root, "07-delivery/registered", registeredCutName(n, p.cutFact.sha256!, ext(p.cutFact))), p.cutFact.sha256!);
   await cloneTo(txn, dataDir, path.join(root, p.c34.path!), path.join(root, `05-cover/封面-3x4${ext(p.c34)}`), p.c34.sha256!);
   await cloneTo(txn, dataDir, path.join(root, p.c43.path!), path.join(root, `05-cover/封面-4x3${ext(p.c43)}`), p.c43.sha256!);
 }
@@ -156,6 +157,16 @@ async function sideProducts(content: Content, root: string, p: Picked, n: number
   }
 }
 
+/** 成片登记了：这一条的混音检查音频（99-cache/audio）没用了，清掉；登记过的文件不动。失败只报 warning（登记已提交） */
+async function purgeMixAudioAfter(content: Content, root: string, dataDir: string): Promise<string[]> {
+  try {
+    await purgeMixAudio(root, await recordedRels(content, dataDir, root));
+    return [];
+  } catch (e) {
+    return [`登记已完成，但混音中间件（99-cache/audio）没清掉：${e instanceof Error ? e.message : String(e)}`];
+  }
+}
+
 /** 调用方持有文件归属事务（决定、record、对账三处触发）。按本体走的视频稿才会登记 */
 /** `backoff`：只给对账循环——上次核失败、相关文件元数据都没变时不再重算 */
 export async function commitRegistration(contentId: string, dataDir: string, opts: { backoff?: boolean } = {}): Promise<CommitResult> {
@@ -179,7 +190,7 @@ export async function commitRegistration(contentId: string, dataDir: string, opt
   if (bad) { await recordFailure(contentId, dataDir, bad); return { ok: false, reason: bad }; }
   const n = doc.registrations.length + 1;
   const txn: Txn = { id: newId("txn"), kind: "register", content_id: contentId, round: doc.round, ops: [], at: new Date().toISOString() };
-  try { await placeAll(root, picked, n, txn, dataDir); }
+  try { await placeAll(root, picked, txn, dataDir); }
   catch (e) {
     const undone = await rollbackTxn(dataDir, txn).then(() => true, () => false);
     const reason = `登记落文件失败${undone ? "（已撤回）" : "（没能撤回，日志留着，重启时核定）"}：${e instanceof Error ? e.message : String(e)}`;
@@ -213,6 +224,7 @@ async function landRegistration(content: Content, root: string, picked: Picked, 
   await dropBackups(txn);
   await dropTxn(dataDir, txn.id);
   warnings.push(...(await sideProducts(content, root, picked, n, dataDir)));
+  warnings.push(...(await purgeMixAudioAfter(content, root, dataDir)));
   return { ok: true, registration: reg, ...(warnings.length ? { warnings } : {}) };
 }
 
@@ -239,7 +251,7 @@ export async function registrationPatch(content: Content, doc: ProductionDoc, re
     },
     registered_by: "founder", at: reg.at, generation: n, manifest_hash: "", register_hash: reg.id, video_ready_at: reg.at,
   };
-  const assets = [...(content.assets ?? []).filter((a) => a.filename !== name), { filename: name, type: "video" as const, role: "other" as const, renderedRevision: n, addedAt: reg.at, description: `登记成片 r${n}`, media: { durationMs: cutFact.duration_ms ?? 0 } }];
+  const assets = [...(content.assets ?? []).filter((a) => a.filename !== name), { filename: name, projectPath: cutFact.path, type: "video" as const, role: "other" as const, renderedRevision: n, addedAt: reg.at, description: `登记成片 r${n}`, media: { durationMs: cutFact.duration_ms ?? 0 } }];
   const history = content.video?.final ? [...(content.video.history ?? []), content.video.final] : content.video?.history ?? [];
   return { video: { ...content.video, final, history }, videoDone: { renderedRevision: n, at: reg.at }, ...(content.videoReadyAt ? {} : { videoReadyAt: reg.at }), assets };
 }

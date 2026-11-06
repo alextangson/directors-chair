@@ -4,7 +4,7 @@
  * - `resolveLocalFile` / `checkCover`：摘自 confident-raman 的 retro-files（路径逐段禁符号链接、
  *   iCloud 占位拒、封面按像素头判比例），错误改成本体的 `{code, error}`。
  * - 完整性：大小与修改时间 10 秒内没变（修改时间早于 10 秒前，且哈希前后两次 stat 一致）+ 视频 ffprobe 时长 > 0。
- * - 克隆用 APFS clonefile（`COPYFILE_FICLONE`，不占额外空间、与源互不影响），跨卷退化为普通复制；**不用硬链接**。
+ * - 克隆用 storage/clone-file（macOS 走 `cp -c` 的 clonefile，不占额外空间、与源互不影响；Node 的 COPYFILE_FICLONE 在 macOS 上是整份复制），跨卷退化为普通复制；**不用硬链接共享源文件**。
  */
 import fs from "node:fs/promises";
 import { constants } from "node:fs";
@@ -16,6 +16,7 @@ import { sha256File } from "../video/handoff/manifest.js";
 import { expandHome } from "../video/handoff/roots.js";
 import { probeMedia } from "../video/ingest.js";
 import type { CoverRatio } from "../../storage/production-types.js";
+import { cloneFile } from "../../storage/clone-file.js";
 
 export type Checked<T> = { ok: true; value: T } | { ok: false; code: string; error: string };
 const fail = <T>(code: string, error: string): Checked<T> => ({ ok: false, code, error });
@@ -125,11 +126,15 @@ export async function stableFingerprint(file: string, now: number): Promise<Chec
   return { ok: true, value: { id: after, sha256 } };
 }
 
-export type Probe = (file: string) => Promise<{ durationMs: number } | { error: string }>;
+/** width / height / audio：无字幕母版要核（没给 = 不知道，母版按不合格拒） */
+export interface ProbeInfo { durationMs: number; width?: number; height?: number; audio?: boolean }
+export type Probe = (file: string) => Promise<ProbeInfo | { error: string }>;
 
 export const ffprobeDuration: Probe = async (file) => {
   const r = await probeMedia(file);
-  return r.ok ? { durationMs: r.probe.durationMs } : { error: r.reason };
+  if (!r.ok) return { error: r.reason };
+  const v = r.probe.video;
+  return { durationMs: r.probe.durationMs, ...(v ? { width: v.width, height: v.height } : {}), audio: Boolean(r.probe.audio) };
 };
 
 /** 视频（aroll / cut）：ffprobe 读得出时长 > 0，否则当没导完 */
@@ -159,7 +164,7 @@ export async function reserveTarget(dir: string, stem: string, ext: string): Pro
 /** 克隆进项目（目标已由 reserveTarget 占位）：先删占位再 clonefile，核哈希与源身份 */
 export async function cloneInto(source: string, target: string, sha256: string, id: FileIdentity): Promise<void> {
   await fs.rm(target, { force: true });
-  await fs.copyFile(source, target, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
+  await cloneFile(source, target);
   const changed = !sameIdentity(id, await identityOf(source)) || (await sha256File(target)) !== sha256;
   if (changed) {
     await fs.rm(target, { force: true });

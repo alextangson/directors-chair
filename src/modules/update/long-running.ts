@@ -24,9 +24,9 @@ export const LONG_RUNNING_CHANNELS: ReadonlySet<string> = new Set([
   "retro:generate", "persona:generate", "style:distill", "style:absorb", "draft:rewrite_selection",
   "draft:adopt_revision", // 采纳改稿顺带蒸馏文风（Codex 审第 8 轮 P2）
   "topic:create", // 超过 30 字的想法会先蒸馏成选题（Codex 审第 8 轮 P2）
-  "article_images:suggest", "onboarding:init", "flywheel:report", "settings:test_route",
+  "article_images:suggest", "onboarding:init", "flywheel:report", "settings:test_route", "settings:list_models", "engine:recheck",
   // 外网抓取 / 雷达 / 数据回流
-  "radar:refresh", "radar:more", "radar:rescore", "flywheel:wechat_pull", "flywheel:pull_now", "research:import_asset",
+  "radar:refresh", "radar:more", "radar:rescore", "flywheel:wechat_pull", "flywheel:pull_now", "ego:open_console", "research:import_asset",
   // 长任务编排
   "campaign:plan_team", "campaign:run_ready", "campaign:retry_task", "campaign:replan",
   "inbox:retry", "inbox:reingest", "inbox:digest_send_now",
@@ -44,9 +44,8 @@ export const BACKGROUND_TRACKED_CHANNELS: ReadonlySet<string> = new Set([
   "article_images:generate", "article_images:regenerate",
 ]);
 
-/** 交给剪辑 / 深调研 runner 跑的：请求先回，runner 在跑 / 排着的任务数计入忙碌（server.ts 的 inProcessTurns） */
+/** 交给剪辑 runner 跑的：请求先回，runner 在跑 / 排着的任务数计入忙碌（server.ts 的 inProcessTurns） */
 export const RUNNER_TRACKED_CHANNELS: ReadonlySet<string> = new Set([
-  "research:deep_dive", "research:regenerate_angles",
   "video:build_start", "video:rough_cut_rerun", "video:transcribe_rerun", "video:editor_rerun", "video:cut_preview",
   "video:reassemble", "video:retry", "video:asr_warmup",
 ]);
@@ -65,9 +64,10 @@ export const SHORT_CHANNELS: ReadonlySet<string> = new Set([
   "chat:abort", "chat:turn_status", "chat:model_options",
   "conversations:rename",
   "settings:get", "settings:set", "settings:open_config", "engine:health",
+  "settings:engine_attach_preset", "settings:offer_set",
   "hosts:list", "hosts:revoke",
-  "settings:search_get", "settings:search_set", "settings:publish_get", "settings:publish_set",
-  "persona:save", "cover:get", "settings:cover_get", "settings:cover_set",
+  "settings:publish_get", "settings:publish_set",
+  "persona:save", "cover:get", "settings:cover_get", "settings:cover_set", "settings:rival_get", "settings:rival_set",
   "logs:list", "logs:get_run", "skills:list", "goal:get", "goal:set", "retro:list", "retro:get", "onboarding:status",
   "flywheel:import_csv", "flywheel:record", "flywheel:pull_status", "flywheel:pull_toggle", "flywheel:hypotheses_list", "calibration:ledger",
   "dialog:pick_file", "dialog:pick_media", "knowledge:status", "radar:status", "radar:sources_set", "profile:update",
@@ -76,8 +76,8 @@ export const SHORT_CHANNELS: ReadonlySet<string> = new Set([
   "today:summary", "dashboard:summary", "events:recent", "workspace:list", "workspace:create", "workspace:switch",
   "campaign:list", "campaign:get", "campaign:create", "campaign:transition", "campaign:artifact_get", "campaign:set_autonomy",
   "campaign:patch_propose", "campaign:patch_decide",
-  "topics:list", "topic:update", "topic:delete", "topic:delete_example", "topic:restore", "topic:select_angle", "topic:clear_angle", "trash:list",
-  "draft:final_get", "draft:finalize",
+  "topics:list", "topic:update", "topic:delete", "topic:delete_example", "topic:restore", "topic:rate", "topic:select_angle", "topic:clear_angle", "trash:list",
+  "draft:final_get", "draft:finalize", "script:final_get", "script:finalize",
   "doctor:inbox", "inbox:list", "inbox:delete", "inbox:settings_get", "inbox:settings_set", "inbox:status",
   "patterns:list", "patterns:update", "patterns:delete",
   "research:status", "research:brief_get", "research:list_assets",
@@ -98,9 +98,8 @@ export const LONG_RUNNING_TOOL_ACTIONS: Readonly<Record<string, "*" | ReadonlySe
   autocrew_cover_review: new Set(["create_candidates", "revise", "platform_ratios", "draft_ratios", "generate_ratios"]),
   autocrew_style: new Set(["distill", "absorb_samples"]),
   // 选题与调研：抓源、外网搜索与读页
-  autocrew_research: new Set(["discover"]),
   autocrew_topic: new Set(["radar_pool"]),
-  autocrew_scout: new Set(["search", "read_page"]),
+  autocrew_scout: new Set(["read_page"]),
   // 薄路径：verify_quote 抓外网
   autocrew_draft: new Set(["verify_quote"]),
   autocrew_workflow: new Set(["prepare", "research", "write", "draft"]),
@@ -126,7 +125,6 @@ export const LONG_RUNNING_TOOL_ACTIONS: Readonly<Record<string, "*" | ReadonlySe
  * 先按它补齐再分类，否则「省略 action」就能绕过长动作登记。
  */
 export const TOOL_DEFAULT_ACTIONS: Readonly<Record<string, string>> = {
-  autocrew_research: "discover",
   autocrew_insights: "prepare",
   autocrew_topic: "create",
   autocrew_review: "full_review",

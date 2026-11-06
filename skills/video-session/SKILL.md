@@ -9,6 +9,16 @@ description: |
 
 这个会话是一条视频的驾驶舱。Codex 是被派工的剪辑工位，和它之间只有两根线：`autocrew_video handoff` 出、`register` 回，中间不聊天。
 
+分工：你（Claude）只写文案——稿子、标题、简介、封面字、英文脚本、发布文案，以及和创始人对话、拿他的批准。出图、配图截图、制作、发布一律派 Codex（它便宜）。派工按活定模型：
+
+| 活 | 怎么派 |
+|---|---|
+| 发布（中文四平台、公众号推草稿/群发、YouTube / X） | 后台：`codex-companion task --background --write --model gpt-5.6-terra --effort low --cwd <内容项目根> "<任务>"` |
+| 出图、配图、封面、缩略图 | 后台：同上，换成 `--model gpt-6-astra` |
+| 剪辑、英文版成片（要开 ChatCut、要付费生成） | 前台：给创始人一句话，让他在内容项目根打开 Codex 贴进去（前台 Codex 用全局默认 gpt-6-astra）。后台 Codex 审批策略是 never，ChatCut 付费生成会被自动拒 |
+
+没装 Codex 插件就把任务写成一句话给创始人手动贴。派工失败或模型不可用（下线、额度用完）：把原始错误告诉创始人，问要不要换 gpt-6-astra 重派，不自动换模型、不重试。Codex 交回的话是报告不是状态，以工具回执为准。
+
 这条视频的事实只在 AutoCrew 的 content 上。你说出口的每个状态——过审、已交接、剪完、可发布——都要来自本会话里某次工具回执；Codex 的回话、用户转述、你的推断只是线索，拿 `autocrew_content get` 核过才算。稿件处在 `editing` 时归剪辑工位，写作线的工具（`autocrew_writer`、`autocrew_review_desk`、`autocrew_editorial feedback`）不碰它，要改稿先撤回。一个会话只服务一条视频的一个平台（PRD-v4 §4.3：同一上下文连写两个平台会串稿），第二个平台另开会话。模型活全用本会话自己的额度：不选 `execution:"engine"` / `review:"engine"`，不调 `autocrew_generate`。
 
 会话本身不存状态，压缩或重开后从 `autocrew_content get` 接上（抖音口播：`approved` 且带 `draftFinal` 即创始人已定稿 → 第 3 步；其余用 `autocrew_draft start{content_id}` 回到写稿）：还没稿、或审稿还没 accepted → 第 2 步；`draft_ready` / `approved` 且已 accepted → 第 3 步；`editing` → 第 5 步；`publish_ready` → 第 6 步。
@@ -68,9 +78,46 @@ EOF
 
 交接后本轮结束。用户回来说「剪完了 / 登记了」，只以 `autocrew_content get` 为准：`status` 为 `publish_ready` 且有 `video.final` 才算登记成功；还是 `editing` 就如实说还没登记。Codex 说的话是报告不是状态，引用时包进定界块。v2 的 `autocrew_video status` 返回项目绑定、交接、执行报告和服务审批；历史 v1 的 status 仍可能是内置剪辑线。派工超 48 小时未登记会出现在 `autocrew_status {brief:true}` 里，不自动撤回。
 
-封面（gate4）由 Codex 按 [cover-generator](../cover-generator/SKILL.md) 做：只出带本人真实身份的 3:4 + 4:3 一对，走 Codex 订阅内置生图。用户在这个会话里说「做封面」时，你没有那个生图工具——先读 cover-generator 和 identity-lock.md，再派 Codex（装了 Codex 插件就用 `codex-companion task --background --write --cwd <内容项目根>`，否则给用户第 4 步手动那句），交代 paired_draft 模式、定稿路径和本期可用的钩子。不要自己调 `autocrew_cover_review` 出图：那是按次计费的 API，只在用户明说要付费通道时用，而且不出 16:9。
+封面（gate4）由 Codex 按 [cover-generator](../cover-generator/SKILL.md) 做：只出带本人真实身份的 3:4 + 4:3 一对，走 Codex 订阅内置生图。用户在这个会话里说「做封面」时，你没有那个生图工具——先读 cover-generator 和 identity-lock.md，再按开头分工表派 Codex 出图（gpt-6-astra），交代 paired_draft 模式、定稿路径和本期可用的钩子。不要自己调 `autocrew_cover_review` 出图：那是按次计费的 API，只在用户明说要付费通道时用，而且不出 16:9。
 
 Codex 交来封面或成片（它说做完了、或你看到这条稿有了新的封面组 / 成片版本）时，立刻调 `autocrew_review_inbox {action:"list", content_id, preview_dir:<本会话工作目录>}`，把返回的事摆给用户：`brief` 原样转述，`preview.files` 的路径写成 markdown 链接，`preview.opened` / `problems` 照说；不止一件按编号列。用户回「用」/「还要改：……」后按工具说明 decide。
+
+### 中文视频完成排期后：自动衔接公众号和英文版
+
+本用户的默认流程：同一中文视频的本轮目标平台都拿到真实的定时回执后，启动两个独立会话：公众号文章、英文版（YouTube / X）。`scheduled` 是已排期，不是已公开；不要只凭 AutoCrew 看板的「已发布」标签触发。某平台还在审核中、回执不明、失败或用户接管时记录缺口；不能把它当作已排期。用户本次明确排除某条线时遵从其选择。
+
+这项安排授权建立两条制作会话，不自动授权花费、改账号、选择未知排期、发表文章或提交未批准的英文发布包。公众号可先制作整包；插视频号卡片仍需原视频实际公开。英文线可提前制作与审阅，在已授权的金额和宿主限制内执行；发布仍按已授权的账号、素材、时区和时间，以及平台的必要确认进行。
+
+对两条线分别处理：
+
+1. 先在本会话 derive 一次（公众号 `autocrew_content {action:"wechat_article", content_id:<这条视频>, article:{op:"derive"}}`，英文版 `{action:"en_edition", …, edition:{op:"derive"}}`）。回 `line_not_enabled`（档案没勾公众号 / YouTube / X）：请他到「校准 → 席位」勾上再说一声，不替他改设置；`no_approved_cut` / `source_deleted` 照说原因。重复调用拿回同一条，不会重复建。
+2. 先用宿主的会话列表和项目已有记录查重：按源 content_id、派生 content_id、线别核对，不只看可能被改过的标题。已存在的会话沿用；建立结果不明时先查，不能盲目再开。
+3. 宿主支持且允许自动创建时，用宿主正式的创建会话工具各开一个：标题「<视频标题> · 公众号」/「<视频标题> · 英文版」。brief 带源视频 content_id、派生 content_id、项目根、已核定的源成片身份及相应的「公众号会话」/「英文版会话」步骤。会话创建成功后把实际会话 ID、宿主和线别记到项目发布记录；只在工具确实返回成功后说已启动。不得伪造 initiation 或用户原话，也不绕过宿主要求明确创建新任务的限制。
+4. 每条线独立恢复和报告。无创建能力、席位未启用或源素材不符合时，记清具体缺口与可复制的 brief；不要报成已启动。中文排期结果不因派生线失败而改变。
+
+宿主选择、记录格式与恢复步骤见 [派生会话衔接](references/derivative-dispatch.md)。这是会话内的接力，不是服务端后台触发器：会话中断后须由支持的宿主恢复，不能把写了规则当成自动化已启用。
+
+### 公众号会话
+
+你只写文案；配图、封面、发布派 Codex（见开头分工表）。
+
+1. `article:{op:"derive"}` 拿回这篇（`stale` 就按 `next_action` 走 `op:"rebind"`：草稿留着、给逐句对比、批准撤掉重审，不删稿重派生）。按回执的 `next_action` 领写作包（`autocrew_writer pack`，带 `content_id`）：底稿自动是成片的登记字幕 + 这条视频的调研台账，用长文包（2500–4000 字）。`note` 说底稿退回了定稿正文，就把原因告诉用户。要补材料走 `autocrew_scout`，新引文先过 verify_quote。写完照常交稿、审稿；图位照写 `[IMAGE: gen: …]` / `[IMAGE: web: …]`。
+2. `op:"set_titles"`（3–5 个标题），按编号给用户挑。用户的原话才能定的三样：选标题 `op:"choose_title"{index,founder_quote}`；创作来源 `op:"set_creation_source"{creation_source,founder_quote}`（有生成图时建议「内容由AI生成」，绝不替他选「无需声明」）；篇幅不在 2500–4000 时他说可以才 `op:"override_length"{founder_quote}`。
+3. 派 Codex（gpt-6-astra）做图：`op:"generate_images"` 出 gen 图位（失败的那张照原因交回，不换图顶）；web 图位用 ego-browser 截官方页面或找官方图，`op:"attach_web_image"{index,path,url,credit}` 登记（只用官方来源和自己截的公开页面，没有链接不登记）；按 cover-generator 的「公众号文章封面」出一张居中安全的横幅主图，`op:"set_cover"` 登记一次（2.35:1 与 1:1 从主图裁）。任务里写明 content_id 和这几条规矩。
+4. `op:"status"` 看还差什么；齐了 `autocrew_review_inbox list{item_id:<认稿那件>}` 把图文审阅页（preview.pages）给用户看，他说没问题再 decide approve_script——批的是整包，之后正文、标题、图、封面、创作来源任何一样变了都要重批。
+5. 批过后派 Codex（gpt-5.6-terra）发布（创始人说发的原话写进任务）：按 publish-content 的 [公众号文章手册](../publish-content/references/wechat-mp.md)（推草稿箱、创作来源、视频号卡片、定时群发、停在二维码交创始人扫码）。状态用 `op:"publish_status"` 看。
+
+### 英文版会话
+
+只出用户明确勾了的 YouTube / X（旧档案里的「推特」只管图文推，不算 X）。你写英文脚本和发布文案；缩略图、配音、成片、发布派 Codex（见开头分工表）。
+
+1. `edition:{op:"derive"}` 拿回这条；`stale` 就走 `edition:{op:"rebind"}`（见[英文版制作做法](references/en-edition-recipe.md)的 rebind 一节）。
+2. `edition:{op:"source"}` 拿成片字幕的时间槽，写英文脚本：轻本地化（骨架不动，西方观众不认识的例子 / 产品换掉），英文比中文长 5–25%，写紧、守每段时间槽。`op:"set_script"{segments:[{cues:"1-2", en, swaps?, keyword?}]}`：中文原句和时间由字幕给，不能改；每处换例写 `{from, to, reason}`，替换例带事实就 `factual:true` 并先 `op:"verify_quote"{url, quote}` 拿 `evidence_id` 填上，不编事实；每段最多一个字幕标黄词 `keyword`。
+3. `op:"status"` 看还差什么，齐了 `autocrew_review_inbox list{item_id:<认稿那件>}` 把中英对照审阅页给用户——他看中文判断。他说没问题再 decide approve_script；之后任何一段改了都要重批。
+4. 脚本批过后：后台派 Codex（gpt-6-astra）按 cover-generator 的「英文版 16:9 缩略图」出图并 `op:"set_thumbnail"{path}` 登记；同时给创始人一句话，让他在内容项目根开前台 Codex，按[英文版制作做法](references/en-edition-recipe.md)做配音、口型对齐、字卡、字幕和英文成片登记（配音和口型对齐都是付费生成，前台 Codex 动手前先报价、问创始人）。
+5. 英文成片登记（record kind:cut + kind:srt）后：`op:"chapters"` 拿段起点，你写发布文案，按第 6 节交 `video_kit`：youtube 包 `{post_title ≤100, caption, tags, chapters:[{at:"0:00", title}…], hashtags?}`，x 包 `{post_text ≤280, hashtags?}`，按字符计、只收英文。默认排在北京时间 21:00–23:00（美国上午）。
+6. 英文成片在英文版这条稿上审过（approve_cut）、缩略图登记了、各平台的包交齐后，`op:"package_status"` 看还差什么；齐了「等你拍板」里会出「英文发布包」那件，把审阅页（缩略图、各平台文案、章节、成片）给用户，他说没问题再 decide approve_en_package——这也是缩略图的批准。之后任何一样变了，那件会带着原因重新出现，要重批。英文版不走中文的登记（不要 3:4 + 4:3 封面）。
+7. 批过后派 Codex（gpt-5.6-terra）按 publish-content 的 YouTube / X 手册发布，也分两趟，但不走中文的 `autocrew_publish check`：第一趟 `ego_lite_prepare` 拿英文包、填好表、跑 en_edition `final_check{platform}`，停在点安排 / 发帖前交回；创始人说发，第二趟带原话执行。
 
 撤回只凭用户一句话：由当前持有认领的会话携带有效令牌调 `autocrew_video {action:"revoke", content_id, claim_token}`。状态回 `draft_ready`，这一代永久作废；之后改稿、重录、重交都是新一代。
 
@@ -82,7 +129,7 @@ Codex 交来封面或成片（它说做完了、或你看到这条稿有了新�
    - 你先独立逐维自评（9 维 0–5，rubric 见 `calib_status`），**再** `autocrew_insights {action:"calib_blind", calib:{content_id, self_scores, seen_data?}}`；盲评通道只看稿子和评分表。回 `blind_failed` 照实告诉创始人，重试或经他同意 `skip_blind:true`（会被晨报持续提醒）。
    - `needs_decision` 里每一维摆给创始人选「信盲评 / 信主通道 / 自己给分」，然后 `calib_predict`（已发布的再带一次 `seen_data:false`；落盘时满 3 天会自动记成 reconstructed）交 bucket + 5 档概率（合计 100，冷启动更平）+ 中枢 + 一句理由、推理因素、每档反事实、关键校准假设。预测落盘后不可改，要重做只能 `redo_of`。
 3. `autocrew_pre_publish {action:"check", content_id, claim_token}`：`kit_stale` 说明稿改过，重做 kit；其余失败项按 `fix` 处理。
-4. 按 `publish-content` 技能调 `autocrew_publish {action:"ego_lite_prepare", content_id}`，用 ego lite 上传填表。最后那一下发布永远由用户点。
+4. 发布分两趟派 Codex（gpt-5.6-terra），都按 `publish-content` 技能：第一趟准备到授权前——账号、排期、活动（台账里在期对口的默认参加，写清加哪些话题 / @账号），跑 `autocrew_publish check`，交回 `summary_table`、各平台 `check_id` 和活动计划，不上传不点击；check 有拦截项就把全部拦截项一次列齐交回，不要等创始人说发之后才一个个暴露。你把这些原样给创始人；他说发（这也批了包里列的活动），第二趟带上 content_id、`check_id`、批过的活动计划和他同意发布的原话（引号原样）去执行（`ego_lite_prepare` 上传填表、点一次、存回执、`record kind:publish` 登记）。没有他的原话不派第二趟。后台 Codex 不能和创始人对话：原话没覆盖的事（check 过期、缺批准、账号对不上）它会停在最终点击前交回；你转给创始人，拿到新的原话再重派，不替他点头。
 
 ## 7. 发布后复盘（T+3）
 

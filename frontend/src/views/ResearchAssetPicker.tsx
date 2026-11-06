@@ -81,11 +81,11 @@ export function ResearchAssetPicker(props: {
       <div className="dlg dlg-lg" onClick={(e) => e.stopPropagation()}>
         <div className="dlg-title">研究素材 · 放进配图 {props.index + 1}</div>
         <p className="dlg-body muted">
-          深调研过程中从真实网页抓到的图。<strong>授权需自查</strong>——用之前先看来源页允不允许转载。
+          调研过程中从真实网页抓到的图。<strong>授权需自查</strong>——用之前先看来源页允不允许转载。
         </p>
         {assets === null && <p className="muted">读取素材…</p>}
         {assets?.length === 0 && (
-          <p className="muted">这条选题还没有下载成功的素材。跑一轮深调研，或看选题卡上的降级原因。</p>
+          <p className="muted">这条选题还没有下载成功的素材。交给 AI 调研一轮，或看选题卡上的降级原因。</p>
         )}
         {assets && assets.length > 0 && (
           <div className="ra-grid">

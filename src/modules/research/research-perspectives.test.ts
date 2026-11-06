@@ -1,7 +1,7 @@
 /**
  * research-perspectives.test.ts — 视角子运行（深调研 §4）。
  *
- * 引擎全打桩零 LLM；broker 是**真 broker**（只把 search/fetch 换成假实现），
+ * 引擎全打桩零 LLM；broker 是**真 broker**（只把 fetch 换成假实现），
  * 所以来源登记、配额、quote 子串校验走的都是生产那套代码。
  * 不对模型文案做精确断言——被断言的是确定性层：校验结果、消毒后的 prompt、错误码。
  */
@@ -56,13 +56,9 @@ const IMAGE_URL = "https://example.com/chart.png";
 
 function makeBroker(over: Partial<ResearchBrokerDeps> = {}) {
   return createResearchBroker({
-    searchImpl: async () => [
-      { title: "2026 开发者调查", url: PAGE_URL, snippet: "每天使用比例过半" },
-      { title: "另一篇分析", url: "https://example.com/analysis", snippet: "维护成本上升" },
-    ],
     fetchImpl: async (url) => ({
       finalUrl: url,
-      text: PAGE_TEXT,
+      text: url === PAGE_URL ? PAGE_TEXT : "另一篇分析：维护成本上升了三成。",
       title: "2026 开发者调查",
       imageCandidates: [{ url: IMAGE_URL, sourceAttr: "img" as const }],
     }),
@@ -117,8 +113,8 @@ function hangingLoop(cap: Capture): typeof runLoop {
   }) as unknown as typeof runLoop;
 }
 
-const SEARCH: Call = { tool: "search", args: { query: "AI 编程助手 使用率" } };
 const READ: Call = { tool: "read_page", args: { url: PAGE_URL } };
+const READ2: Call = { tool: "read_page", args: { url: "https://example.com/analysis" } };
 
 function submit(over: Record<string, unknown> = {}): Call {
   return {
@@ -126,7 +122,7 @@ function submit(over: Record<string, unknown> = {}): Call {
     args: {
       insights: [
         { text: "每天使用的人已过半，工具本身不再是新鲜事", source_ids: ["p1"] },
-        { text: "维护成本才是真正的账单", source_ids: ["s1", "p1"] },
+        { text: "维护成本才是真正的账单", source_ids: ["p2", "p1"] },
       ],
       evidence: [{ claim: "使用率过半", source_id: "p1", quote: REAL_QUOTE }],
       asset_picks: [{ asset_id: "a1", caption: "调查里的使用率图" }],
@@ -203,9 +199,9 @@ describe("四视角任务书", () => {
 // ─── 直通 ────────────────────────────────────────────────────────────────────
 
 describe("合法输出直通", () => {
-  it("搜索 → 读页 → 提交：产出原样收下，token 回传", async () => {
+  it("读页 → 提交：产出原样收下，token 回传", async () => {
     const cap = newCapture();
-    const res = await run([SEARCH, READ, submit()], cap);
+    const res = await run([READ, READ2, submit()], cap);
 
     expect(res.status).toBe("succeeded");
     if (res.status !== "succeeded") return;
@@ -218,42 +214,13 @@ describe("合法输出直通", () => {
     expect(cap.results.at(-1)).not.toMatch(/^Error/);
   });
 
-  it("洞察可以只引用搜索结果（s*），证据不行", async () => {
-    const cap = newCapture();
-    const res = await run(
-      [
-        SEARCH,
-        submit({
-          insights: [
-            { text: "标题层面已能看出趋势", source_ids: ["s1"] },
-            { text: "另一篇也在讲维护成本", source_ids: ["s2"] },
-          ],
-          evidence: [],
-          asset_picks: [],
-        }),
-      ],
-      cap,
-    );
-    expect(res.status).toBe("succeeded");
-  });
 
-  it("evidence 引用 s* 被拒，broker 的原因原样喂回修复轮", async () => {
-    const cap = newCapture();
-    const res = await run(
-      [SEARCH, submit({ evidence: [{ claim: "凑数", source_id: "s1", quote: REAL_QUOTE }], asset_picks: [] })],
-      cap,
-    );
-
-    expect(res.status).toBe("failed");
-    expect(cap.results[1]).toContain("只是搜索结果");
-    expect(cap.results[1]).toContain("read_page");
-  });
 
   // 归属纠偏（2026-08-23 生产复盘）：视角死因八成是真引文记错页,不是编造
   it("真引文记错了页 → 自动纠正 sourceId 收下,不烧修复轮", async () => {
     const cap = newCapture();
     const res = await run(
-      [SEARCH, READ, submit({ evidence: [{ claim: "使用率过半", source_id: "s1", quote: REAL_QUOTE }] })],
+      [READ, READ2, submit({ evidence: [{ claim: "使用率过半", source_id: "p2", quote: REAL_QUOTE }] })],
       cap,
     );
 
@@ -266,7 +233,7 @@ describe("合法输出直通", () => {
   it("全库都找不到的引文仍打回——纠偏不放行转述", async () => {
     const cap = newCapture();
     const res = await run(
-      [SEARCH, READ, submit({ evidence: [{ claim: "转述", source_id: "p1", quote: "这是模型自己改写的句子" }] })],
+      [READ, READ2, submit({ evidence: [{ claim: "转述", source_id: "p1", quote: "这是模型自己改写的句子" }] })],
       cap,
     );
 
@@ -284,7 +251,7 @@ describe("伪造与修复轮", () => {
 
   it("伪造 quote → 打回并带上原因 → 第二轮改对即成功", async () => {
     const cap = newCapture();
-    const res = await run([SEARCH, READ, fakeQuote, submit()], cap);
+    const res = await run([READ, READ2, fakeQuote, submit()], cap);
 
     expect(cap.results[2]).toMatch(/^Error/);
     expect(cap.results[2]).toContain("找不到");
@@ -336,7 +303,7 @@ describe("伪造与修复轮", () => {
 
   it("模型压根没提交 → failed(no_submit)", async () => {
     const cap = newCapture();
-    const res = await run([SEARCH], cap);
+    const res = await run([READ], cap);
     expect(res.status).toBe("failed");
     if (res.status === "failed") expect(res.errorCode).toBe("no_submit");
   });
@@ -369,7 +336,7 @@ describe("校验剔除只剔条目", () => {
 
   it("再次提交时坏引文只被剔掉，洞察还在 → succeeded(partial) 并记 partialProblems", async () => {
     const cap = newCapture();
-    const res = await run([SEARCH, READ, fakeQuote, fakeQuote], cap);
+    const res = await run([READ, READ2, fakeQuote, fakeQuote], cap);
 
     expect(cap.results[2]).toMatch(/^Error/); // 首次提交仍然给一次修复机会
     expect(cap.results[3]).not.toMatch(/^Error/);
@@ -385,7 +352,7 @@ describe("校验剔除只剔条目", () => {
   it("坏图片 id 同样只剔那一张，其余产出照收", async () => {
     const cap = newCapture();
     const bad = submit({ asset_picks: [{ asset_id: "a99", caption: "并不存在" }] });
-    const res = await run([SEARCH, READ, bad, bad], cap);
+    const res = await run([READ, READ2, bad, bad], cap);
 
     expect(res.status).toBe("succeeded");
     if (res.status !== "succeeded") return;
@@ -415,7 +382,7 @@ describe("校验剔除只剔条目", () => {
 
   it("全程干净的产出不带 partial 标记", async () => {
     const cap = newCapture();
-    const res = await run([SEARCH, READ, submit()], cap);
+    const res = await run([READ, READ2, submit()], cap);
     expect(res.status).toBe("succeeded");
     if (res.status !== "succeeded") return;
     expect(res.partial).toBe(false);
@@ -432,7 +399,7 @@ describe("受众推断 inferences", () => {
   it("只有受众视角的 schema 和提示词里有 inferences", async () => {
     for (const name of ["audience", "evidence", "counter", "benchmark"] as const) {
       const cap = newCapture();
-      await run([SEARCH, READ, submit()], cap, { name });
+      await run([READ, READ2, submit()], cap, { name });
       const props = (submitTool(cap).parameters as { properties: Record<string, unknown> }).properties;
       expect("inferences" in props).toBe(name === "audience");
       expect(cap.opts!.systemPrompt.includes("无来源的受众推断")).toBe(name === "audience");
@@ -443,8 +410,8 @@ describe("受众推断 inferences", () => {
     const cap = newCapture();
     const res = await run(
       [
-        SEARCH,
         READ,
+        READ2,
         submit({
           inferences: [
             { text: "他们以为换个模型就能解决，其实卡在自己的提示词里", persona: "grow" },
@@ -472,8 +439,8 @@ describe("受众推断 inferences", () => {
     const cap = newCapture();
     const res = await run(
       [
-        SEARCH,
         READ,
+        READ2,
         submit({
           inferences: [
             { text: "" },
@@ -496,7 +463,7 @@ describe("受众推断 inferences", () => {
   it("非受众视角交推断 → 整块忽略并记一笔，但不打回（那字段本来就没给它）", async () => {
     const cap = newCapture();
     const res = await run(
-      [SEARCH, READ, submit({ inferences: [{ text: "我猜他们不在乎价格" }] })],
+      [READ, READ2, submit({ inferences: [{ text: "我猜他们不在乎价格" }] })],
       cap,
       { name: "counter" },
     );
@@ -514,15 +481,15 @@ describe("受众推断 inferences", () => {
 
 describe("配额与 deadline", () => {
   it("配额耗尽是工具返回值不是异常，本路仍可正常收束", async () => {
-    const broker = makeBroker({ quotas: { searchPerPerspective: 1 } });
+    const broker = makeBroker({ quotas: { readPagePerPerspective: 1 } });
     const cap = newCapture();
     const res = await run(
       [
-        { tool: "search", args: { query: "第一次" } },
-        { tool: "search", args: { query: "第二次" } },
+        READ,
+        READ2,
         submit({ evidence: [], asset_picks: [], insights: [
-          { text: "手上材料够写第一条", source_ids: ["s1"] },
-          { text: "第二条也有来源", source_ids: ["s2"] },
+          { text: "手上材料够写第一条", source_ids: ["p1"] },
+          { text: "第二条也有来源", source_ids: ["p1"] },
         ] }),
       ],
       cap,
@@ -551,9 +518,9 @@ describe("配额与 deadline", () => {
     if (res.status === "failed") expect(res.errorCode).toBe("deadline");
 
     // 僵尸 loop 还活着：它的工具必须已经停手，否则会偷还在跑那几路的额度
-    const search = (cap.opts!.tools ?? []).find((t) => t.name === "search")!;
-    expect(await search.execute({ query: "超时后还想搜" })).toContain("已超时");
-    expect(broker.usage().search.used).toBe(0);
+    const read = (cap.opts!.tools ?? []).find((t) => t.name === "read_page")!;
+    expect(await read.execute({ url: PAGE_URL })).toContain("已超时");
+    expect(broker.usage().readPage.used).toBe(0);
   });
 });
 

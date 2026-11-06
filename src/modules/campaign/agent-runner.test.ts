@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EngineConfig } from "../../engine/config.js";
 import type { runLoop } from "../../engine/loop.js";
 import { buildCampaignTeam, createCampaign, getCampaign } from "../../storage/campaign-store.js";
-import { executeCampaignAgentTask, sanitizeCampaignArtifact } from "./agent-runner.js";
+import { executeCampaignAgentTask, MARKET_RESEARCH_RETIRED, sanitizeCampaignArtifact } from "./agent-runner.js";
 
 let dataDir: string;
 let campaignId: string;
@@ -71,19 +71,23 @@ describe("campaign agent runner", () => {
     expect(captured.userMessage).toContain("真实站点证据");
   });
 
-  it("uses configured search evidence for market research", async () => {
+  it("new plans no longer seed market research, so the strategy task only waits on the business audit", async () => {
     const campaign = await getCampaign(campaignId, dataDir);
-    const task = campaign!.tasks.find((item) => item.id.includes("market-research"))!;
-    const captured: { userMessage?: string } = {};
-    const output = await executeCampaignAgentTask(campaignId, task, "run-test-2", dataDir, {
-      configLoader: async () => config,
-      searchConfigLoader: async () => ({ provider: "tavily", apiKey: "test" }),
-      searchImpl: vi.fn().mockResolvedValue([{ title: "竞品证据", url: "https://competitor.example", snippet: "用户痛点" }]),
-      runLoopImpl: submittingLoop(captured),
-    });
-    expect(output.kind).toBe("research");
-    expect(captured.userMessage).toContain("竞品证据");
-    expect(captured.userMessage).toContain("https://competitor.example");
+    expect(campaign!.tasks.some((item) => item.id.includes("market-research"))).toBe(false);
+    const audit = campaign!.tasks.find((item) => item.id.includes("business-audit"))!;
+    const strategy = campaign!.tasks.find((item) => item.id.includes("growth-strategy"))!;
+    expect(strategy.dependsOn).toEqual([audit.id]);
+  });
+
+  it("a legacy market-research task needs web search, which the engine no longer has: visible failure, never an empty success", async () => {
+    const campaign = await getCampaign(campaignId, dataDir);
+    const audit = campaign!.tasks.find((item) => item.id.includes("business-audit"))!;
+    const task = { ...audit, id: audit.id.replace("business-audit", "market-research"), assigneeRole: "market_researcher" as const };
+    const runLoopImpl = vi.fn();
+    await expect(
+      executeCampaignAgentTask(campaignId, task, "run-test-2", dataDir, { configLoader: async () => config, runLoopImpl }),
+    ).rejects.toThrow(MARKET_RESEARCH_RETIRED);
+    expect(runLoopImpl).not.toHaveBeenCalled();
   });
 
   it("accepts a validated long final response when a compatible relay omits the tool call", async () => {

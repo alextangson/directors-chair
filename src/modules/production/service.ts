@@ -17,6 +17,7 @@ import {
 import type { ProductionDoc, TimelineEvent } from "../../storage/production-types.js";
 import { writeTextAtomicMkdir } from "../../storage/json-atomic.js";
 import { deriveExplanation, POST_APPROVAL, type Explanation } from "./explain.js";
+import { notifyDerivativeChange } from "../derivative-dispatch/events.js";
 import { outsideFileOwnership, withFileOwnership } from "./mutex.js";
 import { matchingRegistration, publishReceipts, validCoverApproval, validCutApproval } from "./derive.js";
 import { registrationPatch } from "./registration.js";
@@ -152,7 +153,7 @@ export async function mutateProduction<T>(
   contentId: string, dataDir: string,
   fn: (doc: ProductionDoc, content: Content) => Promise<{ value: T; events: NewEvent[] }> | { value: T; events: NewEvent[] },
 ): Promise<MutateResult<T>> {
-  return contentTransaction(contentId, dataDir, async (tx) => {
+  const result = await contentTransaction(contentId, dataDir, async (tx) => {
     const content = await tx.read();
     if (!content) throw new Error(`Content ${contentId} not found`);
     if (isImportedHistory(content)) throw new Error(HISTORY_REFUSAL);
@@ -169,6 +170,8 @@ export async function mutateProduction<T>(
     await reindexContent(dataDir, contentId, refreshed.doc);
     return { value, doc: refreshed.doc, content: refreshed.content, explanation: refreshed.explanation };
   });
+  notifyDerivativeChange(contentId, dataDir);
+  return result;
 }
 
 /** 只投影不改事实（对账后、启用时逐条刷新） */

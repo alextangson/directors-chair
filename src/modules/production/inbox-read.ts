@@ -28,6 +28,9 @@ import { loadManifest, readVersionText } from "../playbook/store.js";
 import { paragraphDiff } from "../playbook/diff.js";
 import { promotionItems } from "./chat-approval/promotion-decide.js";
 import type { PlaybookEntry, PlaybookProposal } from "../playbook/types.js";
+import { articleReviewState, isDerivedArticle } from "../wechat-article/review.js";
+import { enReviewState, isEnEdition } from "../en-edition/review.js";
+import { enPackageState, reopenReason } from "../en-edition/package.js";
 import { contentItems, genOf, sortItems, type CheckView, type ContentInput, type InboxItem } from "./inbox.js";
 import { DELETED_CONTENT, lessonQuestion, mergeKeyOf, wordsLine } from "./lesson-view.js";
 
@@ -79,6 +82,32 @@ async function plannedPlatforms(content: Content, dataDir: string): Promise<stri
   return [...new Set(list)];
 }
 
+/** 派生公众号文章的整包指纹；读不出来就用读不出的原因占位（代次照样变，不拿旧代次批） */
+async function articlePackageHashOf(id: string, dataDir: string): Promise<string> {
+  const s = await articleReviewState(id, dataDir).catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
+  return "hash" in s ? s.hash : `unreadable:${s.error}`;
+}
+
+/** 英文版的脚本指纹（认稿那件批的是这份脚本，Phase 3）；读不出同上 */
+async function enScriptHashOf(id: string, dataDir: string): Promise<string> {
+  const s = await enReviewState(id, dataDir).catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
+  return "hash" in s ? s.hash : `unreadable:${s.error}`;
+}
+
+/** 英文发布包现状（批过之后进了制作段才算）；读不出来照样出那件，原因写进 problems */
+async function enPackageOf(id: string, dataDir: string): Promise<ContentInput["enPackage"]> {
+  const s = await enPackageState(id, dataDir, { fresh: false }).catch((e: unknown) => ({ error: e instanceof Error ? e.message : String(e) }));
+  if ("error" in s) return { hash: `unreadable:${s.error}`, problems: [s.error], approved: false, reopen: s.error, revisions: 0 };
+  // 英文平台全取消勾选（spec §9.2）：线停了，不拿一个空包请他重批
+  if (!s.platforms.length) return { hash: s.hash, problems: s.problems, approved: false, reopen: null, revisions: s.file.revisions?.length ?? 0 };
+  // 媒体只给登记身份，不带路径；现有 inbox/media 端点核对登记 SHA 后提供预览。
+  const preview = { hash: s.hash, thumbnail: s.thumbnail ? { fact_id: `en-thumbnail-${s.thumbnail.sha256}` } : null, cut: s.cut ? { fact_id: `en-cut-${s.cut.sha256}` } : null, kits: s.platforms.flatMap((platform) => {
+    const k = s.kits[platform];
+    return k ? [{ platform, title: k.postTitle, caption: k.caption, tags: k.tags ?? [], chapters: (k.chapters ?? []).map((c) => ({ at: c.at, title: c.title })), aiDisclosure: k.aiDisclosure ?? null }] : [];
+  }) };
+  return { hash: s.hash, problems: s.problems, approved: s.approval.ok, reopen: reopenReason(s), revisions: s.file.revisions?.length ?? 0, preview };
+}
+
 async function contentInput(c: Content, dataDir: string, ctx: Awaited<ReturnType<typeof explainContext>>): Promise<ContentInput> {
   const video = isVideoPlatform(c.platform);
   const active = video && ctx.enabled && !ctx.excluded.has(c.id);
@@ -94,8 +123,11 @@ async function contentInput(c: Content, dataDir: string, ctx: Awaited<ReturnType
     if (await arollOwnerElsewhere(dataDir, f.sha256!, c.id).catch(() => null)) ownedElsewhere.add(f.id);
   }
   const handoffCoverText = doc ? await confirmedCoverText(c, dataDir) : "";
+  const articlePackageHash = c.status !== "draft_ready" ? undefined
+    : isDerivedArticle(c) ? await articlePackageHashOf(c.id, dataDir) : isEnEdition(c) ? await enScriptHashOf(c.id, dataDir) : undefined;
   return { content: c, doc: active ? doc ?? null : null, exp, askAttachmentsChanged, checks: video ? await currentChecks(c, raw, dataDir) : [], planned: needsPlan ? await plannedPlatforms(c, dataDir) : [], log: raw?.inbox_log ?? [], ownedElsewhere,
-    ...(handoffCoverText ? { handoffCoverText } : {}) };
+    ...(handoffCoverText ? { handoffCoverText } : {}), ...(articlePackageHash ? { articlePackageHash } : {}),
+    ...(isEnEdition(c) && exp?.phase === "production" ? { enPackage: await enPackageOf(c.id, dataDir) } : {}) };
 }
 
 /** 创始人交接时确认的封面字：只认创始人来源、且对得上当前定稿的决定 */

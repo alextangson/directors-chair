@@ -53,6 +53,29 @@ async function withCoverage(c: Content): Promise<void> {
   await saveCoverage(c, { draft_hash: draftHash(c), citations, reviewed_by: "writer", reviewed_at: new Date().toISOString() }, env.dir);
 }
 
+describe("citations 的 coverage 参数", () => {
+  const coverageOf = (c: Content) => {
+    const first = c.body.slice(0, c.body.indexOf("。") + 1);
+    return { draft_hash: draftHash(c), reviewed_by: "writer", reviewed_at: new Date().toISOString(),
+      citations: [{ start: 0, end: first.length, excerpt: first, evidence_id: "creator", sourceType: "creator_opinion", quote: "", verification: "创作者亲历（测试夹具）" }] };
+  };
+  it("没带 coverage → invalid_params 说清缺什么，不抛 draft_hash 读空（2026-11-03 真机）", async () => {
+    const c = await seedAccepted(env.dir);
+    const r = await callVideo(env.dir, { action: "citations", content_id: c.id });
+    expect(r).toMatchObject({ ok: false, code: "invalid_params", error: expect.stringContaining("coverage") });
+    expect(String(r.error)).not.toContain("draft_hash')");
+  });
+  it("中转端点把 coverage 序列化成字符串：解析回来照常校验", async () => {
+    const c = await seedAccepted(env.dir);
+    const r = await callVideo(env.dir, { action: "citations", content_id: c.id, coverage: JSON.stringify(coverageOf(c)) });
+    expect(r).toMatchObject({ ok: true });
+    // 没转义的内引号（中转端点常见）也修好再解析
+    const quoted = { ...coverageOf(c), reviewed_by: "writer" };
+    const broken = JSON.stringify(quoted).replace('"创作者亲历（测试夹具）"', '"创作者说"亲历"（测试夹具）"');
+    expect(await callVideo(env.dir, { action: "citations", content_id: c.id, coverage: broken, claim_token: r.claim_token })).toMatchObject({ ok: true });
+  });
+});
+
 describe.skipIf(!HAS_FFMPEG)("交接缺料在认领写入之前拒绝", () => {
   it("回归 09-26：缺决定 → missing_decisions，认领和令牌原样，原令牌后续写入不被 claim_held", async () => {
     const c = await seedAccepted(env.dir);

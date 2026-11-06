@@ -168,6 +168,27 @@ describe("publishCohort", () => {
     expect(r.byPlatform.find((p) => p.platform === "douyin")).toMatchObject({ works: 1, withData: 1, totals: { views: 2000 } });
     expect(r.byPlatform.find((p) => p.platform === "xiaohongshu")).toMatchObject({ works: 1, withData: 0, totals: {} });
   });
+
+  it("同稿多平台快照按 contentId + platform 匹配，输入顺序不改变平台归属", () => {
+    const rows = [
+      snap({ contentId: "c1", platform: "douyin", metricDate: TO, metrics: { views: 100 } }),
+      snap({ contentId: "c1", platform: "xiaohongshu", metricDate: TO, metrics: { views: 9000 } }),
+    ];
+    for (const input of [rows, [...rows].reverse()]) {
+      const result = publishCohort(contents, input, FROM, TO);
+      expect(result.items.find((i) => i.contentId === "c1")).toMatchObject({ platform: "douyin", cumulative: { views: 100 } });
+      expect(result.byPlatform.find((p) => p.platform === "douyin")?.totals.views).toBe(100);
+    }
+  });
+
+  it("主平台没有快照时不借其他平台的数据；平台别名可匹配同一平台", () => {
+    const rows = [snap({ contentId: "c1", platform: "xiaohongshu", metricDate: TO, metrics: { views: 9000 } })];
+    expect(publishCohort(contents, rows, FROM, TO).items.find((i) => i.contentId === "c1")?.cumulative).toBeNull();
+    expect(publishCohort([{ ...contents[0], platform: "xhs" }], rows, FROM, TO).items[0]).toMatchObject({ platform: "xiaohongshu", cumulative: { views: 9000 } });
+    expect(publishCohort([{ ...contents[0], platform: undefined }], rows, FROM, TO).items[0]).toMatchObject({ platform: "xiaohongshu", cumulative: { views: 9000 } });
+    const ambiguous = [...rows, snap({ contentId: "c1", platform: "douyin", metricDate: TO, metrics: { views: 100 } })];
+    expect(publishCohort([{ ...contents[0], platform: undefined }], ambiguous, FROM, TO).items[0]).toMatchObject({ platform: "未定平台", cumulative: null });
+  });
 });
 
 describe("metricsAtAge", () => {

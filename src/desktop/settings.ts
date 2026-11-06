@@ -1,9 +1,9 @@
 /**
  * 设置面的读写汇总口（PRD §7.3 个性化中心）。key 永远掩码返回（renderer 拿不到原文）。
  * 引擎那一块搬去了 settings-engine.ts（v2 端点表的写入是固定四步，塞不进这里的增量 merge），
- * 本文件保留搜索 / 发布 / 生图链，并把引擎与收件箱原样转出——设置页只认 settings.ts 一个入口。
+ * 本文件保留发布 / 生图链，并把引擎与收件箱原样转出——设置页只认 settings.ts 一个入口。
  *
- * 两种落盘根，别混：本文件的 engine/search/publish 都走**工作区** <dataDir>
+ * 两种落盘根，别混：本文件的 engine/publish 都走**工作区** <dataDir>
  * （server 端从注册表解析后注入 _dataDir）；收件箱走**全局根** ~/.autocrew/，
  * 不随工作区切换，因此单独放 settings-inbox.ts（下方原样转出，设置页从这里取）。
  */
@@ -11,6 +11,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { maskKey } from "./settings-engine.js";
 import { resolveTypesafeKey, writeTypesafeKey } from "../modules/publish/review-gate/jev-client.js";
+import { elevenLabsStatus, writeElevenLabsKey, writeElevenLabsVoiceId } from "../modules/voice/elevenlabs.js";
 
 // 自定义端点的逃生门（打开实际生效的 engine.json）——设置页统一从 settings.ts 取
 export { openEngineConfigFile } from "./settings-providers.js";
@@ -31,49 +32,6 @@ export {
   onInboxSettingsChanged,
   type InboxSettings,
 } from "./settings-inbox.js";
-
-/** 搜索 provider 配置读(V5.3):key 掩码返回,renderer 拿不到原文 */
-export async function getSearchSettings(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-    return { ok: false, error: "Invalid payload: expected object" };
-  }
-  try {
-    const { loadSearchConfig } = await import("../modules/research/search-provider.js");
-    const cfg = await loadSearchConfig((payload._dataDir as string) || undefined);
-    return {
-      ok: true,
-      data: cfg
-        ? { configured: true, provider: cfg.provider, apiKeyMasked: maskKey(cfg.apiKey), baseUrl: cfg.baseUrl ?? null }
-        : { configured: false, provider: null, apiKeyMasked: null, baseUrl: null },
-    };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-/** 搜索 provider 配置写(V5.3):写 <dataDir>/search.json(600 权限) */
-export async function setSearchSettings(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-    return { ok: false, error: "Invalid payload: expected object" };
-  }
-  const provider = payload.provider;
-  if (provider !== "bocha" && provider !== "tavily") {
-    return { ok: false, error: "provider 必须是 bocha 或 tavily" };
-  }
-  const apiKey = payload.api_key;
-  if (typeof apiKey !== "string" || apiKey.trim() === "") {
-    return { ok: false, error: "api_key 必须是非空字符串" };
-  }
-  const baseUrl = typeof payload.base_url === "string" && payload.base_url.trim() ? payload.base_url.trim() : undefined;
-  try {
-    const dataDir = (payload._dataDir as string) || undefined;
-    const { saveSearchConfig } = await import("../modules/research/search-provider.js");
-    await saveSearchConfig({ provider, apiKey: apiKey.trim(), ...(baseUrl ? { baseUrl } : {}) }, dataDir);
-    return getSearchSettings({ _dataDir: dataDir });
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
 
 /** 发布配置读(V5.6 设置收口):publish.json 可视化,key 掩码 */
 export async function getPublishSettings(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -117,6 +75,8 @@ export async function getPublishSettings(payload: Record<string, unknown>): Prom
         openComment: cfg.openComment === true,
         // 发布前把关（TypeSafe / Jev）：只回有没有、来自哪，值永不回显
         typesafeKeySource: (await resolveTypesafeKey().catch(() => ({ source: "unreadable" as const }))).source,
+        // 英文版配音（ElevenLabs）：密钥只回来源，声音 id 只回掩码
+        elevenLabs: await elevenLabsStatus(),
       },
     };
   } catch (err) {
@@ -184,6 +144,25 @@ export function parseImageChain(raw: unknown): { value: ParsedImageProvider[] } 
   return { value };
 }
 
+/**
+ * 本机密钥类字段（不进 publish.json）：TypeSafe key、ElevenLabs 密钥 → ~/.autocrew/secrets/*（600）；ElevenLabs 声音 id → 本机 elevenlabs.json。
+ * 返回 true = 写了至少一项；false = 都没带；对象 = 拒收原因。
+ */
+async function writeMachineSecrets(payload: Record<string, unknown>): Promise<boolean | Record<string, unknown>> {
+  const writers: Array<[string, (v: string) => Promise<void>]> = [
+    ["typesafe_api_key", (v) => writeTypesafeKey(v)], ["elevenlabs_api_key", (v) => writeElevenLabsKey(v)], ["elevenlabs_voice_id", (v) => writeElevenLabsVoiceId(v)],
+  ];
+  let wrote = false;
+  for (const [field, write] of writers) {
+    const v = payload[field];
+    if (v === undefined) continue;
+    if (typeof v !== "string" || !v.trim()) return { ok: false, error: `${field} 必须是非空字符串` };
+    try { await write(v); } catch (err) { return { ok: false, error: err instanceof Error ? err.message : String(err) }; }
+    wrote = true;
+  }
+  return wrote;
+}
+
 /** 发布配置写:merge 进 <dataDir>/publish.json 的 wechatMp 段(600 权限,key 不回显) */
 export async function setPublishSettings(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
@@ -227,12 +206,9 @@ export async function setPublishSettings(payload: Record<string, unknown>): Prom
     else return { ok: false, error: 'open_comment 必须是 "1"(开) 或 "0"(关)' };
   }
   // TypeSafe key 单独存本机 ~/.autocrew/secrets/typesafe-api-key（600），不进 publish.json（spec §12）
-  const typesafe = payload.typesafe_api_key;
-  if (typesafe !== undefined) {
-    if (typeof typesafe !== "string" || !typesafe.trim()) return { ok: false, error: "typesafe_api_key 必须是非空字符串" };
-    try { await writeTypesafeKey(typesafe); } catch (err) { return { ok: false, error: err instanceof Error ? err.message : String(err) }; }
-    if (Object.keys(updates).length === 0) return getPublishSettings({ _dataDir: payload._dataDir });
-  }
+  const secrets = await writeMachineSecrets(payload);
+  if (typeof secrets === "object") return secrets;
+  if (secrets && Object.keys(updates).length === 0) return getPublishSettings({ _dataDir: payload._dataDir });
   if (Object.keys(updates).length === 0) {
     return { ok: false, error: "没有可写入的字段（image_api_key / image_base_url / image_model / theme / author / wechat_app_id / wechat_app_secret / x_api_key / reddit_client_id / reddit_client_secret / open_comment）" };
   }

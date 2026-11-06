@@ -61,8 +61,6 @@ describe("IPC_CHANNELS", () => {
     "chat:turn",
     "settings:get",
     "settings:set",
-    "settings:search_get",
-    "settings:search_set",
     "settings:publish_get",
     "settings:publish_set",
     "style:update_rule",
@@ -75,6 +73,8 @@ describe("IPC_CHANNELS", () => {
     "cover:ratios",
     "settings:cover_get",
     "settings:cover_set",
+    "settings:rival_get",
+    "settings:rival_set",
     "logs:list",
     "logs:get_run",
     "skills:list",
@@ -89,6 +89,7 @@ describe("IPC_CHANNELS", () => {
     "flywheel:pull_status",
     "flywheel:pull_now",
     "flywheel:pull_toggle",
+    "ego:open_console",
     "flywheel:hypotheses_list",
     "calibration:ledger",
     "dialog:pick_file",
@@ -137,14 +138,13 @@ describe("IPC_CHANNELS", () => {
     "topic:delete",
     "topic:delete_example",
     "topic:restore",
+    "topic:rate",
     "topic:select_angle",
     "topic:clear_angle",
     "content:delete",
     "content:restore",
     "content:open_folder",
     "trash:list",
-    "research:deep_dive",
-    "research:regenerate_angles",
     "research:status",
     "research:brief_get",
     "research:list_assets",
@@ -157,8 +157,10 @@ describe("IPC_CHANNELS", () => {
   // 127 且改坏语法,套件停摆近一个月——bump 前先确认四处齐全,别只改数字。
   // 2026-10-04 薄路径定稿：draft:final_get / draft:finalize（draft-handlers.ts）
   // 2026-10-15 试跑示例一键删：topic:delete_example（ipc.ts 直连 deleteExampleTopic）
-  it("has exactly 173 channels", () => {
-    expect(IPC_CHANNELS).toHaveLength(173);
+  // 2026-10-25 在 ego lite 里打开平台后台：ego:open_console（ego-open-console.ts）；2026-10-26 顶栏定稿：script:final_get / script:finalize
+  // 2026-11-06 比稿 Gemini Key 独立设置：settings:rival_get / settings:rival_set → 179
+  it("has exactly 179 channels", () => {
+    expect(IPC_CHANNELS).toHaveLength(179);
   });
 
   it.each(EXPECTED)("contains %s", (ch) => {
@@ -252,6 +254,8 @@ describe("CHANNEL_ACTIONS — channel→action bindings", () => {
           // 薄路径定稿：desktop/draft-handlers.ts（「定了」只认浏览器会话）
           ch !== "draft:final_get" &&
           ch !== "draft:finalize" &&
+          ch !== "script:final_get" &&
+          ch !== "script:finalize" &&
           ch !== "generate:script" &&
           // 中断稿原地重写：ipc.ts 的 generateRetryHandler（带 job-claims 防双击）
           ch !== "generate:retry" &&
@@ -269,6 +273,7 @@ describe("CHANNEL_ACTIONS — channel→action bindings", () => {
           ch !== "flywheel:pull_status" &&
           ch !== "flywheel:pull_now" &&
           ch !== "flywheel:pull_toggle" &&
+          ch !== "ego:open_console" &&
           ch !== "flywheel:hypotheses_list" &&
           ch !== "calibration:ledger" &&
           ch !== "chat:turn" &&
@@ -282,13 +287,16 @@ describe("CHANNEL_ACTIONS — channel→action bindings", () => {
           ch !== "settings:open_config" &&
           // 配置面反馈闭环:settings-probe.ts 的 testEngineRoute
           ch !== "settings:test_route" &&
+          // 第三方中转推荐（spec 2026-10-25）:settings-offer.ts / settings-attach.ts
+          ch !== "settings:list_models" &&
+          ch !== "settings:engine_attach_preset" &&
+          ch !== "settings:offer_set" &&
           // 线路健康（P2 spec §4.1）:engine-health.ts 的 getEngineHealth,只读派生视图
           ch !== "engine:health" &&
+          ch !== "engine:recheck" &&
           // 宿主令牌（P3 spec §4.1）:host-tokens.ts 的 hostsList/hostsRevoke,直接读写 tokens/
           ch !== "hosts:list" &&
           ch !== "hosts:revoke" &&
-          ch !== "settings:search_get" &&
-          ch !== "settings:search_set" &&
           ch !== "settings:publish_get" &&
           ch !== "settings:publish_set" &&
           ch !== "style:update_rule" &&
@@ -301,6 +309,8 @@ describe("CHANNEL_ACTIONS — channel→action bindings", () => {
           ch !== "cover:ratios" &&
           ch !== "settings:cover_get" &&
           ch !== "settings:cover_set" &&
+          ch !== "settings:rival_get" &&
+          ch !== "settings:rival_set" &&
           ch !== "logs:list" &&
           ch !== "logs:get_run" &&
           ch !== "skills:list" &&
@@ -365,6 +375,8 @@ describe("CHANNEL_ACTIONS — channel→action bindings", () => {
           ch !== "topic:delete" &&
           ch !== "topic:delete_example" &&
           ch !== "topic:restore" &&
+          // 选题星级：modules/radar/topic-stars.ts 的 rateTopic（卡上点星，via board）
+          ch !== "topic:rate" &&
           // 角度点选：ipc.ts 的 topicSelectAngleHandler / topicClearAngleHandler
           ch !== "topic:select_angle" &&
           ch !== "topic:clear_angle" &&
@@ -381,8 +393,6 @@ describe("CHANNEL_ACTIONS — channel→action bindings", () => {
           ch !== "patterns:list" &&
           ch !== "patterns:update" &&
           ch !== "patterns:delete" &&
-          ch !== "research:deep_dive" &&
-          ch !== "research:regenerate_angles" &&
           ch !== "research:status" &&
           ch !== "research:brief_get" &&
           ch !== "research:list_assets" &&

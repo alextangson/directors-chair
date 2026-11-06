@@ -56,8 +56,13 @@ describe("getRadarStatus", () => {
   });
 
   it("returns cache stats after a refresh", async () => {
+    // This cache test uses a fixed RSS source. Default sources include live overseas adapters.
+    await setRadarSources({ _dataDir: testDir, sources: [
+      { id: "cache-fixture", name: "缓存测试源", type: "rss", url: "https://example.test/feed", tracks: [] },
+    ] });
     const fetchImpl = vi.fn(async () => new Response(RSS, { status: 200 })) as unknown as typeof fetch;
     await doRadarRefresh({ _dataDir: testDir }, fetchImpl);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
     const res = await getRadarStatus({ _dataDir: testDir });
     const d = res.data as Record<string, unknown>;
     expect(typeof d.fetchedAt).toBe("string");

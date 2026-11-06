@@ -1,7 +1,7 @@
 import { isContentId } from "./entity-id.js";
 /** The only content location resolver. A committed v2 workspace never unions legacy contents. */
 import fs from "node:fs/promises";
-import { readFileSync, lstatSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { resolveDataDir, assertManagedPathAvailable } from "./storage-roots.js";
@@ -61,6 +61,8 @@ export function resolveContentProject(id: string, dataDir?: string): (ProjectBin
       binding.layout_version !== 2 || !Number.isInteger(binding.binding_revision) || binding.binding_revision < 1 ||
       !/^projects\/[^/\\]+$/.test(binding.project_relpath)) throw new Error(`project_binding_invalid: ${id}`);
   const root = safeProjectPath(data, binding.project_relpath);
+  // 先看文件夹还在不在：创始人在访达里删掉一条已发布稿的项目文件夹时，要报「不在了」，不是「归属对不上」
+  if (!existsSync(root)) throw new Error(`project_missing: ${root}`);
   const owner = read<ProjectBinding>(safeProjectPath(root, ".autocrew-owner"));
   if (!owner || Object.keys(binding).some(k => owner[k as keyof ProjectBinding] !== binding[k as keyof ProjectBinding])) {
     throw new Error(`project_owner_mismatch: ${root}`);
@@ -120,6 +122,16 @@ export async function contentIds(dataDir?: string): Promise<string[]> {
   }
   try { return (await fs.readdir(path.join(resolveDataDir(dataDir), "contents"), { withFileTypes: true })).filter(e => e.isDirectory()).map(e => e.name); }
   catch (e) { if (isMissing(e)) return []; throw e; }
+}
+const warnedMissing = new Set<string>();
+/**
+ * 展示类列表（管线、收件箱、原片索引、归档）跳过项目文件夹已被删掉的稿时调：每条只在服务日志里提一次。
+ * 严格读（listContentsStrict、启用本体）不走这里，照旧一条读不出就拒绝。
+ */
+export function noteMissingProject(id: string): void {
+  if (warnedMissing.has(id)) return;
+  warnedMissing.add(id);
+  console.warn(`[content-project] 稿 ${id} 的项目文件夹不在了（手动删掉？），列表里不再显示`);
 }
 let creationQueue: Promise<unknown> = Promise.resolve();
 interface CreationReservation { binding: ProjectBinding; content: Content }
@@ -197,7 +209,7 @@ AutoCrew 独占管理 00-project/autocrew、项目信息.md、项目导航.md �
 /**
  * 本体启用后的项目约定（spec 2026-09-29 §8：项目 AGENTS.md 改为一行指向）。启用时对未手改过的旧约定原地替换。
  */
-export const ONTOLOGY_PROJECT_RULES = `# AutoCrew 内容项目\n\n这条稿的进度和下一步只看 \`autocrew_content summary\`（id 见 00-project/autocrew/meta.json）的 next_action；做出来的原片 / 成片 / 字幕 / 封面 / ChatCut 工程用 \`autocrew_content record\` 报上来，认稿、成片通过、选封面、我发了只归创始人点。\n`;
+export const ONTOLOGY_PROJECT_RULES = `# 导演椅内容项目\n\n这条稿的进度和下一步只看 \`autocrew_content summary\`（id 见 00-project/autocrew/meta.json）的 next_action；做出来的原片 / 成片 / 字幕 / 封面 / ChatCut 工程用 \`autocrew_content record\` 报上来，认稿、成片通过、选封面、我发了只归创始人点。\n`;
 
 /** 本体启用标记（与 production-store.readEnabledMarker 同一份文件；这里同步读，建项目时用） */
 export function ontologyEnabledIn(dataDir: string): boolean {

@@ -56,10 +56,18 @@ async function fileSeen(root: string, file: string, kind: Fact["kind"], source: 
 }
 
 /** 视频 / 字幕目录：video → cut（或 aroll），srt → srt */
+/**
+ * 04-edit 里的预览 / 中间片不是成片（2026-10-26 安克英文版：「v1-预览」「v2-口型-无字幕」都被收成了成片版本）。
+ * 约定：预览放 04-edit/review/（只扫顶层，子目录本来就不收）；放在顶层的，文件名带 预览 / preview / 无字幕 / review 也不收。
+ * 真要把这样命名的文件当成片，用 record kind=cut 明确登记。
+ */
+export const NOT_A_CUT = /预览|preview|无字幕|review/i;
+
 async function scanMedia(root: string, rel: string, recursive: boolean, videoKind: "cut" | "aroll"): Promise<Seen[]> {
   const skip = (r: string) => r.startsWith("_作废-") || r === "autocrew-video" || r.startsWith(`autocrew-video${path.sep}`);
   const out: Array<Seen | null> = [];
   for (const file of await listFiles(path.join(root, rel), recursive, skip)) {
+    if (videoKind === "cut" && NOT_A_CUT.test(path.basename(file))) continue;
     if (VIDEO_EXT.has(ext(file))) out.push(await fileSeen(root, file, videoKind, "reconcile", `项目 ${rel}`));
     else if (videoKind === "cut" && SRT_EXT.has(ext(file))) out.push(await fileSeen(root, file, "srt", "reconcile", `项目 ${rel}`));
   }
@@ -93,7 +101,7 @@ async function scanCovers(root: string, warnings: string[]): Promise<Seen[]> {
 /** 其他来源（execution.json、meta.assets）的封面按同一条准入：路径不在 vNNN/ 或 final/ → 候选 */
 function admitCover(s: Seen): Seen {
   if (s.kind !== "cover" || s.state !== "accepted" || admittedGroupKey(s.path)) return s;
-  return { ...s, state: "candidate", evidence: s.path && !path.isAbsolute(s.path) ? strayCoverReason(s.path) : "放在 AutoCrew 不会自动收的文件夹里，要你确认" };
+  return { ...s, state: "candidate", evidence: s.path && !path.isAbsolute(s.path) ? strayCoverReason(s.path) : "放在导演椅不会自动收的文件夹里，要你确认" };
 }
 
 /** 旧存法一：execution.json 报到的产物 */
@@ -231,6 +239,8 @@ export function applyObservations(doc: ProductionDoc, obs: Observations, arollOw
   const formal: Array<{ fact: Fact; path: string; first?: boolean }> = [];
   for (const s of obs.seen) {
     // 任何一轮记过都算：重开文稿后旧轮的成片 / 封面还在盘上，它们属于历史，不再导进新一轮
+    // 无字幕母版的字节被扫成「成片」（放进 07-delivery 之类）：它已经记成母版了，不另算一版成片
+    if (s.kind === "cut" && doc.facts.some((f) => f.kind === "clean_master" && f.sha256 === s.sha256)) continue;
     const dup = doc.facts.find((f) => f.kind === s.kind && f.sha256 === s.sha256);
     // 去重时不丢新信息（Codex 审 P2）：本轮已有字幕没绑成片，这次算出了绑定就补上
     if (dup && dup.kind === "srt" && dup.round === doc.round && !dup.for_cut && s.for_cut) { dup.for_cut = s.for_cut; changed++; }

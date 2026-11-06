@@ -170,6 +170,8 @@ export async function approveCoverJob(payload: Payload): Promise<StartedCoverJob
       content_id: payload.content_id,
       label: payload.label,
       _dataDir: dataDir,
+      // 包装层重建参数时别把调用方身份丢了：bearer 调用由 /api/invoke 打的模型标记要带进去
+      ...(payload._modelCall === true ? { _modelCall: true } : {}),
     })) as typeof result;
   } catch (err) {
     return { response: { ok: false, error: err instanceof Error ? err.message : String(err) }, completion: Promise.resolve() };

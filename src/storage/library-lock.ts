@@ -1,35 +1,106 @@
-import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, rmSync, renameSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync, rmSync, renameSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { readLibraryLocation, assertLibraryAvailable } from "./storage-roots.js";
+import { startEpoch } from "../modules/update/process-start.js";
+
+interface Owner { host: string; pid: number; nonce: string; startedAt: string; machine?: string; start?: number }
+
+let machineCache: string | null | undefined;
+/**
+ * 稳定的本机身份（硬件 UUID 的 sha256）：主机名会随网络变，不能拿来判断「是不是同一台机器」。
+ * 读不到就是 null——没法证明同一台，就永远不接管。
+ */
+export function machineId(): string | null {
+  if (machineCache !== undefined) return machineCache;
+  let raw = "";
+  try {
+    if (process.platform === "darwin") {
+      const out = execFileSync("ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { encoding: "utf8" });
+      raw = /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(out)?.[1] ?? "";
+    } else raw = readFileSync("/etc/machine-id", "utf8").trim();
+  } catch { raw = ""; }
+  machineCache = raw ? createHash("sha256").update(raw).digest("hex") : null;
+  return machineCache;
+}
+
+/** 能证明持锁进程已经不在：pid 不存在，或 pid 在但启动时刻对不上（被复用）。查不清一律当它还活着 */
+export function provablyDead(owner: Pick<Owner, "pid" | "start">, deps: { kill?: (pid: number) => void; start?: (pid: number) => number | null } = {}): boolean {
+  const kill = deps.kill ?? ((pid: number) => process.kill(pid, 0));
+  try { kill(owner.pid); }
+  catch (e) { return (e as NodeJS.ErrnoException).code === "ESRCH"; }
+  const now = (deps.start ?? startEpoch)(owner.pid);
+  return now !== null && typeof owner.start === "number" && Math.abs(now - owner.start) > 1;
+}
+
+/**
+ * 陈旧锁接管（Mac 重启、SIGKILL、断电留下的）：同一台机器、且能证明原进程已死才接管。
+ * 先把旧目录改名挪开（并发接管者只有一个改名成功），核对挪开的就是刚才判定的那把，再删掉。
+ * 旧格式（没有 machine / start）和别的机器的锁一律不接管。
+ */
+function reclaimStale(dir: string, old: Partial<Owner>, deps?: Parameters<typeof provablyDead>[1]): boolean {
+  const me = machineId();
+  if (!me || old.machine !== me || typeof old.pid !== "number" || typeof old.start !== "number" || !old.nonce) return false;
+  if (!provablyDead({ pid: old.pid, start: old.start }, deps)) return false;
+  // 接管互斥：同一时刻只有一个进程在接管。没有它，两个都看见同一把陈旧锁时，后到的会把先到者刚建的新锁挪走（Codex 审）
+  const mutex = `${dir}.reclaiming`;
+  try { mkdirSync(mutex); }
+  catch {
+    // 接管只要几毫秒：互斥目录放了超过 60 秒，是上次接管途中崩溃留下的，清掉；这一轮照样不接管，下次启动再来
+    try { if (Date.now() - statSync(mutex).mtimeMs > 60_000) rmSync(mutex, { recursive: true, force: true }); } catch { /* 别人刚删 */ }
+    return false;
+  }
+  try {
+    // 拿到互斥后再读一次：锁必须还是刚才判定为陈旧的那一把（别人可能已经接管并建了新锁）
+    let current: Partial<Owner>;
+    try { current = JSON.parse(readFileSync(path.join(dir, "owner.json"), "utf8")); } catch { return false; }
+    if (current.nonce !== old.nonce) return false;
+    const aside = `${dir}-reclaimed-${old.nonce}`;
+    try { renameSync(dir, aside); } catch { return false; }
+    rmSync(aside, { recursive: true, force: true });
+    console.warn(`[library-lock] 接管了上次异常退出留下的资料库写锁（${old.host} pid ${old.pid}，${old.startedAt}）`);
+    return true;
+  } finally {
+    rmSync(mutex, { recursive: true, force: true });
+  }
+}
 
 export const WRITER_LOCK = ".autocrew-writer";
 const held = new Map<string, string>();
 /** A disconnected/replaced writer never regains authority merely because the NAS is back. */
 export function assertLibraryWriter(root: string): void {
   const nonce = held.get(path.resolve(root));
-  let owner: { nonce?: string; host?: string; pid?: number };
+  let owner: { nonce?: string; pid?: number };
   try { owner = JSON.parse(readFileSync(path.join(root, WRITER_LOCK, "owner.json"), "utf8")); }
   catch { throw new Error("library_writer_lost: 无有效资料库写入占用；请停止写入并检查原服务。"); }
-  if (!nonce || owner.nonce !== nonce || owner.host !== os.hostname() || owner.pid !== process.pid) {
+  // 只核 nonce 和 pid（nonce 本进程随机生成，足够了）；主机名会随网络变，比它只会误报失去写入权
+  if (!nonce || owner.nonce !== nonce || owner.pid !== process.pid) {
     throw new Error("library_writer_lost: 当前服务已失去资料库写入权；不会自动抢占。");
   }
 }
 /** mkdir is the cross-host exclusion primitive; never steal another host's lock. */
-export function acquireLibraryLock(root?: string): () => void {
+export function acquireLibraryLock(root?: string, deps?: Parameters<typeof provablyDead>[1]): () => void {
   const location = readLibraryLocation();
   if (!root && !location) return () => {};
   if (!root) assertLibraryAvailable(location);
   const dir = path.join(root ?? location!.root, WRITER_LOCK);
-  const owner = { host: os.hostname(), pid: process.pid, nonce: randomUUID(), startedAt: new Date().toISOString() };
+  const owner: Owner = {
+    host: os.hostname(), pid: process.pid, nonce: randomUUID(), startedAt: new Date().toISOString(),
+    ...(machineId() ? { machine: machineId()! } : {}), ...(startEpoch(process.pid) !== null ? { start: startEpoch(process.pid)! } : {}),
+  };
   try { mkdirSync(dir); }
   catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    let old: typeof owner;
+    let old: Partial<Owner>;
     try { old = JSON.parse(readFileSync(path.join(dir, "owner.json"), "utf8")); }
-    catch { throw new Error("资料库正在被占用或占用记录不完整；请确认原服务已停止。"); }
-    throw new Error(`资料库已被 ${old.host} 的 AutoCrew 占用；若原进程异常退出，请先确认没有其他写入方，再清理占用记录。`);
+    catch { throw new Error(`资料库正在被占用或占用记录不完整（${dir}）；请确认原服务已停止。`); }
+    if (!reclaimStale(dir, old, deps)) {
+      throw new Error(`资料库已被 ${old.host} 的导演椅（pid ${old.pid}）占用（${dir}）；若原进程异常退出，请先确认没有其他写入方，再清理占用记录。`);
+    }
+    try { mkdirSync(dir); }
+    catch { throw new Error(`资料库写锁刚被别的进程占走（${dir}）`); }
   }
   writeFileSync(path.join(dir, "owner.json"), JSON.stringify(owner));
   held.set(path.resolve(root ?? location!.root), owner.nonce);

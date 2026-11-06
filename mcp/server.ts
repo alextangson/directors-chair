@@ -1,3 +1,4 @@
+import { sanitizePayload } from "../src/desktop/ipc-guard.js";
 import { contentFile } from "../src/storage/content-project.js";
 /**
  * AutoCrew — MCP 协议处理器（纯 JSON-RPC，无传输层）。
@@ -9,6 +10,7 @@ import { contentFile } from "../src/storage/content-project.js";
  * 不再自带 stdio 循环，全部宿主经同一个写进程（P3 §3）。
  */
 import { beginWork } from "../src/modules/update/active-work.js";
+import { localVersion, programRoot } from "../src/modules/update/check.js";
 import { effectiveAction, isLongRunningTool } from "../src/modules/update/long-running.js";
 import { WRITING_INSTRUCTIONS, MCP_INSTRUCTIONS } from "./writing-instructions.js";
 import { mcpToolView, TOOL_GUIDE_PREFIX, toolGuideText } from "./tool-docs.js";
@@ -38,6 +40,7 @@ const workspaceRuntimes = new Map<string, { ctx: typeof ctx; runner: ToolRunner 
 registerAutocrewCapabilities(runner);
 
 export const MCP_PROTOCOL_VERSION = "2025-11-25";
+const SERVER_VERSION = localVersion(programRoot());
 /**
  * 2026-09-06 实测（日志代理抓包）：Codex CLI 0.145 的远端客户端要 `2025-06-18`，
  * 标准 TS SDK 客户端（Claude Code 用的那个）同样。两家都接受服务端回一个更高的版本，
@@ -133,8 +136,8 @@ function promptMessages(name: string, args: Record<string, unknown>) {
   if (name === "write_content") return [{ role: "user", content: { type: "text", text: `${WRITING_INSTRUCTIONS}\n\n本次需求：${value("requirements")}` } }];
   if (name === "write_wechat") return [{ role: "user", content: { type: "text", text: `${WRITING_INSTRUCTIONS}\n\n本次需求：用选题《${value("topic")}》写一篇公众号原生文章，先用 workflow prepare 准备材料与立意。` } }];
   if (name === "revise_content") return [{ role: "user", content: { type: "text", text: `先用 autocrew_editorial inspect 读取当前稿件与 draft_hash，再用 feedback 保存用户本次已确认的修改要求；按返回的 writer pack 流程原地改稿、submit 和 review_desk 审稿。默认由当前宿主执行，不调用后台改稿模型。反馈：${value("feedback")}` } }];
-  if (name === "review_content") return [{ role: "user", content: { type: "text", text: `读取 AutoCrew 稿件 ${value("content_id")}，用 autocrew_review_desk pack 领取审稿任务，由当前宿主核对规划、事实与表达，再用 submit 交回具体问题与受众建议。不调用后台模型；按 review_source 说明审稿来源，host_self_review 是同宿主自审，不能称独立审稿。autocrew_review 仅做词表和阅读格式检查。没有写作包时如实说明需先领取 writer 包。不自动替创作者批准。` } }];
-  if (name === "weekly_retro") return [{ role: "user", content: { type: "text", text: `基于 AutoCrew 中的真实数据生成本周复盘。重点：${value("focus") || "选题、内容质量、转化"}。不要编造缺失数据。` } }];
+  if (name === "review_content") return [{ role: "user", content: { type: "text", text: `读取导演椅稿件 ${value("content_id")}，用 autocrew_review_desk pack 领取审稿任务，由当前宿主核对规划、事实与表达，再用 submit 交回具体问题与受众建议。不调用后台模型；按 review_source 说明审稿来源，host_self_review 是同宿主自审，不能称独立审稿。autocrew_review 仅做词表和阅读格式检查。没有写作包时如实说明需先领取 writer 包。不自动替创作者批准。` } }];
+  if (name === "weekly_retro") return [{ role: "user", content: { type: "text", text: `基于导演椅中的真实数据生成本周复盘。重点：${value("focus") || "选题、内容质量、转化"}。不要编造缺失数据。` } }];
   return null;
 }
 
@@ -180,7 +183,8 @@ async function callTool(
   runtime: ReturnType<typeof runtimeFor>,
 ): Promise<Record<string, unknown>> {
   const toolName = String(params?.name ?? "");
-  const rawArgs = params?.arguments && typeof params.arguments === "object" ? params.arguments as Record<string, unknown> : {};
+  // 客户端传来的 `_` 前缀参数（_host、_dataDir、_modelCall…）一律剥掉，只认下面服务端注入的（与 /api/invoke 同一条规矩）
+  const rawArgs = sanitizePayload(params?.arguments && typeof params.arguments === "object" ? params.arguments : {}) as Record<string, unknown>;
   // 宿主归因（§4.1）：客户端自报的 `_host` 一律丢弃，只认认证时定下的主体；
   // 会话归因（P6 §3.8）同一条规矩，`_session` 只认传输层带来的那个。
   const host = access?.host ?? DEFAULT_HOST;
@@ -236,7 +240,7 @@ export async function handleMcpRequest(req: McpRequest, access?: McpAccessContex
       protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.has(requested) ? requested : MCP_PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: false }, resources: { listChanged: false }, prompts: { listChanged: false } },
       instructions: MCP_INSTRUCTIONS,
-      serverInfo: { name: "autocrew", version: "0.1.0", description: "Local-first AI content operations crew" },
+      serverInfo: { name: "autocrew", version: SERVER_VERSION, description: "导演椅 Director's Chair (formerly AutoCrew): local-first AI content operations crew" },
     });
   }
   if (method === "ping") return resultResponse(id, {});

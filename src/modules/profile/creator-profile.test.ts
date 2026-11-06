@@ -343,3 +343,29 @@ describe("addVoiceSamples (V5.7 声音样本)", () => {
     expect(profile!.voiceSamples).toEqual(["保留我"]);
   });
 });
+
+describe("档案读坏不覆盖（审查 10-30：读坏当空、再整份写回会清空档案）", () => {
+  const file = () => path.join(testDir, "creator-profile.json");
+  const corrupt = "{\"industry\": \"科技\", \"writingRules\": [ 坏的";
+
+  it("JSON 坏了：updateProfile、addWritingRule、initProfile、saveProfile 都失败，文件字节不变", async () => {
+    await fs.writeFile(file(), corrupt);
+    await expect(updateProfile({ industry: "教育" }, testDir)).rejects.toThrow(/读不出来/);
+    await expect(addWritingRule({ content: "x", category: "style" } as never, testDir)).rejects.toThrow(/读不出来/);
+    await expect(initProfile(testDir)).rejects.toThrow(/读不出来/);
+    await expect(saveProfile({ industry: "教育" } as CreatorProfile, testDir)).rejects.toThrow(/读不出来/);
+    expect(await fs.readFile(file(), "utf-8")).toBe(corrupt);
+  });
+
+  it("顶层不是对象也算读不出来，不覆盖", async () => {
+    await fs.writeFile(file(), "[]");
+    await expect(updateProfile({ industry: "教育" }, testDir)).rejects.toThrow(/读不出来/);
+    expect(await fs.readFile(file(), "utf-8")).toBe("[]");
+  });
+
+  it("文件不存在照常初始化", async () => {
+    const p = await initProfile(testDir);
+    expect(p).toBeTruthy();
+    expect(JSON.parse(await fs.readFile(file(), "utf-8")).revision).toBe(1);
+  });
+});

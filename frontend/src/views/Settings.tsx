@@ -1,12 +1,14 @@
 /**
- * 设置中心（P2 spec §5.3 重排）——两个标签，一条分界线：
+ * 设置中心（P2 spec §5.3 重排）：
  *
- *   「模型」= 必填的那把钥匙（端点表 / 主端点 / 备用 / 岗位）+ 工作区 + 知识库；
+ *   「运营平台」= 勾哪些平台、开哪几条生产线（默认标签）；
+ *   「模型」= 只放模型那把钥匙（端点表 / 主端点 / 备用 / 岗位）；
+ *   「本机」= 更新、存储、A-roll 来源、剪映、语音转写、工作区、知识库、更多页面入口；
  *   「接入更多」= 全部可选接入，各自写明解锁什么、不配会怎样、现在什么状态；
  *   「数据回流」= 导入 CSV / 公众号拉取 / 自动回流开关（数据页规格 §G.42 从数据页挪来）。
  *
  * 不新增路由（spec §10 第 13 条）：标签是 `Route.tab`，「去设置」的深链能直接落到
- * 「模型」页，浏览器前进后退不会掉进一个没有导航的孤岛。
+ * 对应的页，浏览器前进后退不会掉进一个没有导航的孤岛。
  */
 import { useEffect, useState } from "react";
 import { invoke } from "../transport";
@@ -19,14 +21,18 @@ import { SettingsArollSources } from "./SettingsArollSources";
 import { SettingsAsr } from "./SettingsAsr";
 import { Integrations } from "./Integrations";
 import { SettingsPublishGate } from "./SettingsPublishGate";
+import { SettingsVoice } from "./SettingsVoice";
 import { SettingsData } from "./SettingsData";
 import { SettingsUpdate } from "./SettingsUpdate";
+import { SettingsPlatforms } from "./SettingsPlatforms";
 import type { Route } from "../routes";
 
-export type SettingsTab = "models" | "integrations" | "data";
+export type SettingsTab = "platforms" | "models" | "local" | "integrations" | "data";
 
 const TABS: Array<{ id: SettingsTab; label: string }> = [
+  { id: "platforms", label: "运营平台" },
   { id: "models", label: "模型" },
+  { id: "local", label: "本机" },
   { id: "integrations", label: "接入更多" },
   { id: "data", label: "数据回流" },
 ];
@@ -50,7 +56,7 @@ function MorePages(props: { nav: (route: Route) => void }) {
 }
 
 export function Settings(props: { tab?: SettingsTab; onTab?: (tab: SettingsTab) => void; nav?: (route: Route) => void }) {
-  const [local, setLocal] = useState<SettingsTab>(props.tab ?? "models");
+  const [local, setLocal] = useState<SettingsTab>(props.tab ?? "platforms");
   const tab = props.tab ?? local;
   const setTab = (next: SettingsTab) => {
     setLocal(next);
@@ -82,9 +88,11 @@ export function Settings(props: { tab?: SettingsTab; onTab?: (tab: SettingsTab) 
         ))}
       </nav>
 
+      {tab === "platforms" && <SettingsPlatforms />}
       {tab === "data" && <SettingsData />}
-      {tab === "integrations" && <><Integrations /><SettingsPublishGate /></>}
-      {tab === "models" && (
+      {tab === "integrations" && <><Integrations /><SettingsPublishGate /><SettingsVoice /></>}
+      {tab === "models" && <EngineSection />}
+      {tab === "local" && (
         <>
           {props.nav && <MorePages nav={props.nav} />}
           <SettingsUpdate />
@@ -92,7 +100,6 @@ export function Settings(props: { tab?: SettingsTab; onTab?: (tab: SettingsTab) 
           <SettingsArollSources />
           <SettingsJianying />
           <SettingsAsr />
-          <EngineSection />
 
           <Section title="工作区" status={ws ? `当前 ${ws.workspaces.find((w) => w.id === ws.active)?.name ?? ws.active}` : ""} on>
             <p className="muted">一人多 IP：每个工作区是独立编辑部（定位/灵感/稿件/画像全隔离）。</p>

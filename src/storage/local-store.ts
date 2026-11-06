@@ -3,7 +3,7 @@ import { draftHash as contentDraftHash } from "./draft-hash.js";
 import type { Outline, TechniqueRef, GapRecord, SeriesReview } from "../modules/writing/series-memory.js";
 import { assertManagedPathAvailable } from "./storage-roots.js";
 import { portableProjectRecord } from "./project-record.js";
-import { contentRoot, isLayoutV2, projectFile, contentFile, ensureContentProject, readProjectRegistry, contentIds } from "./content-project.js";
+import { contentRoot, isLayoutV2, projectFile, contentFile, ensureContentProject, readProjectRegistry, contentIds, noteMissingProject } from "./content-project.js";
 import { commitProjectContent, recoverProjectContent } from "./project-commit.js";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -91,6 +91,19 @@ export interface Topic {
   meetingSlot?: { meetingDate: string; slotId: string };
   /** 装好后试跑建的示例选题（onboarding-connect O20）：其下稿件继承，不进数据回流和写作学习，可一键删 */
   example?: boolean;
+  /**
+   * 创始人打的星（1–5，选题星级 spec §3）：和雷达的机器分 `score` 分开存。
+   * 1–2 星 = 进回收站 + 同来源少推；≥3 星不老化；4–5 星钉在选题列最上面。缺省 = 没打。
+   */
+  stars?: number;
+  /** 打星的时间与途径（board = 管线卡上点的；mcp = 对话里转述，带 starWords 原话） */
+  starredAt?: string;
+  starredVia?: "board" | "mcp";
+  starWords?: string;
+  /** 从回收站捞回来的时间：捞回 = 显式想要，不再自动老化 */
+  restoredAt?: string;
+  /** 「待开选题会」：创始人在每日摘要里回了这条的序号，等他到 Claude / Codex 会话里开选题会 */
+  topicMeetingRequestedAt?: string;
 }
 
 /**
@@ -257,6 +270,15 @@ export interface VideoKit {
   titleMethod?: string;
   /** 交包时的 3 个四平台通用候选（各带方法 id 和理由） */
   titleCandidates?: Array<{ title: string; method: string; reason: string }>;
+  /** 英文平台（Phase 3）：YouTube tags */
+  tags?: string[];
+  /** 英文平台（Phase 3）：YouTube 章节（已并进 caption，这里留结构给发布手册核对） */
+  chapters?: Array<{ at: string; startS: number; title: string }>;
+  /** YouTube 英文版：Studio「AI use」那一问的答案（克隆声音 + 对口型 = yes）；旧包没有 = 按 yes */
+  aiDisclosure?: "yes" | "no";
+  /** 英文平台：做包时批过的英文脚本指纹、配音清单指纹（任何一样变了包就过期） */
+  enScriptHash?: string;
+  enDubHash?: string;
 }
 
 export interface AdoptionRecord {
@@ -321,6 +343,18 @@ export interface ManualPublication {
   url?: string;
 }
 
+export type DerivationKind = "en_edition" | "wechat_article";
+
+export interface DerivedFrom {
+  contentId: string;
+  kind: DerivationKind;
+  /** 派生那一刻源稿审过的成片身份（见 lineage.approvedCutIdentity） */
+  sourceCutHash: string;
+  at: string;
+  /** 源成片换版后 rebind 过（spec §9.1）：从哪一版换过来、什么时候；逐句对比在派生稿项目的 rebind-diff.json */
+  rebound?: { fromCutHash: string; at: string };
+}
+
 export interface Content {
   /** 示例稿（O20）：建稿时从选题继承；不进数据回流、不参与写作规则 / 手册学习，可一键删 */
   example?: boolean;
@@ -358,6 +392,11 @@ export interface Content {
   tags: string[];
   /** IDs of sibling content (same topic, different platforms) */
   siblings: string[];
+  /**
+   * 派生关系（全媒体 spec §8 Phase 1 #2）：这条稿是从哪条视频的哪一版审过的成片派生的。
+   * 只由 modules/lineage/lineage.ts 的 deriveSibling 写；源成片身份变了 = 这条过期（isStale）。
+   */
+  derivedFrom?: DerivedFrom;
   /** Platform-specific hashtags */
   hashtags: string[];
   /**
@@ -734,10 +773,21 @@ export async function softDeleteTopic(id: string, dataDir?: string): Promise<Top
   return topic;
 }
 
+/**
+ * 从回收站捞回：清 deletedAt、记 restoredAt（此后不自动老化）。
+ * 因 1–2 星进回收站的，一并清掉星级——误点一颗星，捞回来就是没打过，同来源的负反馈随之撤销。
+ */
 export async function restoreTopic(id: string, dataDir?: string): Promise<Topic | null> {
   const topic = await getTopic(id, dataDir);
   if (!topic) return null;
+  if (topic.deletedAt) topic.restoredAt = new Date().toISOString();
   topic.deletedAt = null;
+  if (typeof topic.stars === "number" && topic.stars <= 2) {
+    delete topic.stars;
+    delete topic.starredAt;
+    delete topic.starredVia;
+    delete topic.starWords;
+  }
   await writeTopic(topic, dataDir);
   return topic;
 }
@@ -875,7 +925,12 @@ export async function listContents(dataDir?: string): Promise<Content[]> {
 /** 读全量含已删(回收站专用)。日常读侧一律走 listContents(已过滤) */
 async function listContentsRaw(dataDir?: string): Promise<Content[]> {
   if (readProjectRegistry(dataDir)) {
-    const all = await Promise.all((await contentIds(dataDir)).map(id => getContent(id, dataDir)));
+    // 项目文件夹被手动删掉的稿（创始人删已发布的稿，2026-10-31）：展示列表跳过它，不让一条拖垮整张列表；
+    // 别的读错照旧抛。严格读走 listContentsStrict
+    const all = await Promise.all((await contentIds(dataDir)).map(id => getContent(id, dataDir).catch((e: unknown) => {
+      if (e instanceof Error && e.message.startsWith("project_missing:")) { noteMissingProject(id); return null; }
+      throw e;
+    })));
     return all.filter((c): c is Content => c !== null).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
   const dir = path.join(getDataDir(dataDir), "contents");
@@ -1930,7 +1985,8 @@ async function transitionStatusLocked(
   // 分两次写就会出现「状态已推进但账没记」的中间态。
   const handoff = handoffForStatus(content, targetStatus);
   if (handoff) {
-    updates.handoffs = withHandoff(content, {
+    // 补丁里已经记过账（如顶栏定稿释放写手认领）就接在后面，不盖掉
+    updates.handoffs = withHandoff(updates.handoffs ? { handoffs: updates.handoffs } : content, {
       ...handoff,
       by: opts?.host ?? content.claim?.host ?? LOCAL_HOST,
       at: now,

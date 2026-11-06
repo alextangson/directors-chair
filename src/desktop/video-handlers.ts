@@ -13,6 +13,7 @@
  * 5. **videoReadyAt 只盖一次**（publishedAt 同款）：审片通过后若已有值不覆盖；盖戳失败
  *    不吞——确认照样成功，但 warning 明写在返回里。
  */
+import { FOUNDER_APPROVAL_ONLY, isModelCall } from "../storage/stage-guard.js";
 import { appendAction } from "./recent-actions.js";
 import { isContentId } from "../storage/entity-id.js";
 import {
@@ -301,6 +302,8 @@ export async function videoReviewConfirmHandler(payload: Payload): Promise<Reply
   if (!contentId) return { ok: false, error: "需要合法 content_id" };
   const args = parseReviewArgs(payload);
   if (typeof args === "string") return { ok: false, error: args };
+  // 审片通过会盖成片戳：只有创始人（浏览器会话）能批，令牌调用一律拒
+  if (args.verdict === "approve" && isModelCall(payload)) return { ok: false, code: "founder_only", error: FOUNDER_APPROVAL_ONLY };
   try {
     const state = await ctx.service.confirmReview(contentId, args);
     if (args.verdict !== "approve") return { ok: true, data: { state } };

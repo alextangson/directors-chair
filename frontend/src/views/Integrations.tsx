@@ -2,7 +2,7 @@
  * 设置 · 接入更多（P2 spec §5.3）——**可选**接入独立成一个标签，不和必填的模型钥匙并排。
  *
  * 每张卡固定三段：**解锁什么 · 不配会怎样 · 状态**。第二段写的是今天的真实行为
- * （搜索没配深调研就点不动、稿子出「未补证」徽章），不是营销话术——
+ * （比如雷达源缺 Key 就每轮静默少一路），不是营销话术——
  * 用户凭这一句决定要不要现在去弄第二把钥匙。
  */
 import { useEffect, useState } from "react";
@@ -12,6 +12,7 @@ import { Field, SaveRow } from "./settings-kit";
 import { integrationStatus, type IntegrationStatus } from "./integrations-lib";
 import { digestHourLabel, digestStateLine, DIGEST_HOURS, type DigestView } from "./digest-lib";
 import { HostsCard } from "./onboarding/HostsCard";
+import { Switch } from "../components/Switch";
 
 interface RadarSource {
   id?: string;
@@ -19,12 +20,6 @@ interface RadarSource {
   enabled?: boolean;
   config?: { url?: string; keyword?: string };
   [k: string]: unknown;
-}
-
-interface SearchView {
-  configured: boolean;
-  provider: string | null;
-  apiKeyMasked: string | null;
 }
 
 interface PublishView {
@@ -51,6 +46,13 @@ interface CoverView {
   gemini: { configured: boolean; apiKeyMasked: string | null; source: string; model: string };
 }
 
+interface RivalView {
+  configured: boolean;
+  apiKeyMasked: string | null;
+  source: "file" | "env" | "none";
+  model: string;
+}
+
 interface InboxSettingsView {
   configured: boolean;
   botTokenMasked: string | null;
@@ -71,7 +73,7 @@ interface InboxRuntimeView {
 }
 
 /**
- * 「每日选题摘要」——雷达每天挑几条推到 Telegram，回一个数字起深调研。
+ * 「每日选题摘要」——雷达每天挑几条推到 Telegram，回一个数字记成「待开选题会」。
  * bot 没配时整段禁用：开关/小时/按钮都点不动，那一行状态直接说「先配 bot」。
  */
 function DigestBlock(props: { configured: boolean; digest?: DigestView | null; reload: () => void }) {
@@ -93,8 +95,7 @@ function DigestBlock(props: { configured: boolean; digest?: DigestView | null; r
   return (
     <>
       <div className="row row-static">
-        <input
-          type="checkbox"
+        <Switch
           disabled={!props.configured}
           checked={props.configured && d?.enabled !== false}
           title="每天到点把雷达当天的新选题发一份到你的 Telegram"
@@ -118,7 +119,7 @@ function DigestBlock(props: { configured: boolean; digest?: DigestView | null; r
         {digestStateLine({ ...(d ? { digest: d } : {}), configured: props.configured, now: Date.now() })}
       </p>
       <p className="muted mono">
-        收到后回一个数字起深调研（回 0 = 今天都不做）；回复永远对最新一份清单生效，同一个数字再回一次是查进度。
+        收到后回一个数字，这条就记成「待开选题会」，到 Claude 会话里说「开选题会」接着做（回 0 = 今天都不做）；回复永远对最新一份清单生效。
       </p>
     </>
   );
@@ -156,12 +157,12 @@ function IntegrationCard(props: {
 }
 
 export function Integrations() {
-  const [search, setSearch] = useState<SearchView | null>(null);
-  const [sForm, setSForm] = useState({ provider: "bocha", api_key: "" });
   const [pub, setPub] = useState<PublishView | null>(null);
   const [pForm, setPForm] = useState({ ...EMPTY_PUBLISH_FORM });
   const [cover, setCover] = useState<CoverView | null>(null);
   const [cForm, setCForm] = useState({ provider: "", relay_model: "", gemini_api_key: "", gemini_model: "" });
+  const [rival, setRival] = useState<RivalView | null>(null);
+  const [rForm, setRForm] = useState({ gemini_api_key: "" });
   const [sources, setSources] = useState<RadarSource[]>([]);
   const [inbox, setInbox] = useState<InboxSettingsView | null>(null);
   const [inboxRuntime, setInboxRuntime] = useState<InboxRuntimeView | null>(null);
@@ -169,18 +170,18 @@ export function Integrations() {
   const [ws, setWs] = useState<{ active: string; workspaces: Array<{ id: string; name: string }> } | null>(null);
 
   const load = async () => {
-    const [sr, pr, cr, rr, ir, runtime, wr] = await Promise.all([
-      invoke("settings:search_get"),
+    const [pr, cr, rvr, rr, ir, runtime, wr] = await Promise.all([
       invoke("settings:publish_get"),
       invoke("settings:cover_get"),
+      invoke("settings:rival_get"),
       invoke("radar:status"),
       invoke("inbox:settings_get"),
       invoke("inbox:status"),
       invoke("workspace:list"),
     ]);
-    if (sr.ok) setSearch((sr as unknown as { data: SearchView }).data);
     if (pr.ok) setPub((pr as unknown as { data: PublishView }).data);
     if (cr.ok) setCover((cr as unknown as { data: CoverView }).data);
+    if (rvr.ok) setRival((rvr as unknown as { data: RivalView }).data);
     if (rr.ok) setSources((rr as unknown as { data: { sources?: RadarSource[] } }).data?.sources ?? []);
     if (ir.ok) setInbox((ir as unknown as { data: InboxSettingsView }).data);
     if (runtime.ok) setInboxRuntime((runtime as unknown as { data: InboxRuntimeView }).data);
@@ -218,36 +219,6 @@ export function Integrations() {
   return (
     <>
       <HostsCard />
-
-      <IntegrationCard
-        title="搜索 · 博查 / Tavily"
-        unlocks="深调研全网取证、写稿时按缺口定向补证据。"
-        ifMissing="深调研按钮点不动；写稿照常出稿，但没有出处的数字会让稿子挂上「未补证」。"
-        status={integrationStatus({
-          configured: Boolean(search?.configured),
-          okLabel: search?.provider ? `已配置 ${search.provider}` : "已配置",
-        })}
-      >
-        <label className="set-field">
-          <span className="mono muted">来源</span>
-          <select value={sForm.provider} onChange={(e) => setSForm((f) => ({ ...f, provider: e.target.value }))}>
-            <option value="bocha">博查 bocha（中文优先）</option>
-            <option value="tavily">Tavily（英文圈）</option>
-          </select>
-        </label>
-        <Field label="API Key" password value={sForm.api_key} placeholder={search?.apiKeyMasked ?? "sk-..."} onChange={(v) => setSForm((f) => ({ ...f, api_key: v }))} />
-        <div className="set-save">
-          <button
-            className="primary"
-            onClick={() => {
-              if (!sForm.api_key.trim()) return toast("请填入 API key");
-              void submit("settings:search_set", sForm, () => setSForm((f) => ({ ...f, api_key: "" })));
-            }}
-          >
-            保存搜索配置
-          </button>
-        </div>
-      </IntegrationCard>
 
       <IntegrationCard
         title="情报源 · 雷达订阅"
@@ -317,7 +288,7 @@ export function Integrations() {
             ))}
           </select>
         </label>
-        <Field label="署名" value={pForm.author} placeholder={pub?.author ?? "Lawrence"} onChange={(v) => setPForm((f) => ({ ...f, author: v }))} />
+        <Field label="署名" value={pForm.author} placeholder={pub?.author ?? "署名"} onChange={(v) => setPForm((f) => ({ ...f, author: v }))} />
         <Field label="API 代理" value={pForm.api_proxy} placeholder={pub?.apiProxyConfigured ? "已配置（不回显）——填新值覆盖" : "http://user:pass@固定IP:端口（可选，锁定出口）"} onChange={(v) => setPForm((f) => ({ ...f, api_proxy: v }))} />
         <SaveRow label="保存公众号配置" onSave={() => void submit("settings:publish_set", pForm, () => setPForm({ ...EMPTY_PUBLISH_FORM }))} />
       </IntegrationCard>
@@ -332,7 +303,7 @@ export function Integrations() {
         })}
       >
         <Field label="生图 Key" password value={pForm.image_api_key} placeholder={pub?.imageApiKeyMasked ?? "sk-..."} onChange={(v) => setPForm((f) => ({ ...f, image_api_key: v }))} />
-        <Field label="生图端点" value={pForm.image_base_url} placeholder={pub?.imageBaseUrl ?? "https://api.xiaojiu.one/v1"} onChange={(v) => setPForm((f) => ({ ...f, image_base_url: v }))} />
+        <Field label="生图端点" value={pForm.image_base_url} placeholder={pub?.imageBaseUrl ?? "https://你的生图服务/v1"} onChange={(v) => setPForm((f) => ({ ...f, image_base_url: v }))} />
         <Field label="生图模型" value={pForm.image_model} placeholder={pub?.imageModel ?? "gpt-image-2"} onChange={(v) => setPForm((f) => ({ ...f, image_model: v }))} />
         <label className="set-field set-field-wide">
           <span className="mono muted">
@@ -359,6 +330,19 @@ export function Integrations() {
         <Field label="中转模型" value={cForm.relay_model} placeholder={cover?.relay.model ?? "gpt-image-2"} onChange={(v) => setCForm((f) => ({ ...f, relay_model: v }))} />
         <Field label="Gemini Key" password value={cForm.gemini_api_key} placeholder={cover?.gemini.apiKeyMasked ?? "AIza...（切 Gemini 才需要）"} onChange={(v) => setCForm((f) => ({ ...f, gemini_api_key: v }))} />
         <SaveRow label="保存封面配置" onSave={() => void submit("settings:cover_set", cForm, () => setCForm({ provider: "", relay_model: "", gemini_api_key: "", gemini_model: "" }))} />
+      </IntegrationCard>
+
+      <IntegrationCard
+        title="写稿比稿"
+        unlocks="写稿时让 Gemini 另写一版全文，和主会话那版盲比。"
+        ifMissing="比稿跳过，只交主会话那一版；不影响其它功能。"
+        status={integrationStatus({
+          configured: Boolean(rival?.configured),
+          okLabel: `${rival?.source === "env" ? "环境变量" : "已配置"} ${rival?.apiKeyMasked ?? ""} · ${rival?.model ?? ""}`,
+        })}
+      >
+        <Field label="Gemini Key（写稿比稿用）" password value={rForm.gemini_api_key} placeholder={rival?.apiKeyMasked ?? "AIza...（免费获取：aistudio.google.com/apikey）"} onChange={(v) => setRForm({ gemini_api_key: v })} />
+        <SaveRow label="保存比稿配置" onSave={() => void submit("settings:rival_set", rForm, () => setRForm({ gemini_api_key: "" }))} />
       </IntegrationCard>
 
       <IntegrationCard

@@ -92,8 +92,15 @@ describe("批准即登记（§5）", () => {
   it("两个批准齐 → 自动登记：不可变登记记录、登记成片 / 封面副本、video.final、实拍版口播；进待发布", async () => {
     const s = await edited();
     await decide(s.c.id, "approve_cut", s.cut);
+    // 混音检查的中间件：登记之后清掉音频、留报告（2026-10-30 存储审查）
+    const mixDir = path.join(projectRoot(env, s.c.id), "99-cache/audio/mix-v001");
+    await fs.mkdir(mixDir, { recursive: true });
+    await fs.writeFile(path.join(mixDir, "mix.flac"), "audio");
+    await fs.writeFile(path.join(mixDir, "report.json"), "{}");
     const r = await pick(s, "AI 又忘了？");
     expect(r).toMatchObject({ ok: true, stage: "待发布" });
+    expect(await exists(path.join(mixDir, "mix.flac"))).toBe(false);
+    expect(await exists(path.join(mixDir, "report.json"))).toBe(true);
     const doc = (await readProductionDoc(s.c.id, env.dir))!;
     expect(doc.registrations).toMatchObject([{ source: "commit", cut_sha: s.cut.sha256, cover_text: "AI 又忘了？", srt_for_cut: s.cut.sha256 }]);
     const content = (await getContent(s.c.id, env.dir))!;
@@ -102,7 +109,10 @@ describe("批准即登记（§5）", () => {
     expect(content.videoDone).toBeTruthy();
     const root = projectRoot(env, s.c.id);
     expect(await fs.readFile(path.join(root, "05-cover/封面-3x4.png"))).toEqual(png(900, 1200));
-    expect((await fs.readdir(path.join(root, "07-delivery/registered")))[0]).toMatch(/^final-r1-/);
+    // 成片原地登记：不再另存 07-delivery/registered 副本，素材记录直接指向批准的那份
+    expect(await exists(path.join(root, "07-delivery/registered"))).toBe(false);
+    const cutAsset = content.assets?.find((a) => a.filename === content.video?.final?.asset_filename);
+    expect(cutAsset?.projectPath).toBe((await readProductionDoc(s.c.id, env.dir))!.facts.find((f) => f.sha256 === s.cut.sha256 && f.kind === "cut")!.path);
     expect(await exists(path.join(root, "01-script/spoken/g0001-spoken.md"))).toBe(true);
     expect(await exists(path.join(root, "01-script/spoken/g0001-checklist.json"))).toBe(true);
   });

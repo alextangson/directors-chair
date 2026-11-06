@@ -3,10 +3,8 @@
  *
  * 写盘顺序是有讲究的（spec §10 第 10 条）：
  *   1. `settings:set`（端点表 + 主端点指针）——失败就停在卡上，一个字节都没写歪；
- *   2. `settings:test_route`——**不通也不锁门**，卡上摆出那句人话 + 「先进去再说」；
- *   3. `settings:search_set`（只在填了搜索 Key 时）——**失败不回滚引擎**，卡上留一行，照样进。
- * 搜索保存排在探针之后但**与探针结果无关**：探针不通时用户点「先进去再说」，
- * 那把已经敲进去的搜索 Key 不该跟着被丢掉。
+ *   2. `settings:test_route`——**不通也不锁门**，卡上摆出那句人话 + 「先进去再说」。
+ * 搜索不用配：调研交给本机 AI，用它自己的搜索。
  */
 
 export type EndpointKind = "deepseek" | "claude-relay" | "openai-compat";
@@ -76,19 +74,20 @@ export interface OnboardingForm {
   apiKey: string;
   strong: string;
   fast: string;
-  searchProvider: "bocha" | "tavily";
-  searchKey: string;
 }
 
 export function initialForm(): OnboardingForm {
   const p = presetOf("deepseek");
-  return { kind: "deepseek", baseUrl: p.baseUrl, apiKey: "", strong: p.strong, fast: p.fast, searchProvider: "bocha", searchKey: "" };
+  return { kind: "deepseek", baseUrl: p.baseUrl, apiKey: "", strong: p.strong, fast: p.fast };
 }
 
-/** 换端点类型 = 换一整套预填（用户没改过的字段跟着走，改过的以他填的为准由调用方决定） */
+/**
+ * 换端点类型 = 换一整套预填，**Key 一律清空**：A 家的 Key 不能被带去发给 B 家
+ * （先在 DeepSeek 卡粘了 Key 再切到别的中转，那把 Key 就会被发到别人的地址上）。
+ */
 export function applyPreset(form: OnboardingForm, kind: EndpointKind): OnboardingForm {
   const p = presetOf(kind);
-  return { ...form, kind, baseUrl: p.baseUrl, strong: p.strong, fast: p.fast };
+  return { ...form, kind, baseUrl: p.baseUrl, apiKey: "", strong: p.strong, fast: p.fast };
 }
 
 export interface EnginePayload {
@@ -131,8 +130,6 @@ export interface OnboardingSaveResult {
   probeError?: string;
   /** 探针成功的耗时 */
   probeMs?: number;
-  /** 搜索 Key 没存上（不回滚引擎，卡上留一行） */
-  searchError?: string;
 }
 
 /**
@@ -150,12 +147,5 @@ export async function runOnboardingSave(invoke: InvokeLike, form: OnboardingForm
   const probe = await invoke("settings:test_route", { provider_id: built.payload.main.provider, model: built.payload.main.strong });
   if (!probe.ok) out.probeError = probe.error ?? "端点测试失败，原因未记录";
   else out.probeMs = (probe.data as { ms?: number } | undefined)?.ms ?? 0;
-
-  // 搜索是可选第二把钥匙：存不上不回滚引擎，也不拦人进门
-  const searchKey = form.searchKey.trim();
-  if (searchKey) {
-    const search = await invoke("settings:search_set", { provider: form.searchProvider, api_key: searchKey });
-    if (!search.ok) out.searchError = search.error ?? "搜索 Key 没保存成功";
-  }
   return out;
 }

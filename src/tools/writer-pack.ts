@@ -113,7 +113,6 @@ export interface PackContext {
   rulesApplied: number;
   wroteWithoutBrief: boolean;
   wroteWithoutAngle: boolean;
-  evidenceNote?: string;
 }
 
 /**

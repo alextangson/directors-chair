@@ -24,7 +24,6 @@ import { addWritingRule, loadProfile, personaSummary, goalSummary, type CreatorP
 import { getGoal, setGoal } from "../modules/profile/goal.js";
 import { generateAudiencePersonaProposal, savePersonaCalibrated } from "../modules/profile/persona.js";
 import { reviewAudienceStay } from "../modules/review/audience-review.js";
-import { scoutInspiration } from "../modules/research/scout-search.js";
 import { prepareVideoKit } from "../modules/publish/video-kit.js";
 import { getTopicCandidates, type RadarItem } from "../modules/radar/topic-radar.js";
 import { fetchPageText, type PageText } from "../utils/fetch-page.js";
@@ -41,14 +40,11 @@ import { reviseDraft, type ReviseDraftResult } from "../modules/writing/draft-re
 import { reviseFocus, type ReviseFocus, type ReviseFocusResult } from "../modules/writing/revise-focus.js";
 import type { ScriptRequest } from "../modules/writing/script-prompt.js";
 import { emitEngineEvent } from "./event-hub.js";
-import { triggerDeepResearch, triggerRegenerateAngles } from "./research-runtime.js";
-import { makeEnsureBrief } from "./write-research-gate.js";
 import { listGuiSkills, type GuiSkill } from "./skills-reader.js";
 import { buildWorkspaceTools, type WorkspaceToolDeps } from "./chat-tools-workspace.js";
 import { claimJob, releaseJob, holdJobUntilSettled, GENERATE_JOB_KEY } from "./job-claims.js";
 import { readRecentActions, recentActionsBlock } from "./recent-actions.js";
 import { viewContextLine, type ChatViewContext } from "./chat-view-context.js";
-import type { TriggerResult } from "../modules/research/research-runner.js";
 
 export interface ChatCard {
   type:
@@ -110,14 +106,11 @@ export const CREW_TOOL_STATUS: Record<string, { role: ChatProgressEvent["role"];
   set_goal: { role: "analyst", label: "分析师把目标记进档案" },
   get_goal: { role: "analyst", label: "分析师在对照目标" },
   audience_review: { role: "review", label: "审核员代入受众画像审稿" },
-  scout_inspiration: { role: "scout", label: "侦查员出去搜灵感了" },
   prepare_video_kit: { role: "publisher", label: "发布员在备发布件" },
   build_video: { role: "editor", label: "剪辑师在起成片构建" },
   revise_draft: { role: "writer", label: "编剧正在按你的意见修改稿件" },
   revise_focus: { role: "writer", label: "编剧正在改这段" },
   clear_revision_focus: { role: "writer", label: "编剧退出修改模式" },
-  deep_research: { role: "scout", label: "调研员在派四视角深调研" },
-  regenerate_angles: { role: "scout", label: "调研员在重新立意" },
   read_skill: { role: null, label: "总编辑在翻工作手册" },
   // Phase 2 到达面（角色按现有席位语义选：封面/配图是 publisher 的活——两条产线的引擎事件
   // 本来就以 publisher 席位发；流转与预检是 review 的关卡；活动/经营只读归 analyst；
@@ -308,21 +301,14 @@ export interface ChatToolDeps extends WorkspaceToolDeps {
   ) => Promise<StartedGeneration>;
   reviseDraftImpl?: (contentId: string, instruction: string, dataDir?: string) => Promise<ReviseDraftResult>;
   reviseFocusImpl?: (contentId: string, instruction: string, focus: ReviseFocus, dataDir?: string) => Promise<ReviseFocusResult>;
-  deepResearch?: (topicId: string, dataDir?: string) => Promise<TriggerResult>;
-  regenerateAngles?: (topicId: string, dataDir?: string) => Promise<TriggerResult>;
   buildVideo?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
 
 interface ChatEffects {
   contentIds: Set<string>;
-  /**
-   * 本轮从对话派出去的深调研选题（调研回流轮 §1）。持久层拿它回填 job 的来源会话——
-   * 简报落盘那一刻总编辑才知道该回哪段对话汇报。工具里不直写台账：首轮的会话此刻还不存在。
-   */
-  researchTopicIds: Set<string>;
 }
 
-const SYSTEM_PROMPT = `你是 AutoCrew 编辑部的总编辑，带一支数字员工团队（情报、文案、审核、发布、分析），帮创作者把「想法→成稿→发布→回流」整条链跑成默认值。你的职责：接需求派活、报进展、把关不可逆动作、答数据与状态问题。
+const SYSTEM_PROMPT = `你是导演椅编辑部的总编辑，带一支数字员工团队（情报、文案、审核、发布、分析），帮创作者把「想法→成稿→发布→回流」整条链跑成默认值。你的职责：接需求派活、报进展、把关不可逆动作、答数据与状态问题。
 
 规则：
 1. 永远用工具完成实际工作（生成、查数据、记风格、发布），不要口头承诺。
@@ -341,11 +327,11 @@ const SYSTEM_PROMPT = `你是 AutoCrew 编辑部的总编辑，带一支数字�
 12. 用户想加信息源/订阅某媒体/看海外内容时，调用 manage_radar_sources。加 RSS 前先 read_url 验证链接确实是 feed（内容含 <rss 或 <feed）；用户只给了网站名时，先试常见路径（/feed、/rss）验证，验证不过就说清并建议在设置·情报源里手动处理。海外源（HN/GitHub 等）用 toggle 开关即可。
 13. 受众画像是选题、写作、审稿共用的标准。用户要「校准受众/画像」或画像缺失、未校准时：generate_persona 出提案 → 带用户逐层过（名字/焦虑/痛点准不准）→ 用户认可后 save_persona 落库。未经用户确认绝不保存；画像未校准时主动提一句（一次就好，别唠叨）。
 14. 用户问「这篇受众会怎么看」「能留住人吗」或要求审稿时，调用 audience_review（稿件 id 在上下文里）。讲结果时按层说人话：谁会停、谁会划走、卡在哪句——引导用户框选那一段直接改。
-15. 用户要「主动搜/去找找/全网搜一下 X」或想按定位补充灵感时，调用 scout_inspiration（可带 query，不带则按定位+画像自动生成搜索词）。搜索未配置时把报错原样告诉用户（去设置配 key），不要假装搜过。
+15. 用户要「主动搜/去找找/全网搜一下 X」时：联网搜索与调研交给 Claude / Codex（它们自带搜索），你不搜。告诉用户到 Claude 会话里说「搜一下 X」或「开选题会」；值得写的线索用 save_topic 入库。不要假装搜过。
 16. 用户粘贴一大段自己写过的文案时，先问一句用途：是「学我的风格」（→ absorb_style）还是「里面有想法要入灵感库」（→ 提炼观点后 save_topic，reason 注明来自用户旧文）；两者都要就都做。不要不问就默认其一。
 17. 视频稿（抖音/视频号/小红书/B站）要发布时，先调用 prepare_video_kit 备发布件：平台发布文案+分镜表+竖版封面。口播稿是「读的」，发布件才是「发的」——不要把口播稿当发布文案。备好后引导用户看卡片，粘贴发布走 publish_clipboard。
 18. 用户说「/goal …」「我的目标是…」「这个季度要…」时调用 set_goal 记录（目标会注入选题、写作、复盘全链，旧目标自动留档）；问目标或要对照进展时用 get_goal。有目标后，选题推荐与建议围绕目标排优先级，明显偏航时提醒一句。
-19. 用户说「深入调研/深调研某个选题」「多找点材料再写」时调用 deep_research，参数是灵感库选题编号（还没入库先 save_topic）。它是**异步任务，投递即返回**：回执任务状态（新任务已派下去／已经在跑，进度在选题卡上看）就结束本轮，不要等它跑完，更不要凭空复述简报内容。派完活明确告诉用户「简报出来我回来汇报，不用等在这里、也不用回我」——这是真的，简报一落盘我会自动回到这段对话报结果。结尾禁止「可以吗／好吗／要我先做什么」这类逼用户应答的客套：他没有需要答复的事。已经有简报、用户只是不满意角度候选（「这几个角度都不行」「换一批切入点」）时改调 regenerate_angles：它只重跑立意、不重新出网，回执与派活话术同上（新卡出来我会回到这段对话摆给你看）。同一条选题正在研究时两者都会被拒（「研究进行中」），照实转达、别重复派。
+19. 用户说「深入调研/深调研某个选题」「多找点材料再写」「换一批角度」时：调研交给 Claude / Codex 开选题会，你不派调研。没入库先 save_topic，然后告诉用户在选题卡上点「交给 AI 调研」，或到 Claude 会话里说「给《选题标题》开选题会」。不要假装已派、也不要凭空编简报或角度。
 20. 用户说「剪成片」「把这篇做成视频」「开始剪」时调用 build_video 投递给剪辑师（稿件须已过审、且是视频平台，A-roll 要先拍好并挂进稿件素材）。这是后台任务：投完就告诉用户去成片卡看进度，不要在对话里等、更不要宣称已剪好。转写完成后需要用户亲手在成片卡里勾选分句、审片确认——这两步是人的活，你只负责投递和答状态。
 21. 用户要封面/正文配图时调用 create_cover / generate_article_images。两者都是**异步投递即返回**：回执「已派下去，进度看卡」就结束本轮，不要等图、不要描述你没见过的图。工具回「已在跑」时照实说，别重复派活；封面选哪张是用户亲手在封面卡上点的。
 22. 用户说「送审」「打回重写」「挪到待审」时调用 move_content——它只管在写与待审之间这几步。**待发布/已发布不归对话管**：用户说要发布时，引导他去工作区稿件卡上亲手确认，别承诺代发。
@@ -359,7 +345,7 @@ const SYSTEM_PROMPT = `你是 AutoCrew 编辑部的总编辑，带一支数字�
 const PLATFORM_ENUM = ["douyin", "xiaohongshu", "wechat_mp", "wechat_video", "bilibili", "twitter", "reddit", "toutiao"];
 const PLATFORM_LABELS: Record<string, string> = {
   wechat_mp: "公众号", douyin: "抖音", xiaohongshu: "小红书", wechat_video: "视频号",
-  bilibili: "B站", twitter: "X (Twitter)", instagram: "Instagram", reddit: "Reddit", toutiao: "头条",
+  bilibili: "B站", twitter: "X (Twitter)", x: "X（推特）", youtube: "YouTube", instagram: "Instagram", reddit: "Reddit", toutiao: "头条",
 };
 
 /** 平台表达习惯:派生/改写到该平台时注入,让输出是平台原生腔调而非机械套原文结构。 */
@@ -468,8 +454,6 @@ export function buildChatTools(sink: ChatCard[], dataDir?: string, deps?: ChatTo
       ((req, dd) =>
         startGenerateScript(req, dd, {
           onEvent: (e) => void emitEngineEvent(e, dd).catch(() => {}),
-          // 与桌面写作入口同一道闸口：选题没简报就先补调研，闸口故障只降级不阻断
-          ensureBriefImpl: makeEnsureBrief(dd),
         })),
     retryGenerate:
       deps?.retryGenerate ??
@@ -479,14 +463,11 @@ export function buildChatTools(sink: ChatCard[], dataDir?: string, deps?: ChatTo
           dd,
           {
             onEvent: (e) => void emitEngineEvent(e, dd).catch(() => {}),
-            ensureBriefImpl: makeEnsureBrief(dd),
           },
           override,
         )),
     reviseDraftImpl: deps?.reviseDraftImpl ?? reviseDraft,
     reviseFocusImpl: deps?.reviseFocusImpl ?? reviseFocus,
-    deepResearch: deps?.deepResearch ?? triggerDeepResearch,
-    regenerateAngles: deps?.regenerateAngles ?? triggerRegenerateAngles,
     buildVideo: deps?.buildVideo ?? videoBuildStartHandler,
   };
   const dirParams = dataDir ? { _dataDir: dataDir } : {};
@@ -1109,43 +1090,6 @@ export function buildChatTools(sink: ChatCard[], dataDir?: string, deps?: ChatTo
       },
     },
     {
-      name: "scout_inspiration",
-      description:
-        "侦查员主动搜集:网页搜索 → 按定位/画像做相关性过滤 → 入灵感库。用户说「搜一下 X」「去找找最近有什么可写的」时调用;query 可选,不传则按定位+核心画像痛点自动生成搜索词。",
-      parameters: {
-        type: "object",
-        properties: { query: { type: "string", description: "搜索词(可选)" } },
-      },
-      execute: async (args) => {
-        const a = sanitize(args);
-        try {
-          const r = await scoutInspiration({ query: typeof a.query === "string" ? a.query : undefined }, dataDir);
-          if (r.saved.length > 0) {
-            sink.push({
-              type: "topic",
-              data: {
-                industry: "侦查搜集 · " + r.queriesUsed.join(" / "),
-                candidates: r.saved.map((t) => ({ title: t.title, source: t.source ?? "search", link: t.link })),
-              },
-            });
-          }
-          return JSON.stringify({
-            ok: true,
-            queriesUsed: r.queriesUsed,
-            found: r.found,
-            saved: r.saved.map((t) => ({ id: t.id, title: t.title })),
-            skippedDuplicates: r.skippedDuplicates,
-            filter: r.filter,
-            note: r.saved.length > 0
-              ? "已入灵感库(看板第一列)。向用户报告搜到什么、为什么值得写。"
-              : "没有达标候选(宁缺勿滥)。告诉用户搜了什么词、可以换词再试。",
-          });
-        } catch (err) {
-          return fail(err instanceof Error ? err.message : err);
-        }
-      },
-    },
-    {
       name: "generate_persona",
       description:
         "生成三层受众画像提案(core 核心/adjacent 邻近/surprise 意外)。用户要校准受众、问「我的读者是谁」、或画像缺失/未校准需要建立时调用。提案必须与用户逐层确认或修正——不要自行保存,确认后调用 save_persona。",
@@ -1474,71 +1418,6 @@ export function buildChatTools(sink: ChatCard[], dataDir?: string, deps?: ChatTo
         }
       },
     },
-    {
-      name: "deep_research",
-      description:
-        "深调研:给灵感库某条选题派四视角并行侦察(受众痛点/证据数据/反方/对标),产出带跨视角张力点的调研简报,之后写这条选题会自动注入。用户说「深入调研一下这个选题」「多找点材料再写」时调用。**异步任务,投递即返回**——不要等它跑完,也不要假装已经读到简报。",
-      parameters: {
-        type: "object",
-        properties: { topic_id: { type: "string", description: "灵感库选题编号(topic-…);没有就先 save_topic 入库" } },
-        required: ["topic_id"],
-      },
-      execute: async (args) => {
-        const topicId = String(sanitize(args).topic_id ?? "").trim();
-        if (!topicId) return fail("topic_id 必填(灵感库选题编号)");
-        let res: TriggerResult;
-        try {
-          res = await d.deepResearch(topicId, dataDir);
-        } catch (err) {
-          return fail(err instanceof Error ? err.message : err);
-        }
-        // 被拒(搜索 key 未配/选题不存在/运行时没起)照原样回,让总编辑把原因转达给用户
-        if (!res.accepted) return fail(res.reason);
-        // 合并进已在跑的那个也算数：用户在这段对话里问了，就该在这段对话里收到回报
-        effects?.researchTopicIds.add(topicId);
-        const done = res.job.perspectives.filter((p) => p.status === "succeeded").length;
-        return JSON.stringify({
-          ok: true,
-          topicId,
-          jobStatus: res.job.status,
-          deduped: res.deduped,
-          perspectivesDone: `${done}/${res.job.perspectives.length}`,
-          note: res.deduped
-            ? "上一轮中断在半路,已经把它捡回来重跑了。告诉用户「正在调研中」和当前进度,别重复派活。"
-            : "已排队,四视角并行侦察,通常几分钟。告诉用户「已派下去」,进度在选题卡上看;不要在本轮等结果。",
-        });
-      },
-    },
-    {
-      name: "regenerate_angles",
-      description:
-        "重新立意:在这条选题**已有的调研简报**上重跑一次立意,产一批新的角度候选(事实不变,只换角度卡)。用户说「这几个角度都不行」「换一批角度」「重新想想切入点」时调用——不需要重新出网调研。**异步任务,投递即返回**,不要等它跑完,也不要凭空编新角度。",
-      parameters: {
-        type: "object",
-        properties: { topic_id: { type: "string", description: "灵感库选题编号(topic-…),必须已经有调研简报" } },
-        required: ["topic_id"],
-      },
-      execute: async (args) => {
-        const topicId = String(sanitize(args).topic_id ?? "").trim();
-        if (!topicId) return fail("topic_id 必填(灵感库选题编号)");
-        let res: TriggerResult;
-        try {
-          res = await d.regenerateAngles(topicId, dataDir);
-        } catch (err) {
-          return fail(err instanceof Error ? err.message : err);
-        }
-        // 被拒(没简报/正在研究中/运行时没起)照原样回,让总编辑把原因转达给用户
-        if (!res.accepted) return fail(res.reason);
-        effects?.researchTopicIds.add(topicId);
-        return JSON.stringify({
-          ok: true,
-          topicId,
-          jobStatus: res.job.status,
-          deduped: res.deduped,
-          note: "已排队,只重跑立意,通常一两分钟。告诉用户「新角度出来我回来摆给你看」,不要在本轮等结果、也不要自己编角度。",
-        });
-      },
-    },
   ];
 
   // 到达面(设计 §Phase 2):封面/配图/流转/预检/活动/收件箱/版本——同一套包装模式,单独成文件
@@ -1640,7 +1519,7 @@ export async function runChatTurn(params: {
   if (!picked.ok) return { ok: false, error: picked.error };
 
   const cards: ChatCard[] = [];
-  const effects: ChatEffects = { contentIds: new Set<string>(), researchTopicIds: new Set<string>() };
+  const effects: ChatEffects = { contentIds: new Set<string>() };
   // 工作手册加载失败不阻断对话——视同无技能(索引不注入、read_skill 不注册)
   let guiSkills: GuiSkill[] = [];
   try {
@@ -1733,8 +1612,6 @@ export async function runChatTurn(params: {
         stopReason: result.stopReason,
         tokensUsed: result.totalTokens,
         contentIds: [...effects.contentIds],
-        // 持久层用它回填「这活是哪段对话派的」（调研回流轮）；前端不消费
-        researchTopicIds: [...effects.researchTopicIds],
         ...(params.runId ? { runId: params.runId, actionId: params.runId } : {}),
       },
     };

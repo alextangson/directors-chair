@@ -18,6 +18,7 @@ import { revokeHandoff } from "../modules/video/handoff/revoke.js";
 import { isRegisterInput, parseRegisterInput, registerVideo } from "../modules/video/handoff/register.js";
 import { handoffFail } from "../modules/video/handoff/types.js";
 import { hostOf, videoFail, type VideoToolResult } from "./video-gates.js";
+import { maybeJson } from "../modules/publish/review-gate/plan.js";
 import { storageFailure } from "../storage/storage-error.js";
 import { matchAroll } from "../modules/video/handoff/match.js";
 import { confirmHandoff } from "../modules/video/handoff/confirm.js";
@@ -78,7 +79,9 @@ export async function executeVideoHandoff(action: HandoffAction, params: Record<
     if (action === "citations") {
       const allowed = await gate("writer")(); if ("denied" in allowed) return allowed.denied;
       const content = await getContent(contentId, dataDir); if (!content) return videoFail("稿件不存在");
-      await saveCoverage(content, params.coverage as CitationCoverage, dataDir);
+      const coverage = coverageArg(params.coverage);
+      if (!coverage) return videoFail("citations 需要 coverage{draft_hash, reviewed_by, reviewed_at, citations[]}：这次没带或不是对象，什么都没记", { code: "invalid_params" });
+      await saveCoverage(content, coverage, dataDir);
       // §12.4-A：出处交齐后写稿侧显式放手，Codex 认稿自接才不会被一个闲着的写稿认领挡成 claim_held
       return { ok: true, ...allowed.grant, next_action: { tool: "autocrew_desk", params: { action: "release", content_id: contentId }, message: "出处已交齐：带上 claim_token 调 autocrew_desk release 释放写稿认领，录好的原片由 Codex 认稿后自接。还要改稿就先别释放。" } };
     }
@@ -106,4 +109,10 @@ export async function executeVideoHandoff(action: HandoffAction, params: Record<
     if (action === "report") return reportFailure(err);
     return videoFail(`${action} 执行失败：${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/** 模型交来的 coverage：对象直接用；中转端点序列化成的 JSON 字符串（含没转义的内引号）修好解析回来；别的一律当没带 */
+function coverageArg(raw: unknown): CitationCoverage | null {
+  const value = maybeJson(raw);
+  return value && typeof value === "object" && !Array.isArray(value) ? value as CitationCoverage : null;
 }

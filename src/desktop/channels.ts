@@ -50,15 +50,19 @@ export const IPC_CHANNELS = [
   "settings:open_config",
   // 配置面的反馈闭环：拿**已保存的**配置真发一次极小调用，回耗时与上游实际回的模型名
   "settings:test_route",
+  // 缺线路时的第三方中转推荐（spec 2026-10-25 §4）：只认预设地址读模型列表 / 服务端追加端点 / 本机推荐偏好
+  "settings:list_models",
+  "settings:engine_attach_preset",
+  "settings:offer_set",
   // 线路健康只读通道（P2 spec §4.1）：每个端点最近一次探针 + 最近一次真实调用的结果。
   // 不轮询——变更时服务端发既有 `engine` SSE 事件（kind:"engine_health"），前端据此重拉
   "engine:health",
+  // 复查（过时的失败重探 / 「重新检查」按钮）：只探挂着红点的端点，探完回最新视图
+  "engine:recheck",
   // 「接入更多 · 宿主」卡（P3 spec §4.1）：已发出去的命名令牌 + 一键撤销。
   // 只出宿主名与时间戳，token 值一个字节都不进这条通道
   "hosts:list",
   "hosts:revoke",
-  "settings:search_get",
-  "settings:search_set",
   "settings:publish_get",
   "settings:publish_set",
   "style:update_rule",
@@ -72,6 +76,8 @@ export const IPC_CHANNELS = [
   "cover:identity",
   "settings:cover_get",
   "settings:cover_set",
+  "settings:rival_get",
+  "settings:rival_set",
   "logs:list",
   "logs:get_run",
   "skills:list",
@@ -90,6 +96,8 @@ export const IPC_CHANNELS = [
   "flywheel:pull_status",
   "flywheel:pull_now",
   "flywheel:pull_toggle",
+  // 在 ego lite 里打开平台后台让人登录（2026-10-25：回流 / 发布用 ego lite 的登录态，不开默认浏览器）
+  "ego:open_console",
   // 假设台账只读（spec §5.3）：open + 已裁决两组，裁决是代码算的观察性结论
   "flywheel:hypotheses_list",
   // 预测账本只读（预测账本规格 §一）：页面上不能新建、修改或删除预测
@@ -150,12 +158,16 @@ export const IPC_CHANNELS = [
   // 一键删示例（onboarding-connect O20）：示例选题连同其下的稿一起进回收站
   "topic:delete_example",
   "topic:restore",
+  // 选题星级（管线重规划 §3）：1–5 星，0 = 清掉；1–2 星进回收站
+  "topic:rate",
   // 角度点选（角度卡 spec §1.4）：点选 = 只带 angle_id；改写 = 额外带改写后的 card
   "topic:select_angle",
   "topic:clear_angle",
   // 灵感 → A-roll 薄路径定稿（2026-10-04）：清单 + 「定了」（只认浏览器会话）
   "draft:final_get",
   "draft:finalize",
+  "script:final_get",
+  "script:finalize",
   "content:delete",
   "content:restore",
   "content:open_folder",
@@ -173,8 +185,6 @@ export const IPC_CHANNELS = [
   "patterns:list",
   "patterns:update",
   "patterns:delete",
-  "research:deep_dive",
-  "research:regenerate_angles",
   "research:status",
   "research:brief_get",
   "research:list_assets",

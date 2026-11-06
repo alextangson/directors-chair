@@ -16,6 +16,10 @@ import { publishWechatMpDraft } from "../modules/publish/wechat-mp.js";
 import { loadWechatMpConfig } from "../modules/publish/wechat-config.js";
 import { formatForClipboard, type ClipboardPlatform } from "../modules/publish/clipboard-publisher.js";
 import { VIDEO_PLATFORMS } from "../modules/publish/video-kit.js";
+import { kitPlatformsFor } from "../modules/publish/platform-caps.js";
+import { derivedPublishRefusalById } from "../modules/lineage/publish-guard.js";
+import { enClipboard, prepareEnPublish } from "../modules/en-edition/publish-out.js";
+import { isDerivedArticleId, pushApprovedArticle } from "../modules/wechat-article/push.js";
 import { preparedArticleImages } from "../modules/publish/article-images.js";
 import { scanText } from "../modules/filter/sensitive-words.js";
 import { generateAndSaveDigest } from "../modules/publish/digest.js";
@@ -24,25 +28,20 @@ import { deriveAndRecordAdoption } from "../modules/learnings/adoption-derive.js
 import { prepareCheckedPublish, prepareEgoLitePublish } from "../modules/publish/ego-lite.js";
 import { executePublishCheck, type CheckDeps } from "../modules/publish/review-gate/check.js";
 import { proposePreference } from "../modules/publish/review-gate/preferences.js";
+import { executeActivityLedger } from "../modules/publish/activity-ledger-action.js";
 
 export const publishSchema = Type.Object({
-  action: Type.Unsafe<"wechat_mp_draft" | "clipboard" | "ego_lite_prepare" | "confirm_published" | "digest" | "check" | "propose_preference">({
+  action: Type.Unsafe<"wechat_mp_draft" | "clipboard" | "ego_lite_prepare" | "confirm_published" | "digest" | "check" | "propose_preference" | "activities" | "activity_record">({
     type: "string",
-    enum: ["wechat_mp_draft", "clipboard", "ego_lite_prepare", "confirm_published", "digest", "check", "propose_preference"],
-    description: "Publish action. 'check' reviews a video publish plan per platform before the one-time founder confirmation (deterministic cover/cut/text rules + TypeSafe semantic warnings); paste its summary_table verbatim and never submit a blocked platform. 'propose_preference' proposes a new cover-ratio or publish rule the founder confirms in the workbench. 'ego_lite_prepare' resolves a browser upload package for 视频号/小红书/抖音/Bilibili without clicking Publish; 'wechat_mp_draft' for WeChat MP; 'clipboard' for copy-paste; 'confirm_published' marks a live result; 'digest' generates/saves a ≤20-char WeChat 摘要.",
+    enum: ["wechat_mp_draft", "clipboard", "ego_lite_prepare", "confirm_published", "digest", "check", "propose_preference", "activities", "activity_record"],
+    description: "Publish action. 'activities' reads the platform activity ledger (活动台账; optional platform filter) with computed freshness: fresh = only re-check key fields on the detail page, recheck = full re-verification, not_open = submission window not open yet (listed with opens_at; usable only if the scheduled time falls after it), expired = not a candidate; not_for_us rows come last with their reason; without platform it also returns empty_platforms (no entries yet → full check there). 'activity_record' merges one verified activity into the ledger (pass it as `value`; only changed fields needed) and returns the rule-field changes vs the previous version plus how many other scheduled videos use it. 'check' reviews a video publish plan per platform before the one-time founder confirmation (deterministic cover/cut/text rules + TypeSafe semantic warnings); paste its summary_table verbatim and never submit a blocked platform. 'propose_preference' proposes a new cover-ratio or publish rule the founder confirms in the workbench. 'ego_lite_prepare' resolves a browser upload package for 视频号/小红书/抖音/Bilibili without clicking Publish; 'wechat_mp_draft' for WeChat MP; 'clipboard' for copy-paste; 'confirm_published' marks a live result; 'digest' generates/saves a ≤20-char WeChat 摘要.",
   }),
-  article_path: Type.Optional(Type.String({ description: "Absolute or relative path to the markdown article file." })),
   content_id: Type.Optional(Type.String({ description: "AutoCrew content id. If provided, draft.md will be used." })),
   theme: Type.Optional(Type.String({ description: "WeChat formatting theme. Default: newspaper." })),
   dry_run: Type.Optional(Type.Boolean({ description: "Generate assets and show the publish command without pushing." })),
   skip_images: Type.Optional(Type.Boolean({ description: "Skip image generation if images already exist." })),
   author: Type.Optional(Type.String({ description: "Displayed author name for the WeChat publish script." })),
   image_size: Type.Optional(Type.String({ description: "Image ratio for generated images. Default: 16:9." })),
-  image_generator_script: Type.Optional(Type.String({ description: "Override path to the image generation script." })),
-  image_api_key: Type.Optional(Type.String({ description: "Override image generation API key." })),
-  image_base_url: Type.Optional(Type.String({ description: "OpenAI-compatible relay base URL for image generation (must pair with the api key)." })),
-  image_model: Type.Optional(Type.String({ description: "Image model id, e.g. gpt-image-2 for relays. Default: script's built-in (doubao-seedream)." })),
-  wechat_publish_script: Type.Optional(Type.String({ description: "Override path to the WeChat publish.py script." })),
   hashtags: Type.Optional(Type.Array(Type.String(), { description: "Hashtags for the content. Overrides content hashtags if provided." })),
   publish_url: Type.Optional(Type.String({ description: "The URL where content was published (for confirm_published action)." })),
   round: Type.Optional(Type.Integer({ description: "confirm_published：这条稿当前轮次（卡上给的）；对不上 = 已重开，拒。" })),
@@ -56,7 +55,7 @@ export const publishSchema = Type.Object({
   overrides: Type.Optional(Type.Unknown({ description: "For 'check': [{platform, rule, founder_quote}] — only when the founder explicitly asked to break a blocked rule (rule = the blocked item's rule name, founder_quote verbatim); shown verbatim in summary_table." })),
   kind: Type.Optional(Type.String({ description: "For 'propose_preference': cover_ratio (platform + ratio list) or rule (free-text publish rule)." })),
   platform: Type.Optional(Type.String({ description: "For 'propose_preference': platform the preference applies to (required for cover_ratio). For 'confirm_published' on video drafts: required — which platform it went out on (one content_id serves all four video platforms). For 'clipboard': which video platform's kit to copy." })),
-  value: Type.Optional(Type.Unknown({ description: "For 'propose_preference': ratio list like [\"3:4\",\"4:3\"] for cover_ratio, or the rule text for rule." })),
+  value: Type.Optional(Type.Unknown({ description: "For 'propose_preference': ratio list like [\"3:4\",\"4:3\"] for cover_ratio, or the rule text for rule. For 'activity_record': the activity object, merged onto the existing record by key (omitted fields keep their value, null clears). Every write needs verified_at + sources[]; creating also needs platform, name, official_url; updating can pass key instead. Optional: platform_activity_id, window{start,end,timezone,raw}, rules{...}, form{url,deadline}, relevance fits_us|not_for_us, reason (required for not_for_us), verified_via, evidence[], founder_quote (required to flip not_for_us back to fits_us)}. Unknown rule values = 「未知」, absent = 「未要求」. window.start/end: ISO with offset (2026-11-15T23:59:00+08:00) or date-only (2026-11-15), poster text in raw; never invent a 23:59 end time. verified_at must carry an offset/Z, not be in the future, and not be older than the stored check (stale_verification)." })),
   founder_quote: Type.Optional(Type.String({ description: "For 'propose_preference': the founder's exact words behind this preference." })),
 });
 
@@ -121,6 +120,22 @@ export async function executePublish(
   const dataDir = getDataDir((params._dataDir as string) || undefined);
   const history = await historyGuard(params.content_id, dataDir);
   if (history) return history;
+  // 派生稿（英文版 / 公众号文章）的源成片变了：所有出包 / 草稿箱 / 复制出口在这里统一拦
+  if (action === "clipboard" || action === "ego_lite_prepare" || action === "wechat_mp_draft") {
+    const derived = await derivedPublishRefusalById(params.content_id, dataDir);
+    if (derived) return { ok: false, ...derived };
+    // 派生公众号文章只按批过的整包推草稿箱（Phase 2b）：不出复制件、不走视频平台的浏览器包
+    // 英文版（Phase 3 方案 (b)）：浏览器上传件只按批过的英文发布包出，不走中文登记
+    if (typeof params.content_id === "string" && (await getContent(params.content_id, dataDir))?.derivedFrom?.kind === "en_edition") {
+      if (action === "ego_lite_prepare") return prepareEnPublish(params.content_id, dataDir);
+      // 复制件也只给批过的包里的平台、用包里的文案（不退回脚本正文，不借小红书的排版）
+      if (action === "clipboard") return enClipboard(params.content_id, typeof params.platform === "string" ? params.platform.trim() : "", dataDir);
+      return { ok: false, code: "not_for_en_edition", error: "英文版只发 YouTube / X：用 ego_lite_prepare 或 clipboard" };
+    }
+    if (action !== "wechat_mp_draft" && await isDerivedArticleId(params.content_id, dataDir)) {
+      return { ok: false, code: "derived_article_api_only", error: "派生公众号文章只按批过的整包推草稿箱：用 autocrew_content wechat_article {op:\"push_draft\"}，不出复制粘贴件" };
+    }
+  }
 
   // --- check: 发布前把关（只写检查留档，不改业务状态）；propose_preference: 只记提议，创始人在网页确认 ---
   if (action === "check") return executePublishCheck({ ...params, _dataDir: dataDir }, deps?.check);
@@ -130,6 +145,9 @@ export async function executePublish(
       ? { ok: true, proposal: r.proposal, duplicate: r.duplicate, note: "已记为待确认提议：创始人在工作台顶部点「确认」才生效；在那之前 check 仍按现行规则判" }
       : r;
   }
+
+  // --- 活动台账（spec 2026-10-20）：只读写台账文件，不碰稿件 ---
+  if (action === "activities" || action === "activity_record") return executeActivityLedger(action, params, dataDir);
 
   // --- clipboard: format content for manual copy-paste publishing ---
   if (action === "clipboard") {
@@ -141,9 +159,12 @@ export async function executePublish(
     if (!content) {
       return { ok: false, error: `Content not found: ${contentId}` };
     }
-    // 视频稿四平台共用一条稿：带 platform 取那个平台的发布包；文字稿只认自己的平台
+    // 视频稿同语言的视频平台共用一条稿：带 platform 取那个平台的发布包；文字稿只认自己的平台
     const asked = typeof params.platform === "string" ? params.platform.trim() : "";
-    const platform = (asked && VIDEO_PLATFORMS.has(asked) && VIDEO_PLATFORMS.has(content.platform ?? "") ? asked : content.platform || "xiaohongshu") as ClipboardPlatform;
+    const sameLanguage = VIDEO_PLATFORMS.has(content.platform ?? "") && (kitPlatformsFor(content.platform) as string[]).includes(asked);
+    const platform = (sameLanguage ? asked : content.platform || "xiaohongshu") as ClipboardPlatform;
+    // 英文平台的复制件只按英文发布包出（上面已分流）；走到这里说明不是英文版，不借小红书的排版顶上
+    if ((platform as string) === "x" || (platform as string) === "youtube") return { ok: false, code: "en_package_only", error: "YouTube / X 的复制件只按批过的英文发布包出" };
     const hashtags = (params.hashtags as string[] | undefined) || content.hashtags || [];
     // V5.4b:视频平台有发布件 → 发的是发布件(平台标题+发布文案,已含标签),不是口播稿截断
     const kit = VIDEO_PLATFORMS.has(platform) ? videoKitFor(content, platform) : undefined;
@@ -271,12 +292,19 @@ export async function executePublish(
 
   const publishImpl = deps?.publishImpl ?? publishWechatMpDraft;
   const contentId = params.content_id as string | undefined;
+  // 只推资料库里的稿：脚本路径、生图端点 / 密钥、代理一律只从设置（publish.json）读，单次调用不能覆盖——
+  // 不然一次工具调用就能把已存的密钥发到任意地址、或让守护进程执行任意脚本（2026-10-30 审查）
+  if (!contentId) return { ok: false, error: "wechat_mp_draft 需要 content_id（只推资料库里的稿）" };
+  // 模型调用不能 force 越过违禁词闸门（force 只给创始人在工作台用）
+  const force = Boolean(params.force) && !isModelCall(params);
+  // 派生公众号文章（含桌面端推送按钮）一律走按批过整包推送的那一条路：选定标题、主图 + 裁切、web 图署名都在包里
+  if (await isDerivedArticleId(contentId, dataDir)) return pushApprovedArticle(String(contentId).trim(), dataDir, { publishImpl }, { force, dryRun: Boolean(params.dry_run) });
   let articlePath: string;
   let gateText: string;
   let preparedImages: string[] | undefined;
   let digest: string | undefined;
 
-  if (contentId) {
+  {
     const content = await getContent(contentId, dataDir);
     if (!content) return { ok: false, error: `Content not found: ${contentId}` };
     // 发布时从 store 新鲜落盘 draft.md——工作台编辑只更新 store，旧 draft.md 不得被推送
@@ -289,22 +317,13 @@ export async function executePublish(
     const bodyImages = await preparedArticleImages(contentId, dataDir);
     if (!bodyImages.ok) return bodyImages;
     preparedImages = bodyImages.paths;
-  } else if (params.article_path) {
-    articlePath = path.resolve(params.article_path as string);
-    try {
-      gateText = await fs.readFile(articlePath, "utf-8");
-    } catch {
-      return { ok: false, error: `Article not found: ${articlePath}` };
-    }
-  } else {
-    return { ok: false, error: "article_path or content_id is required" };
   }
 
   // 审核员发布门（同步阻断）：违禁词未清零禁止推送；force 放行但违规照样透出——
   // 最终决定权在人，系统保持透明（禁止静默）
   const scan = await scanText(gateText, "wechat_mp", dataDir);
   const violations = scan.hits.map((h) => h.word);
-  if (violations.length > 0 && !params.force) {
+  if (violations.length > 0 && !force) {
     return {
       ok: false,
       violations,
@@ -338,14 +357,14 @@ export async function executePublish(
     theme: (params.theme as string) || cfg.theme || "newspaper",
     dryRun: Boolean(params.dry_run),
     skipImages: Boolean(params.skip_images),
-    author: (params.author as string) || cfg.author || "Lawrence",
+    author: (params.author as string) || cfg.author || undefined,
     imageSize: (params.image_size as string) || "16:9",
-    imageGeneratorScript: (params.image_generator_script as string) || cfg.imageGeneratorScript,
-    imageApiKey: (params.image_api_key as string) || cfg.imageApiKey,
-    imageBaseUrl: (params.image_base_url as string) || cfg.imageBaseUrl,
-    imageModel: (params.image_model as string) || cfg.imageModel,
-    wechatPublishScript: (params.wechat_publish_script as string) || cfg.wechatPublishScript,
-    apiProxy: (params.api_proxy as string) || cfg.apiProxy,
+    imageGeneratorScript: cfg.imageGeneratorScript,
+    imageApiKey: cfg.imageApiKey,
+    imageBaseUrl: cfg.imageBaseUrl,
+    imageModel: cfg.imageModel,
+    wechatPublishScript: cfg.wechatPublishScript,
+    apiProxy: cfg.apiProxy,
     digest,
     preparedImages,
   });

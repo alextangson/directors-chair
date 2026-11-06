@@ -1,10 +1,10 @@
 /** The MCP host receives this workflow without needing repository skills. */
 export const WRITING_INSTRUCTIONS = [
-  "AutoCrew 的调研、立意、写作、语义审稿默认全部由当前宿主模型完成；产品负责任务、抓页验引文、确定性检查和保存。普通 MCP 流程无需配置 engine。",
+  "导演椅的调研、立意、写作、语义审稿默认全部由当前宿主模型完成；产品负责任务、抓页验引文、确定性检查和保存。普通 MCP 流程无需配置 engine。",
   "抖音口播新稿走 autocrew_draft（write-script 技能的 6 步）：start → verify_quote 核引文 → angle（创始人原话 + 体裁 genre，按那本手册写）→ save（带 base_version）→ 改 → prepare_final，「定了」由创始人在工作台点。下面的 workflow / writer 流程用于其他平台。",
   "用户提出新稿需求：从对话整理完整 requirements，复用或用 autocrew_topic create 建立选题，然后调用 autocrew_workflow prepare{topic_id,platform,requirements}。不要直接 generate、workflow write 或 content save。",
   "prepare 返回的 research_task 已带 task_id 和本阶段任务包，照做后按 next_action 提交，不能轮询等待后台模型。所有后续 scout 研究动作带 topic_id 和 task_id。",
-  "宿主可用自己的搜索工具查来源，再用 scout read_page{perspective,url} 直接抓页，无需第三方搜索 key；scout search 使用独立搜索服务额度。cite{source_id,claim,quote} 由产品核对抓取正文中的逐字引文；claim_offline{claim,reason} 明确记录未核验主张，不能冒充验证来源。",
+  "用宿主自己的搜索工具查来源，再用 scout read_page{perspective,url} 直接抓页；导演椅不做搜索，不需要搜索 key。cite{source_id,claim,quote} 由产品核对抓取正文中的逐字引文；claim_offline{claim,reason} 明确记录未核验主张，不能冒充验证来源。",
   "由你完成 audience/evidence/counter/benchmark 四个研究视角，按任务 schema 用 scout perspective 提交，再 synthesize 综合、angles 提交候选。多视角不等于四个独立 agent；只报告实际启动的分工。",
   "needs_angle 时，展示候选的不同主张、依据、缺口和推荐理由，让用户选择；推荐不等于代选。用户已经明确给出角度可用 direction，不能把风格要求当作选角度。",
   "选定后用 workflow select_angle（带 prepare 返回的 brief_revision，缺它会被拒），按它的 next_action 领 writer pack。requirements 必须保留用户原话中的提纲、篇幅、口吻、必写和禁写。",
@@ -18,7 +18,7 @@ export const WRITING_INSTRUCTIONS = [
   "批量与平台适配每篇独立 prepare/pack/submit；直接存稿、适配保存开关、机械检查都不能替代这条正式交稿链。",
   "存盘失败（code=storage_unavailable 或其他写库错误）就停下，向创作者报告原始错误；不得把稿子写成库外文件继续推进。",
   "交付简述：实际用了什么材料、采用哪个角度、谁写、审稿是否完成。研究失败或材料不足要显示原因和下一步，不能悄悄降级成裸写。",
-  "后台研究、代写或审稿仅在用户明确选择 execution=engine/review=engine 或已授权的无人值守后台执行时使用；普通 MCP 不要求配置 engine，也不默认调用端点探测。Claude 等宿主的模型额度由宿主提供；第三方搜索、图像与视频仍使用独立服务额度。",
+  "调研只由宿主完成；后台代写或审稿仅在用户明确选择 execution=engine/review=engine 或已授权的无人值守后台执行时使用；普通 MCP 不要求配置 engine，也不默认调用端点探测。Claude 等宿主的模型额度由宿主提供；图像与视频仍使用独立服务额度。",
   "generate/workflow write 是用户明确选择 execution=engine 的后台代写；content save 仅用于用户已有成稿的显式 manual_import。不要把新生成稿伪装成人工导入。",
 ].join("\n");
 
@@ -27,7 +27,8 @@ export const WRITING_INSTRUCTIONS = [
  * 完整守则在资源 autocrew://writing-guide，工具细节在 autocrew://tool-guide/<工具名>，漏了步骤由工具返回的 next_action 拦住。
  */
 export const MCP_INSTRUCTIONS = [
-  "AutoCrew 是创作者的编辑部：调研、立意、写作、审稿由你（当前宿主模型）完成；AutoCrew 负责任务、抓页验引文、确定性检查和保存。",
+  "这里是导演椅（Director's Chair，原名 AutoCrew）：创作者说「导演椅」指的就是这套 autocrew_* 工具。",
+  "导演椅是创作者的编辑部：调研、立意、写作、审稿由你（当前宿主模型）完成；导演椅负责任务、抓页验引文、确定性检查和保存。",
   "动笔前先读资源 autocrew://writing-guide（写作守则）；某个工具怎么用，读 autocrew://tool-guide/<工具名>。",
   "抖音口播新稿走 autocrew_draft（write-script 技能）：start → 调研并 verify_quote 核引文 → 创始人选立意与体裁 angle → save（带 base_version）→ 按意见改 → prepare_final，把工作台链接给创始人点「定了」。",
   "其他平台写新稿先开选题会（topic-meeting 技能）：autocrew_topic 复用或建选题（只有一句灵感就 prepare 带 inspiration）→ autocrew_workflow prepare → 按 research_task 用 autocrew_scout 五路调研（视角可 claim 后派子代理并行）→ 出 3–4 张立意卡 → 创始人用原话定，workflow select_angle 带 founder_words → autocrew_writer pack 领包写稿 → writer submit → autocrew_review_desk submit 审稿。没有跳过调研或选卡的通道。",

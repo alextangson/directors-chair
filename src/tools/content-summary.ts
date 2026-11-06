@@ -17,6 +17,8 @@ import { askRows, attachmentsChanged } from "../modules/production/asks.js";
 import { readInbox } from "../modules/production/inbox-read.js";
 import { isVideoPlatform } from "../storage/stage-guard.js";
 import { productionPart, SUMMARY_BUDGET, type ProductionPart } from "./content-summary-production.js";
+import { publicationNext, publicationOverviewOf } from "../modules/production/publication-overview.js";
+import { readOutbox as readDerivativeOutbox, readPolicy as readDerivativePolicy } from "../modules/derivative-dispatch/store.js";
 
 const EMPLOYEE: Record<string, string> = { writer: "写手", cover: "封面师", editor: "剪辑师" };
 const minutesAgo = (iso: string | undefined, now: number): number | null => (iso ? Math.max(0, Math.round((now - Date.parse(iso)) / 60_000)) : null);
@@ -113,7 +115,11 @@ function minimalShape(out: Record<string, unknown>, part: ProductionPart | null,
   const row = (f.aroll as Array<{ fact_id: string; state: string; round: number; path?: string }> | undefined)?.[0];
   const keep = ["changes", "has_more", "next_since_seq", "latest_seq", "aroll_has_more", "aroll_next_offset"];
   const rej = (out.rejections as Array<{ kind: string; note: string; at: string }> | undefined)?.map((r) => ({ kind: r.kind, note: clip(r.note, 40), at: r.at }));
-  const minimal: Record<string, unknown> = { ok: out.ok, id: out.id, stage: out.stage, ...(out.inbox ? { inbox: { count: (out.inbox as { count: number }).count } } : {}),
+  const minimal: Record<string, unknown> = { ok: out.ok, id: out.id, stage: out.stage,
+    ...(out.publication ? { publication: { state: (out.publication as { state: string }).state } } : {}),
+    ...(out.derivative_dispatch ? { derivative_dispatch: { enabled: (out.derivative_dispatch as { enabled?: boolean }).enabled,
+      ...((out.derivative_dispatch as { error?: string }).error ? { error: "派生状态读不出来，先别另建会话" } : {}) } } : {}),
+    ...(out.inbox ? { inbox: { count: (out.inbox as { count: number }).count } } : {}),
     ...(row ? { aroll: [{ fact_id: row.fact_id, state: row.state, round: row.round, ...(row.path ? { path: row.path } : {}) }] } : {}),
     ...Object.fromEntries(keep.filter((k) => f[k] !== undefined).map((k) => [k, f[k]])), ...asks?.minimal(), ...(rej?.length ? { rejections: rej } : {}) };
   return Buffer.byteLength(JSON.stringify(minimal)) > SUMMARY_BUDGET ? { ...minimal, oversize: true } : minimal;
@@ -196,6 +202,16 @@ export async function contentSummary(id: string, dataDir?: string, now = Date.no
   if (angle) blockers.unshift(angle);
   const view = await ontologyView(c, dataDir);
   const exp = view?.phase === "production" ? view : null;
+  let derivative: Record<string, unknown> = {};
+  if (isVideoPlatform(c.platform) && !c.derivedFrom) {
+    try {
+      const [policy, outbox] = await Promise.all([readDerivativePolicy(getDataDir(dataDir)), readDerivativeOutbox(c.id, getDataDir(dataDir))]);
+      if (policy.enabled || outbox.jobs.length) derivative = { derivative_dispatch: { enabled: policy.enabled, host: "codex",
+        jobs: outbox.jobs.slice(-2).map((j) => ({ job_id: j.id, kind: j.kind, state: j.state, ...(j.session?.threadId ? { thread_id: j.session.threadId } : {}) })),
+        next: "autocrew_content derivative_status 查看完整状态；自动派生开启时不手动另建会话" } };
+    } catch (err) { derivative = { derivative_dispatch: { error: clip(err instanceof Error ? err.message : String(err), 80) } }; }
+  }
+  const publication = exp?.stage === "已发布" ? await publicationOverviewOf(c, getDataDir(dataDir)) : null;
   const part = view ? await productionPart(c, view, getDataDir(dataDir), since.value, offset.value ?? 0) : null;
   if (exp) {
     blockers.unshift(...exp.missing.map((m) => `还差：${m}`), ...exp.alerts.map((a) => clip(a, 80)));
@@ -207,10 +223,12 @@ export async function contentSummary(id: string, dataDir?: string, now = Date.no
     title: clip(c.title, 60),
     platform: c.platform ?? "",
     status: c.status ?? null,
-    stage: exp?.stage ?? (c.status ? (CONTENT_STATUS_LABEL[c.status] ?? c.status) : "没有记录状态（旧稿或手写导入）"),
+    ...derivative,
+    stage: publication?.label ?? exp?.stage ?? (c.status ? (CONTENT_STATUS_LABEL[c.status] ?? c.status) : "没有记录状态（旧稿或手写导入）"),
+    ...(publication ? { production_stage: exp!.stage, publication } : {}),
     ...(exp ? { reason: clip(exp.reason, 80) } : {}),
     blockers: blockers.length ? blockers : ["没有进行中的流程"],
-    next: (exp?.stage ? ONTOLOGY_NEXT[exp.stage] : undefined) ?? NEXT[c.status] ?? "没有建议的下一步",
+    next: publication ? publicationNext(publication) : (exp?.stage ? ONTOLOGY_NEXT[exp.stage] : undefined) ?? NEXT[c.status] ?? "没有建议的下一步",
     updatedAt: c.updatedAt,
     words: Array.from((c.body ?? "").replace(/\s+/g, "")).length,
     ...(await inboxOf(c, getDataDir(dataDir))),

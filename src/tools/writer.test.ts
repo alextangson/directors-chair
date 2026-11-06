@@ -976,81 +976,38 @@ describe("writer pack 异步备料", () => {
 // ─── find_evidence ────────────────────────────────────────────────────────────
 
 describe("writer find_evidence", () => {
-  async function packWithSearch(): Promise<Record<string, any>> {
-    await fs.writeFile(path.join(testDir, "search.json"), JSON.stringify({ provider: "bocha", apiKey: "k-test" }));
-    // 用手写 direction 走这条路：发包阶段就不会去跑立意卡的定向补证（那要花钱）
-    return pack({ direction: "只算维护账" }, { runLoopImpl: emptyResearchLoop });
-  }
-
-  it("三次额度用完就说已用完，且 used 跨调用落在盘上", async () => {
-    const res = await packWithSearch();
-    const call = (n: number) =>
-      run(
-        { action: "find_evidence", execution: "engine", content_id: res.content_id, pack_id: res.pack_id, need: `返工工时数据 ${n}` },
-        { runLoopImpl: emptyResearchLoop },
-      );
-
-    for (const n of [1, 2, 3]) {
-      const out = await call(n);
-      expect(out.ok).toBe(true);
-      expect(out.status).toBe("empty"); // 替身查不到：本轮如实说「没找到，不要编」
-      expect(String(out.evidence)).toContain("不要编");
-      expect(out.find_evidence_left).toBe(3 - n);
-      // 每一次都写回盘：不写回就等于下一次调用把额度还给宿主
-      expect((await readPackFile(res.content_id)).ledgerBudget.used).toBe(n);
-    }
-
-    const fourth = await call(4);
-    expect(fourth.status).toBe("exhausted");
-    expect(String(fourth.evidence)).toContain("已用完");
-    expect(fourth.find_evidence_left).toBe(0);
-    expect((await readPackFile(res.content_id)).ledgerBudget.used).toBe(3);
-  });
-
-  it("查证记录进账本，恢复后不丢（lookups 累加而不是每次归零）", async () => {
-    const res = await packWithSearch();
-    for (const n of [1, 2]) {
-      await run(
-        { action: "find_evidence", execution: "engine", content_id: res.content_id, pack_id: res.pack_id, need: `需求 ${n}` },
-        { runLoopImpl: emptyResearchLoop },
-      );
-    }
-    const file = await readPackFile(res.content_id);
-    expect(file.ledger.lookups).toHaveLength(2);
-    expect(file.ledger.lookups.map((l) => l.need)).toEqual(["需求 1", "需求 2"]);
-  });
-
-  it("单次 45 秒墙钟：到点如实说超时，额度照扣（宿主 60 秒掐调用之前先收口）", async () => {
-    const res = await packWithSearch();
-    const hang = (): Promise<LoopResult> => new Promise<LoopResult>(() => {}); // 永不返回的补证
+  it("引擎补证已下线：execution=engine 也只回宿主补证任务，不调模型、不扣额度", async () => {
+    const res = await pack({ direction: "只算维护账" }, { runLoopImpl: emptyResearchLoop });
+    let loopCalls = 0;
     const out = await run(
       { action: "find_evidence", execution: "engine", content_id: res.content_id, pack_id: res.pack_id, need: "返工工时数据" },
-      { runLoopImpl: hang, findDeadlineMs: 20 },
+      { runLoopImpl: (async () => { loopCalls++; return emptyResearchLoop(); }) as never },
     );
     expect(out.ok).toBe(true);
-    expect(out.status).toBe("empty");
-    expect(String(out.evidence)).toContain("超时");
-    expect(String(out.evidence)).toContain("额度照扣");
-    expect(out.find_evidence_left).toBe(2);
-    expect((await readPackFile(res.content_id)).ledgerBudget.used).toBe(1);
+    expect(out.status).not.toBe("empty");
+    expect(out.model_api_calls === undefined || out.model_api_calls === 0).toBe(true);
+    expect(loopCalls).toBe(0);
+    expect((await readPackFile(res.content_id)).ledgerBudget.used).toBe(0);
   });
 
-  it("need 为空、稿件不存在、搜索没配好各自拒绝并说明", async () => {
-    const res = await packWithSearch();
-    expect(await run({ action: "find_evidence", execution: "engine", content_id: res.content_id, pack_id: res.pack_id })).toMatchObject({
-      ok: false,
-    });
-    expect(await run({ action: "find_evidence", execution: "engine", content_id: "content-nope", pack_id: res.pack_id })).toMatchObject({
-      ok: false,
-    });
-    await fs.rm(path.join(testDir, "search.json"));
-    const noSearch = await run({
-      action: "find_evidence", execution: "engine",
-      content_id: res.content_id,
-      pack_id: res.pack_id,
-      need: "返工工时",
-    });
-    expect(noSearch.ok).toBe(false);
+  it("选题会调研没定平台、领包才填 douyin：补证沿用原研究任务，不回 task_changed", async () => {
+    const topic = await seed(makeBrief({ creativeTask: createCreativeTask({}) }));
+    await pickAngle(topic.id);
+    const research = await executeScout({ action: "prepare", topic_id: topic.id, _dataDir: testDir });
+    expect(research).toMatchObject({ ok: true, task_id: expect.any(String) });
+    // 这轮调研早已交出简报：台账回到已完成，pack 才放行（研究任务本身没定平台）
+    await upsertJob({ topicId: topic.id, status: "succeeded", startedAt: "2026-09-04T09:00:00.000Z", settledAt: "2026-09-04T10:00:00.000Z",
+      perspectives: pendingPerspectives(), briefRevision: 1, topicHash: topicHashOf(TITLE, DESC) }, testDir);
+    const started = await run({ action: "pack", topic_id: topic.id, platform: "douyin" }, { runLoopImpl: emptyResearchLoop });
+    const res = { ...started, ...(await settle(started.content_id as string)) };
+    const found = await run({ action: "find_evidence", content_id: res.content_id, pack_id: res.pack_id, claim_token: res.claim_token, need: "返工工时数据" });
+    expect(found).toMatchObject({ ok: true, status: "awaiting_host_evidence", task_id: research.task_id });
+  });
+
+  it("need 为空、稿件不存在各自拒绝并说明", async () => {
+    const res = await pack({ direction: "只算维护账" }, { runLoopImpl: emptyResearchLoop });
+    expect(await run({ action: "find_evidence", content_id: res.content_id, pack_id: res.pack_id })).toMatchObject({ ok: false });
+    expect(await run({ action: "find_evidence", content_id: "content-nope", pack_id: res.pack_id, need: "x" })).toMatchObject({ ok: false });
   });
 });
 

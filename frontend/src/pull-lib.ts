@@ -22,6 +22,8 @@ export interface PullPlatformStatus {
   lastCoverError?: string;
   /** 本进程没有资料库写入权、回流被拒（只在服务内存里，资料库里的 lastStatus 还是旧的） */
   writeRefusal?: { code: string; at: string };
+  /** 账号级快照（第 4 期）：null = 这个平台还不能抓账号数据；{error} = 读不出 */
+  account?: import("./views/home-model").AccountTileData | { error: string } | null;
 }
 
 export type PullTone = "ok" | "warn" | "bad" | "idle";
@@ -60,10 +62,10 @@ export function formatPullTime(iso: string | null | undefined): string {
 /** 行内那句话：这一行现在到底在等什么。null = 没什么要说的 */
 export function pullHint(row: PullPlatformStatus): string | null {
   if (row.writeRefusal?.code === "library_writer_lost") {
-    return `资料库写入权已丢失，自动回流暂停（${formatPullTime(row.writeRefusal.at)}）——可能另一个 AutoCrew 服务占用了资料库。确认只有一个服务在跑后，重启 AutoCrew 拿回写入权。`;
+    return `资料库写入权已丢失，自动回流暂停（${formatPullTime(row.writeRefusal.at)}）——可能另一个导演椅服务占用了资料库。确认只有一个服务在跑后，重启导演椅拿回写入权。`;
   }
   if (row.writeRefusal) return `资料库暂时连不上，自动回流暂停（${formatPullTime(row.writeRefusal.at)}）——检查资料库所在磁盘/NAS 是否在线，恢复后会自动继续。`;
-  if (!row.enabled) return "打开开关后，AutoCrew 会定期从创作者后台把数据接回来。";
+  if (!row.enabled) return "打开开关后，导演椅会定期从创作者后台把数据接回来。";
   // 刚开开关最容易以为「没反应」：说清最多等多久，想立刻看就有按钮
   if (row.lastStatus === "never") return "已开启——每天 9:00 自动抓一次（那会儿电脑没开就在开机后补抓）；想立刻看结果就点「立即抓取」。";
   switch (row.lastStatus) {
@@ -103,6 +105,8 @@ export function attemptMessage(label: string, attempt: PullAttemptView): string 
   switch (attempt.status) {
     case "in_flight":
       return `${label}正在抓——这一轮跑完会自己刷新`;
+    case "not_picked":
+      return `${label}没勾在运营平台里，不抓——要抓先去设置勾上${label}`;
     case "ok":
       return `${label}：抓回 ${attempt.rowCount} 条，入账 ${attempt.imported ?? 0} 条${
         attempt.hasMore ? "（作品数到上限，还有更多没抓完）" : ""
@@ -118,8 +122,8 @@ export function attemptMessage(label: string, attempt: PullAttemptView): string 
     case "timeout":
       return `${label}抓取超时，稍后再试`;
     default:
-      if (attempt.errorCode === "library_writer_lost" && (attempt.imported ?? 0) > 0) return `${label}：已入账 ${attempt.imported} 条后失去资料库写入权（另一个 AutoCrew 服务在占用），之后不再写；确认只有一个服务在跑后重启 AutoCrew`;
-      if (attempt.errorCode === "library_writer_lost") return `${label}没抓：当前进程没有资料库写入权（另一个 AutoCrew 服务在占用），一行都没写`;
+      if (attempt.errorCode === "library_writer_lost" && (attempt.imported ?? 0) > 0) return `${label}：已入账 ${attempt.imported} 条后失去资料库写入权（另一个导演椅服务在占用），之后不再写；确认只有一个服务在跑后重启导演椅`;
+      if (attempt.errorCode === "library_writer_lost") return `${label}没抓：当前进程没有资料库写入权（另一个导演椅服务在占用），一行都没写`;
       if (attempt.errorCode === "library_unavailable") return `${label}没抓：资料库暂时连不上，一行都没写`;
       return `${label}抓取失败：${attempt.errorCode ?? "unknown"}`;
   }

@@ -10,6 +10,7 @@ import { contentFile } from "../../../storage/content-project.js";
  * 不匹配时**不回报实际哈希**：凭据必须来自 gate 记录，回报实际值等于教宿主抄一个过门。
  */
 import fs from "node:fs/promises";
+import { cloneFile } from "../../../storage/clone-file.js";
 import path from "node:path";
 import { contentDir } from "../../../storage/local-store.js";
 import { probeMedia } from "../ingest.js";
@@ -38,10 +39,11 @@ export interface ArtifactPaths {
 
 type Staged<T> = { ok: true; value: T } | { ok: false; result: HandoffResult };
 
-/** 写时复制优先（APFS 克隆），文件系统不支持时退回普通拷贝 */
+/** 写时复制优先（clone-file：macOS 走 cp -c），跨卷退回普通拷贝；暂存目标先清掉，保持「覆盖」语义 */
 async function cloneCopy(src: string, dest: string): Promise<void> {
   assertManagedPathAvailable(dest);
-  await fs.copyFile(src, dest, fs.constants.COPYFILE_FICLONE);
+  await fs.rm(dest, { force: true });
+  await cloneFile(src, dest);
 }
 
 async function stageFinal(src: string, dir: string | null, approval: RegisterApproval): Promise<Staged<StagedArtifacts["final"]>> {

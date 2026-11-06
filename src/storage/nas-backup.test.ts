@@ -11,6 +11,7 @@ import { syncMyContentView, VIEW_DIR, ERROR_FILE } from "./my-content-view.js";
 import { columnDir, folderTitle } from "./my-content-plan.js";
 import { archivePublished } from "./nas-archive.js";
 import { backupPublished, type BackupOptions } from "./nas-backup.js";
+import { ARCHIVE_ROOT_UNSET } from "./storage-roots.js";
 import { keptName, nasHash, sha256File } from "./nas-archive-copy.js";
 import { readBackupState } from "./nas-backup-state.js";
 import { HUMAN_WRITE } from "./first-body-guard.js";
@@ -220,6 +221,27 @@ describe("发布即备份 NAS", () => {
     expect(await read(path.join(nasDir(c), "符号链接清单.json"))).toBe("创始人自己的文件");
   });
 
+  it("refuses to back up and reports it visibly when no archive root is configured", async () => {
+    await published("甲", 1);
+    const r = await backup({ archiveRoot: undefined });
+    expect(r.backedUp).toEqual([]);
+    expect(r.errors).toEqual([ARCHIVE_ROOT_UNSET]);
+    expect(await fs.readFile(path.join(view, ERROR_FILE), "utf8")).toContain("未配置 NAS 归档目录");
+  });
+
+  it("refuses visibly when the archive month dir links back into the library", async () => {
+    const a = await published("甲", 1);
+    const at = new Date(a.publishedAt!);
+    const month = path.join(nas, String(at.getFullYear()), at.toLocaleString("en-US", { month: "long" }));
+    const projectRoot = resolveContentProject(a.id, data)!.project_root;
+    await fs.mkdir(path.dirname(month), { recursive: true });
+    await fs.symlink(path.dirname(projectRoot), month);
+    const r = await backup();
+    expect(r.backedUp).toEqual([]);
+    expect(r.errors.join("\n")).toContain("实际落在本机");
+    expect(await fs.readFile(path.join(view, ERROR_FILE), "utf8")).toContain("实际落在本机");
+  });
+
   it("marks items unmounted when the NAS is missing, without errors, and catches up once mounted", async () => {
     const a = await published("甲", 1);
     const b = await published("乙", 2);
@@ -288,8 +310,8 @@ describe("项目缓存 99-cache 不上 NAS", () => {
     expect((await readBackupState(root(c)))!.status).toBe("unmounted");
   });
 
-  it("archive does not carry 99-cache to the NAS and leaves it on the machine", async () => {
-    for (let i = 1; i <= 5; i++) await published(`新${i}`, i);
+  it("archive does not carry 99-cache to the NAS and clears it from the machine (founder 2026-10-25)", async () => {
+    for (let i = 1; i <= 5; i++) await published(`新${i}`, i * 0.15);
     const old = await published("旧稿", 8);
     await put(old, "99-cache/audio/tmp.wav", "cache");
     await backup();
@@ -297,14 +319,14 @@ describe("项目缓存 99-cache 不上 NAS", () => {
     expect(r.errors).toEqual([]);
     expect(r.archived.map((a) => a.title)).toEqual(["旧稿"]);
     expect(await exists(path.join(nasDir(old), "99-cache"))).toBe(false);
-    expect(await read(path.join(root(old), "99-cache/audio/tmp.wav"))).toBe("cache");
+    expect(await exists(path.join(root(old), "99-cache"))).toBe(false);
     expect(await fs.readdir(path.join(root(old), "02-aroll"))).toEqual([]);
   });
 });
 
-describe("7 天腾空间前核对 NAS", () => {
+describe("腾空间前核对 NAS", () => {
   async function oldBackedUp(): Promise<Content> {
-    for (let i = 1; i <= 5; i++) await published(`新${i}`, i);
+    for (let i = 1; i <= 5; i++) await published(`新${i}`, i * 0.15);
     const old = await published("旧稿", 8);
     await backup();
     return old;
@@ -336,7 +358,7 @@ describe("7 天腾空间前核对 NAS", () => {
   });
 
   it("never writes through an old NAS dir link back into local media, so archive cannot lose unique files (Codex repro)", async () => {
-    for (let i = 1; i <= 5; i++) await published(`新${i}`, i);
+    for (let i = 1; i <= 5; i++) await published(`新${i}`, i * 0.15);
     const old = await published("旧稿", 8);
     await fs.rm(path.join(root(old), "03-broll"), { recursive: true, force: true });
     await fs.symlink(path.join(root(old), "02-aroll"), path.join(root(old), "03-broll"));
@@ -468,7 +490,7 @@ describe("已发布文件夹补三样", () => {
 describe("seg11 历史归档记录按版本核对", () => {
   const later = (d: number) => new Date(NOW.getTime() + d * 86400_000);
   it("同一项目归档两次（封面换过版本）：核对按各自版本找留底，不报封面损坏", async () => {
-    for (let i = 1; i <= 5; i++) await published(`新${i}`, i);
+    for (let i = 1; i <= 5; i++) await published(`新${i}`, i * 0.15);
     const old = await published("旧稿", 8);
     await backup();
     await archivePublished(data, { now: NOW, archiveRoot: nas, freeSpace: async () => 1e12, marginBytes: 0 });

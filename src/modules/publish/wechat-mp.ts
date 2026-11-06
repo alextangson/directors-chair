@@ -13,6 +13,9 @@ export interface ImageGenOutcome {
   stderr: string;
   /** 实际出图的通道名 */
   provider?: string;
+  /** 实际出图通道的类型、它请求的模型（codex 报不出实际模型 → 没有） */
+  providerKind?: "relay" | "codex";
+  model?: string;
   /** 非空=走了备用通道,附主通道的失败原因 */
   degraded?: string;
 }
@@ -60,6 +63,12 @@ export interface WechatMpDraftOptions {
   digest?: string;
   /** 稿件页已审核/生成的正文配图，按 [IMAGE:] 出现顺序复用。 */
   preparedImages?: string[];
+  /** 显式标题（派生公众号文章 = 创始人选定的标题）；不给 = 脚本从正文首个标题取 */
+  title?: string;
+  /** 封面裁切（归一化 X1_Y1_X2_Y2）：一张封面裁出 2.35:1 / 1:1；不给 = 草稿不带裁切字段 */
+  coverCrops?: { crop235: string; crop11: string };
+  /** 任何一张正文图上传失败都中止（批过的包必须原样推） */
+  strictImages?: boolean;
 }
 
 export type WechatMpDraftResult = {
@@ -70,6 +79,8 @@ export type WechatMpDraftResult = {
   imageCount: number;
   generatedImages: string[];
   command?: string;
+  /** 草稿 media_id（脚本成功时打印的 AUTOCREW_DRAFT_MEDIA_ID 行） */
+  mediaId?: string;
   stdout?: string;
   stderr?: string;
   error?: string;
@@ -217,6 +228,10 @@ function extractPublishFailure(stdout: string, stderr: string): string {
   return picked ? `公众号推送失败：${picked}` : "公众号推送失败（脚本无输出）";
 }
 
+export function draftMediaId(stdout: string): string | undefined {
+  return /^AUTOCREW_DRAFT_MEDIA_ID=(\S+)\s*$/m.exec(stdout)?.[1];
+}
+
 async function runCommand(
   command: string,
   args: string[],
@@ -288,6 +303,8 @@ async function generateImage(
         stdout: `native relay(${result.provider}): ${outputPath}`,
         stderr: "",
         provider: result.provider,
+        providerKind: result.providerKind,
+        ...(result.model ? { model: result.model } : {}),
         // 降级要可见:备用通道顶上了不等于主通道没坏,写进事件让人知道该去修
         degraded: result.usedFallback
           ? `主生图通道不可用,已由「${result.provider}」出图——${result.skipped.map((s) => `${s.provider}: ${s.error.slice(0, 90)}`).join("；")}`
@@ -341,9 +358,15 @@ async function generateImage(
 export async function generateWechatImageAsset(
   prompt: string,
   outputPath: string,
-  options: { dataDir?: string; size?: string } = {},
+  options: { dataDir?: string; size?: string; codexOnly?: boolean } = {},
 ): Promise<ImageGenOutcome> {
   const cfg = await loadWechatMpConfig(options.dataDir);
+  if (options.codexOnly) {
+    // 派生公众号文章的配图只走 Codex（spec：Codex Image 2.5）；Codex 失败就是失败，不落到付费中转
+    const chain = resolveImageChain(cfg.imageChain).filter((p) => p.kind === "codex");
+    if (!chain.length) return { ok: false, stdout: "", stderr: "没有配 Codex 生图通道：公众号文章配图只走 Codex（Image 2.5），不走中转。请在「设置→发布」的生图通道里加上 codex" };
+    return generateImage(prompt, outputPath, { size: options.size || "16:9", imageGeneratorScript: "", chain });
+  }
   return generateImage(prompt, outputPath, {
     size: options.size || "16:9",
     imageGeneratorScript: resolveImageGeneratorScript(cfg.imageGeneratorScript),
@@ -478,10 +501,14 @@ export async function publishWechatMpDraft(
     coverPath,
     "--theme",
     options.theme || "newspaper",
+    // 没配署名就显式传空串：不让 vendor 脚本的默认作者名写进草稿（公众号 API 的 author 可为空）
     "--author",
-    options.author || "Lawrence",
+    options.author || "",
     "--yes",
     ...(options.digest ? ["--digest", options.digest] : []),
+    ...(options.title ? ["--title", options.title] : []),
+    ...(options.coverCrops ? ["--crop-235", options.coverCrops.crop235, "--crop-11", options.coverCrops.crop11] : []),
+    ...(options.strictImages ? ["--strict-images"] : []),
   ];
   const displayCommand = `uv run ${wechatPublishScript} ${scriptArgs.join(" ")}`;
 
@@ -553,6 +580,7 @@ export async function publishWechatMpDraft(
     stdout: publishResult.stdout,
     stderr: publishResult.stderr,
     command: displayCommand,
+    ...(draftMediaId(publishResult.stdout) ? { mediaId: draftMediaId(publishResult.stdout) } : {}),
     error: publishResult.code === 0
       ? undefined
       : extractPublishFailure(publishResult.stdout, publishResult.stderr),

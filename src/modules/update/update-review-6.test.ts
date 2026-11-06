@@ -28,13 +28,12 @@ describe("P2 省略 action 也按默认动作分类", () => {
       expect(isLongRunningTool(tool, undefined), tool).toBe(isLongRunningTool(tool, def));
       expect(isLongRunningTool(tool, ""), tool).toBe(isLongRunningTool(tool, def));
     }
-    expect(isLongRunningTool("autocrew_research", undefined)).toBe(true);
     expect(isLongRunningTool("autocrew_insights", undefined)).toBe(true);
   });
 
   it("更新中经 /mcp 省略 action 调调研 / 洞察：照样被拒", async () => {
     expect(acquireLock(tmp, "t")).toBe(true);
-    for (const name of ["autocrew_research", "autocrew_insights"]) {
+    for (const name of ["autocrew_insights"]) {
       const r = await handleMcpRequest({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: {} } } as never, undefined, path.join(tmp, "lib"));
       expect((r as { result: { structuredContent?: unknown } }).result.structuredContent, name).toMatchObject({ code: "updating", error: UPDATING_MESSAGE });
     }

@@ -8,7 +8,6 @@ These tools are automatically available when AutoCrew is installed.
 |------|-------------|
 | `autocrew_init` | Initialize `~/.autocrew/` data directory and creator profile. Safe to run multiple times. |
 | `autocrew_topic` | Create or list content topics. Actions: `create`, `list` |
-| `autocrew_research` | Topic discovery. Free: web_search + trend scoring. Pro: deep platform crawling. Actions: `discover`, `session_status` |
 | `autocrew_content` | Content draft CRUD + status transitions. Actions: `save`, `list`, `get`, `update`, `transition`, `list_siblings`, `create_variant` |
 | `autocrew_humanize` | Chinese de-AI pass. Actions: `humanize_zh` |
 | `autocrew_rewrite` | Platform-native rewrites. Actions: `adapt_platform` (single), `batch_adapt` (multi-platform + auto title/hashtag + siblings) |

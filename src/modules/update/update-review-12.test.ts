@@ -76,10 +76,8 @@ describe("P2 文件名只改了大小写", () => {
 });
 
 import { createVideoRunner } from "../video/runner.js";
-import { createResearchRunner } from "../research/research-runner.js";
-import { saveTopic } from "../../storage/local-store.js";
 
-describe("P2 剪辑与深调研在跑算忙", () => {
+describe("P2 剪辑在跑算忙", () => {
   it("剪辑 runner：投递后到跑完之前 busyCount > 0", async () => {
     const runner = createVideoRunner({ dataDir: tmp, deps: {}, launchId: "t", onError: () => {} });
     expect(runner.busyCount()).toBe(0);
@@ -90,27 +88,13 @@ describe("P2 剪辑与深调研在跑算忙", () => {
     await runner.shutdown();
   });
 
-  it("深调研 runner：跑的时候 busyCount = 1，跑完 0", async () => {
-    let release!: () => void;
-    const runner = createResearchRunner({ dataDir: tmp, onError: () => {},
-      runJob: async () => { await new Promise<void>((r) => { release = r; }); return { status: "succeeded", perspectives: [], briefRevision: 1 }; } });
-    const topic = await saveTopic({ title: "测试选题", description: "", tags: [] }, tmp);
-    expect((await runner.trigger(topic.id)).accepted).toBe(true);
-    while (!release) await new Promise((r) => setTimeout(r, 5));
-    expect(runner.busyCount()).toBe(1);
-    release();
-    await runner.idle();
-    expect(runner.busyCount()).toBe(0);
-    runner.stop();
-  });
 });
 
-describe("P2 服务把剪辑 / 深调研的在跑数交给更新判断", () => {
-  it("desktop/server.ts 的 inProcessTurns 计入两个 runner", () => {
+describe("P2 服务把剪辑的在跑数交给更新判断", () => {
+  it("desktop/server.ts 的 inProcessTurns 计入剪辑 runner", () => {
     const src = fs.readFileSync(path.resolve(__dirname, "..", "..", "..", "desktop", "server.ts"), "utf-8");
     const line = src.split("\n").find((l) => l.includes("inProcessTurns:")) ?? "";
     expect(line).toContain("videoService?.busyCount()");
-    expect(line).toContain("researchBusyCount()");
   });
 });
 
@@ -149,7 +133,7 @@ describe("P2 服务本来没开：也要起一次新版做健康检查", () => {
     const steps = realSteps(REPO, port, { serverWasRunning: false, busy: async () => null, machineDir: tmp, healthTimeoutMs: 10_000 });
     await steps.restart((l) => lines.push(l));
     await steps.health((l) => lines.push(l));
-    expect(lines.join("\n")).toContain("检查通过，AutoCrew 已经启动");
+    expect(lines.join("\n")).toContain("检查通过，导演椅已经启动");
     expect(steps.startedService?.()).toBe(true);
     expect(await answers(port)).toBe(true);
     spawnSync(process.execPath, [path.join(REPO, "bin", "autocrew.mjs"), "stop"], { env: { ...process.env, AUTOCREW_PORT: String(port) } });

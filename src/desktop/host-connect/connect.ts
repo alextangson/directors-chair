@@ -13,6 +13,7 @@ import { detectHost, findClaudeCli, HOST_LABEL, TOKEN_HOST, type ConnectHost } f
 import { cliFailure, codexListEntry, hostEntry, registerHost, unregisterHost } from "./register.js";
 import { findOnPath } from "./env.js";
 import { recordVerify } from "./verify-state.js";
+import { type SkillLinkReport, describeLinkReport, linkCodexSkills, unlinkCodexSkills } from "./codex-skills.js";
 
 export interface ConnectResult {
   ok: boolean;
@@ -28,6 +29,8 @@ export interface ConnectResult {
   code?: string;
   replaced?: boolean;
   backup?: string;
+  /** codex：技能链接结果 */
+  skills?: SkillLinkReport;
 }
 
 const USE_WINDOW_MS = 60_000; // 令牌「最后调用」节流到每分钟一次，所以「刚用过」放宽一分钟
@@ -67,7 +70,7 @@ async function verifyClaudeList(env: HostEnv): Promise<string | null> {
   const line = r.stdout.split("\n").find((l) => /^autocrew:/.test(l.trim()));
   if (!line) return "Claude 的 MCP 列表里没看到 autocrew";
   if (/✔|connected/i.test(line) && !/✗|failed/i.test(line)) return null;
-  return `Claude 说连不上 autocrew（${line.split(" - ").pop()?.trim() ?? line.trim()}）——多半是 AutoCrew 服务没在运行`;
+  return `Claude 说连不上 autocrew（${line.split(" - ").pop()?.trim() ?? line.trim()}）——多半是导演椅服务没在运行`;
 }
 
 async function verifyCodexList(env: HostEnv): Promise<string | null> {
@@ -83,13 +86,13 @@ async function verifyCodexList(env: HostEnv): Promise<string | null> {
 export async function verifyHost(host: ConnectHost, env: HostEnv, since: number): Promise<string | null> {
   const listProblem = host === "claude" ? await verifyClaudeList(env) : host === "codex" ? await verifyCodexList(env) : await handshake(host, env);
   if (listProblem) return listProblem;
-  if (!tokenUsedSince(host, since, env)) return "配置写好了，但 AutoCrew 没收到它的调用：确认 AutoCrew 服务在运行，再点一次";
+  if (!tokenUsedSince(host, since, env)) return "配置写好了，但导演椅没收到它的调用：确认导演椅服务在运行，再点一次";
   return null;
 }
 
 function connectedMessage(host: ConnectHost, method: string, verified: boolean, reason?: string): string {
   const label = HOST_LABEL[host];
-  const head = verified ? `已接上 ${label}，核对过能连上` : `已把 AutoCrew 写进 ${label} 的配置，但还没核对上：${reason}`;
+  const head = verified ? `已接上 ${label}，核对过能连上` : `已把导演椅写进 ${label} 的配置，但还没核对上：${reason}`;
   const tail = host === "claude"
     ? method === "claude-file"
       ? "。没找到 claude 命令，直接改了 ~/.claude.json：新开一个会话生效；如果新会话里看不到 autocrew，关掉 Claude 再点一次（它开着时可能把这次改动盖掉）"
@@ -111,6 +114,7 @@ export async function connectHost(host: ConnectHost, env: HostEnv): Promise<Conn
   }
   const reg = await registerHost(host, env);
   if (!reg.ok) return { ok: false, host, registered: false, verified: false, code: reg.code, error: reg.error, message: reg.error };
+  const skills = host === "codex" ? linkCodexSkills(env.codexHome, env.skillsRoot) : null;
   const reason = await verifyHost(host, env, started);
   try {
     recordVerify(host, { verified: reason === null, ...(reason ? { reason } : {}), at: new Date().toISOString() }, env.dataDir);
@@ -121,14 +125,21 @@ export async function connectHost(host: ConnectHost, env: HostEnv): Promise<Conn
   const replacedNote = reg.replaced ? `已替换原来的 autocrew 配置（备份在 ${reg.backup}）。` : "";
   return {
     ok: true, host, registered: true, verified: reason === null,
-    message: `${replacedNote}${connectedMessage(host, reg.method, reason === null, reason ?? undefined)}`,
+    message: `${replacedNote}${skills ? describeLinkReport(skills) : ""}${connectedMessage(host, reg.method, reason === null, reason ?? undefined)}`,
     ...(reason ? { error: reason, code: "not_verified" } : {}),
     replaced: reg.replaced, ...(reg.backup ? { backup: reg.backup } : {}),
+    ...(skills ? { skills } : {}),
   };
 }
 
 export async function disconnectHost(host: ConnectHost, env: HostEnv): Promise<ConnectResult> {
   const un = await unregisterHost(host, env);
+  let unlinked: string[] = [];
+  let unlinkError = "";
+  if (host === "codex") {
+    try { unlinked = unlinkCodexSkills(env.codexHome, env.skillsRoot); } catch (err) { unlinkError = err instanceof Error ? err.message : String(err); }
+  }
+  const skillsNote = unlinkError ? `没能删掉 Codex 技能链接：${unlinkError}；` : unlinked.length ? `已删掉 Codex 技能链接：${unlinked.join("、")}；` : "";
   // 删条目失败也照样撤令牌：撤了它就连不上（O9），配置里剩下的条目只会报「令牌被拒」
   const revoked = revokeHostToken(TOKEN_HOST[host], env.dataDir);
   try { recordVerify(host, null, env.dataDir); } catch { /* 令牌已撤、条目已删：残留的核对记录只会让它显示「没接上」，不影响安全 */ }
@@ -138,5 +149,5 @@ export async function disconnectHost(host: ConnectHost, env: HostEnv): Promise<C
     return { ok: false, host, registered: true, verified: false, code: "remove_failed", error, message: error };
   }
   const removed = un.removed ? `已从 ${label} 的配置里删掉 autocrew${un.backup ? `（备份在 ${un.backup}）` : ""}` : `${label} 的配置里本来就没有 autocrew`;
-  return { ok: true, host, registered: false, verified: false, message: `${removed}；${revoked ? "令牌已撤销，它再调用会被拒绝" : "它本来就没有令牌"}。`, ...(un.backup ? { backup: un.backup } : {}) };
+  return { ok: true, host, registered: false, verified: false, message: `${removed}；${skillsNote}${revoked ? "令牌已撤销，它再调用会被拒绝" : "它本来就没有令牌"}。`, ...(un.backup ? { backup: un.backup } : {}) };
 }

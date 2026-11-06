@@ -5,6 +5,7 @@
  * and style calibration. It's initialized during onboarding (from host MEMORY or
  * by asking the user) and continuously enriched by the Learnings system.
  */
+import { normalizeProfilePlatforms } from "./platform-lines.js";
 import { writeJsonAtomicMkdir } from "../../storage/json-atomic.js";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -273,17 +274,41 @@ export async function profileExists(dataDir?: string): Promise<boolean> {
  * 读侧给存量规则补稳定 id 与 revision（只在内存里；下一次写入才落盘），不改它们的生效状态。
  */
 export async function loadProfile(dataDir?: string): Promise<CreatorProfile | null> {
-  const filePath = path.join(getDataDir(dataDir), PROFILE_FILE);
   try {
-    const raw = await fs.readFile(filePath, "utf-8");
+    return await readProfileFile(dataDir);
+  } catch {
+    return null;
+  }
+}
+
+/** 档案读不出来（不是「还没有」）：写路径据此停写，绝不拿空档案覆盖它 */
+export class ProfileUnreadableError extends Error {
+  constructor(filePath: string, cause: unknown) {
+    super(`创作者档案读不出来（${filePath}）：${cause instanceof Error ? cause.message : String(cause)}。修好或挪走这个文件再试；没有覆盖它`);
+    this.name = "ProfileUnreadableError";
+  }
+}
+
+/** 文件不存在 → null；读错、JSON 坏、形状不对 → 抛 ProfileUnreadableError */
+async function readProfileFile(dataDir?: string): Promise<CreatorProfile | null> {
+  const filePath = path.join(getDataDir(dataDir), PROFILE_FILE);
+  let raw: string;
+  try { raw = await fs.readFile(filePath, "utf-8"); }
+  catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new ProfileUnreadableError(filePath, e);
+  }
+  try {
     const profile = JSON.parse(raw) as CreatorProfile;
+    if (!profile || typeof profile !== "object" || Array.isArray(profile)) throw new Error("顶层不是对象");
     // 读侧归一(V5.1):历史扁平画像/老 muse 遗产形状 → 三层结构;坏形状置 null 而非带病传播
     profile.audiencePersona = normalizeAudiencePersona(profile.audiencePersona);
     profile.writingRules = normalizeRules(profile.writingRules ?? []);
     profile.revision ??= 0; // 读出来的档案总带 revision，整份保存时据此做 CAS
+    profile.platforms = normalizeProfilePlatforms(profile.platforms); // 去重、字符串化数组（platform-lines）
     return profile;
-  } catch {
-    return null;
+  } catch (e) {
+    throw new ProfileUnreadableError(filePath, e);
   }
 }
 
@@ -302,6 +327,9 @@ function serializeProfile<T>(dataDir: string | undefined, fn: () => Promise<T>):
 }
 
 async function writeProfile(profile: CreatorProfile, dataDir?: string): Promise<void> {
+  // 勾选一变，先把还没落盘的主题去向计划按改之前的勾选落盘：之后改勾选不回头改老主题（管线重规划 §8-4）
+  const { freezeIfPlatformsChange } = await import("../theme/freeze.js");
+  await freezeIfPlatformsChange(getDataDir(dataDir), await readProfileFile(dataDir), profile);
   profile.revision = (profile.revision ?? 0) + 1;
   profile.updatedAt = new Date().toISOString();
   await writeJsonAtomicMkdir(path.join(getDataDir(dataDir), PROFILE_FILE), profile);
@@ -312,7 +340,7 @@ async function writeProfile(profile: CreatorProfile, dataDir?: string): Promise<
  * 读出来的档案一定带 revision；不带 revision 的是调用方从零构造的整份档案（初始化、测试夹具），按覆盖处理。
  */
 async function casWrite(profile: CreatorProfile, dataDir?: string): Promise<void> {
-  const current = await loadProfile(dataDir);
+  const current = await readProfileFile(dataDir);
   if (current && profile.revision !== undefined && (current.revision ?? 0) !== profile.revision) {
     throw new Error("档案已被其他操作更新（profile_revision_conflict），请重新读取后再保存");
   }
@@ -333,7 +361,8 @@ export async function mutateProfile<T = void>(
   dataDir?: string,
 ): Promise<{ profile: CreatorProfile; result: T }> {
   return serializeProfile(dataDir, async () => {
-    const profile = (await loadProfile(dataDir)) ?? emptyProfile();
+    // 读坏了就抛错停写：「读坏当空、再整份写回」会清空整份档案（2026-10-30 审查实测）
+    const profile = (await readProfileFile(dataDir)) ?? emptyProfile();
     const result = fn(profile);
     await writeProfile(profile, dataDir);
     return { profile, result };
@@ -346,7 +375,7 @@ export async function mutateProfile<T = void>(
  */
 export async function initProfile(dataDir?: string): Promise<CreatorProfile> {
   return serializeProfile(dataDir, async () => {
-    const existing = await loadProfile(dataDir);
+    const existing = await readProfileFile(dataDir);
     if (existing) return existing;
     const profile = emptyProfile();
     await writeProfile(profile, dataDir);

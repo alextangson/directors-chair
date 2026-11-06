@@ -5,11 +5,15 @@
  */
 import type http from "node:http";
 import { boardData } from "./board-data.js";
+import { pipelineData, themeIndex } from "../modules/theme/pipeline-data.js";
+import { reshoot, setDestination } from "../modules/theme/actions.js";
+import { listContents } from "../storage/local-store.js";
 import { dataPage } from "./data-page.js";
 import { createCoverHandler } from "./data-cover-route.js";
 import { addDecision, removeDecision, type LinkOp } from "../modules/flywheel/outcome-links.js";
 import { markPublished, startWriting, unmarkPublished } from "./board-actions.js";
-import { handOff, type HandOffDeps } from "./writing-handoff.js";
+import { handOff, handOffResearch, type HandOffDeps } from "./writing-handoff.js";
+import { askAI } from "./home-ask.js";
 import { reopenScript } from "../modules/production/reopen.js";
 import { enableOntology } from "../modules/production/enable.js";
 import { decide, decideItem, type DecideDeps } from "../modules/production/inbox-decide.js";
@@ -18,6 +22,7 @@ import { ATTACHMENT_HEADERS, openAttachment, openFactMedia, type AttachmentOpen 
 import { createReadStream } from "node:fs";
 import { parseRangeHeader } from "./video-media.js";
 import { cardPanel } from "../modules/production/panel.js";
+import { derivedReview } from "../modules/production/derived-review-view.js";
 import { publishDesk } from "../modules/production/publish-desk.js";
 import { openStoryboard, type OpenDeps as StoryboardOpenDeps } from "../modules/production/storyboard.js";
 import { pullDeps } from "../modules/video/handoff/pull-deps.js";
@@ -85,6 +90,32 @@ export function createBoardHandler(deps: BoardRouteDeps) {
       catch (e) { send(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }); }
       return true;
     }
+    // 内容管线（管线重规划 §8）：一个主题一张卡，去向从各自回执推；只读
+    if (p === "/api/pipeline" && req.method === "GET") {
+      if (deps.authorize(req) !== "session") { res.writeHead(403).end(); return true; }
+      try { send(res, 200, { ok: true, data: await pipelineData(await deps.resolveDataDir()) }); }
+      catch (e) { send(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }); }
+      return true;
+    }
+    // 这条不出 XX / 恢复要发：原话必带，只改这个主题的去向计划
+    if (p === "/api/pipeline/destination" && req.method === "POST") {
+      await post(req, res, (b, dir) => {
+        const id = String(b.content_id ?? "");
+        if (!isContentId(id)) return Promise.resolve({ ok: false, code: "bad_request", error: "content_id 不对" });
+        return setDestination(id, b.platform, b.skip !== false, b.founder_words, { via: "board" }, dir);
+      });
+      return true;
+    }
+    // 重拍：结束本轮、沿用原稿回「录制」；已定时的列出来要你去撤，不自动撤
+    if (p === "/api/pipeline/reshoot" && req.method === "POST") {
+      await post(req, res, async (b, dir) => {
+        const id = String(b.content_id ?? "");
+        if (!isContentId(id)) return { ok: false, code: "bad_request", error: "content_id 不对" };
+        if (b.confirm !== true) return { ok: false, code: "confirmation_required", error: "重拍会把本轮的原片、成片、批准转入历史，需要确认" };
+        return reshoot(id, b.founder_words, b.round, { via: "board" }, dir);
+      });
+      return true;
+    }
     // 卡片面板（本体 §10）：阶段、还差什么、候选、待核回执、我发了、核对清单
     if (p === "/api/board/card" && req.method === "GET") {
       if (deps.authorize(req) !== "session") { res.writeHead(403).end(); return true; }
@@ -106,7 +137,14 @@ export function createBoardHandler(deps: BoardRouteDeps) {
     // 等你拍板（review-inbox §3）：列表只读推导；决定只有一个入口（带 item_id + gen，锁内 CAS）
     if (p === "/api/inbox" && req.method === "GET") {
       if (deps.authorize(req) !== "session") { res.writeHead(403).end(); return true; }
-      try { send(res, 200, await readInbox(await deps.resolveDataDir())); }
+      try {
+        const dir = await deps.resolveDataDir();
+        // 「要你做的」按主题分组显示：只加主题标注，每件仍是原来的身份和生命周期
+        // 默认隐藏认稿，避免和管线卡重复；显式认稿入口才包含 draft。
+        const [view, contents] = await Promise.all([readInbox(dir, { withDrafts: url.searchParams.get("with_drafts") === "1" }), listContents(dir)]);
+        const themes = themeIndex(contents);
+        send(res, 200, { ...view, items: view.items.map((i) => { const t = i.content_id ? themes.get(i.content_id) : undefined; return t ? { ...i, theme_id: t.id, theme_title: t.title } : i; }) });
+      }
       catch (e) { send(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }); }
       return true;
     }
@@ -116,6 +154,15 @@ export function createBoardHandler(deps: BoardRouteDeps) {
         if (params.content_id !== undefined && !isContentId(String(params.content_id))) return { ok: false, code: "bad_request", error: "content_id 不对" };
         return decideItem(params, dir, deps.inbox);
       });
+      return true;
+    }
+    // 派生稿（英文版 / 公众号文章）认稿那件：面板里直接显示中英对照 / 正文，不用另开审阅页；只读
+    if (p === "/api/inbox/derived" && req.method === "GET") {
+      if (deps.authorize(req) !== "session") { res.writeHead(403).end(); return true; }
+      const id = url.searchParams.get("content_id") ?? "";
+      if (!isContentId(id)) { send(res, 400, { ok: false, code: "bad_request", error: "content_id 不对" }); return true; }
+      try { send(res, 200, await derivedReview(id, await deps.resolveDataDir())); }
+      catch (e) { send(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) }); }
       return true;
     }
     // 请示附件（§5.4）：只读、sandbox + nosniff、只认绑定时的 sha；HTML 不从这里给
@@ -163,7 +210,17 @@ export function createBoardHandler(deps: BoardRouteDeps) {
     }
     // 已有稿件「交给 X 写 / 看」（spec 2026-10-15 §B4、§B5 重新交给）：服务端拼指令和链接，浏览器只说交给谁
     if (p === "/api/board/hand-off" && req.method === "POST") {
-      await post(req, res, (b, dir) => handOff(String(b.content_id ?? ""), { host: typeof b.host === "string" ? b.host : null, mode: b.mode === "look" ? "look" : "write" }, dir, deps.open));
+      await post(req, res, (b, dir) => {
+        const host = typeof b.host === "string" ? b.host : null;
+        // research 对的是选题（topic_id）：交给宿主开选题会
+        if (b.mode === "research") return handOffResearch(String(b.topic_id ?? ""), host, dir, deps.open);
+        return handOff(String(b.content_id ?? ""), { host, mode: b.mode === "look" ? "look" : "write" }, dir, deps.open);
+      });
+      return true;
+    }
+    // 首页「让 AI 看看」（管线重规划 §8-11）：服务端拼分析指令，走同一个 deliver()
+    if (p === "/api/home/ask-ai" && req.method === "POST") {
+      await post(req, res, (b, dir) => askAI({ kind: String(b.kind ?? ""), content_id: b.content_id, host: typeof b.host === "string" ? b.host : null }, dir, deps.open));
       return true;
     }
     // 本体（spec 2026-09-29）：两个创始人决定只走浏览器会话——重开文稿（§2.5）与启用本体（§4.1）
@@ -238,7 +295,7 @@ export function createBoardHandler(deps: BoardRouteDeps) {
     if (p === "/api/board/mark-published" && req.method === "POST") {
       await post(req, res, (b, dir) => b.undo === true
         ? unmarkPublished(String(b.content_id ?? ""), String(b.platform ?? ""), dir)
-        : markPublished(String(b.content_id ?? ""), String(b.platform ?? ""), b.url, dir));
+        : markPublished(String(b.content_id ?? ""), String(b.platform ?? ""), b.url, dir, b.round));
       return true;
     }
     return false;

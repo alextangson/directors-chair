@@ -174,7 +174,7 @@ describe("没跑成：拦、写原因、整条放行（§8、E1–E5、E14、E17
     await writeProject([gapTimeline(5)], { schema: v });
     expect(await reasonOf((await setup()).c.id)).toMatchObject({ status: "unchecked", reason: expect.stringContaining(`格式版本（${v}）不认识`) });
   });
-  it.each([9, 11])("E3 核过的格式版本 %i → 照常查", async (v) => {
+  it.each([9, 11, 14, 23, 25])("E3 核过的格式版本 %i → 照常查", async (v) => {
     await writeProject([gapTimeline(5)], { schema: v });
     expect((await checks((await setup()).c.id)).at(-1)).toMatchObject({ status: "slivers" });
   });
@@ -236,7 +236,9 @@ describe("Codex 审 sliver 回归", () => {
     const sha = (await readProductionDoc(c.id, env.dir))!.facts.find((f) => f.id === cand.fact_id)!.sha256!;
     expect(await decide(c.id, "confirm_candidate", { fact_id: cand.fact_id, sha256: sha })).toMatchObject({ ok: true });
     const fact = (await readProductionDoc(c.id, env.dir))!.facts.find((f) => f.id === cand.fact_id)!;
-    expect(fact.export_mtime_ms).toBeLessThan(fact.mtime_ms!);
+    // 落位用真克隆（cp -c）会保留源文件的修改时间，所以两者可以相等；要点是导出时间被单独记下了
+    expect(fact.export_mtime_ms).toBeDefined();
+    expect(fact.export_mtime_ms).toBeLessThanOrEqual(fact.mtime_ms!);
     expect(await decide(c.id, "approve_cut", { fact_id: cand.fact_id, sha256: sha })).toMatchObject({ ok: false, code: "sliver_blocked", error: expect.stringContaining("导出后时间线又保存过") });
   });
 
@@ -247,6 +249,43 @@ describe("Codex 审 sliver 回归", () => {
     expect(ar.source_path).toBe(path.join(env.inbox, RAW_NAME));
     expect(ar.path).not.toContain(env.inbox);
     expect((await checks(s.c.id)).at(-1)).toMatchObject({ status: "slivers" });
+  });
+
+  it("[2026-10-31] ChatCut 引用的是另一个路径下字节相同的原片：用那个路径再报一次 aroll，补成又一个原始路径后认得出", async () => {
+    const original = path.join(env.outside, "素材盘", RAW_NAME);
+    await writeProject([gapTimeline(5)], { assets: { ...ASSETS, A: { ...ASSETS.A, path: original } } });
+    const s = await setup();
+    expect((await checks(s.c.id)).at(-1)).toMatchObject({ status: "unchecked" });
+    const again = await record(env, { content_id: s.c.id, kind: "aroll", path: await put(original, "raw"), request_id: "a2" });
+    expect(again).toMatchObject({ ok: true });
+    const ar = (await readProductionDoc(s.c.id, env.dir))!.facts.filter((f) => f.kind === "aroll");
+    expect(ar).toHaveLength(1);
+    expect(ar[0].source_paths).toEqual([original]);
+    await runSliverCheck(s.c.id, env.dir);
+    expect((await checks(s.c.id)).at(-1)).toMatchObject({ status: "slivers" });
+  });
+
+  it("[Codex 审] 后补路径上的文件被换成别的字节：不再当原片认", async () => {
+    const original = path.join(env.outside, "素材盘", RAW_NAME);
+    await writeProject([gapTimeline(5)], { assets: { ...ASSETS, A: { ...ASSETS.A, path: original } } });
+    const s = await setup();
+    await record(env, { content_id: s.c.id, kind: "aroll", path: await put(original, "raw"), request_id: "a2" });
+    await runSliverCheck(s.c.id, env.dir);
+    const good = (await checks(s.c.id)).at(-1)!;
+    expect(good).toMatchObject({ status: "slivers" });
+    await fs.writeFile(original, "another video");
+    await runSliverCheck(s.c.id, env.dir);
+    expect((await checks(s.c.id)).at(-1)).toMatchObject({ status: "unchecked" });
+  });
+
+  it("[2026-10-31] 同一路径重复报：不重复补", async () => {
+    await writeProject([gapTimeline(5)]);
+    const s = await setup();
+    const before = (await readProductionDoc(s.c.id, env.dir))!.facts.find((f) => f.kind === "aroll")!;
+    const inProject = path.join(projectRoot(env, s.c.id), before.path!);
+    expect(await record(env, { content_id: s.c.id, kind: "aroll", path: inProject, request_id: "a3" })).toMatchObject({ ok: true });
+    const ar = (await readProductionDoc(s.c.id, env.dir))!.facts.find((f) => f.kind === "aroll")!;
+    expect(ar.source_paths ?? []).toEqual([]);
   });
 
   it("[P2 chatcut-read.ts:137] 素材探针临时失败：不缓存，下次重用快照时再探，恢复后出结论", async () => {

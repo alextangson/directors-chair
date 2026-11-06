@@ -4,6 +4,11 @@ import { createPlaybookHandler } from "../src/desktop/playbook-route.js";
 import { acquireWriterLock, releaseWriterLock } from "../src/storage/writer-lock.js";
 import { createProjectReviewHandler } from "../src/desktop/project-review-route.js";
 import { createBoardHandler } from "../src/desktop/board-route.js";
+import { createDerivativeDispatchHandler } from "../src/desktop/derivative-dispatch-route.js";
+import { startDerivativeDispatchCycle } from "../src/desktop/derivative-dispatch-cycle.js";
+import { dispatchStatus, prepareDispatch, inspectDispatchThread, resumeDispatchThread, derivativeActiveCount } from "../src/modules/derivative-dispatch/service.js";
+import { readPolicy as readDerivativePolicy, writePolicy as writeDerivativePolicy } from "../src/modules/derivative-dispatch/store.js";
+import { notifyDerivativePolicyChange } from "../src/modules/derivative-dispatch/events.js";
 import { createUpdateHandler } from "../src/desktop/update-route.js";
 import { admitMutation } from "../src/desktop/http-busy-guard.js";
 import { detectInterrupted, protectedStamps } from "../src/modules/update/interrupted.js";
@@ -40,7 +45,7 @@ import { fileURLToPath } from "node:url";
 import { IPC_CHANNELS, chToMethod } from "../src/desktop/channels.js";
 import { getDataDir } from "../src/storage/local-store.js";
 import { buildIpcHandlers, type IpcHandlerContext } from "../src/desktop/ipc.js";
-import { sanitizePayload } from "../src/desktop/ipc-guard.js";
+import { sanitizePayload, stampCaller } from "../src/desktop/ipc-guard.js";
 import { validatePayload } from "../src/desktop/channel-contracts.js";
 import { activeWorkspaceDataDir } from "../src/desktop/workspace-store.js";
 import { resolveServerToken, resolveSessionSecret } from "../src/desktop/server-token.js";
@@ -63,7 +68,7 @@ import { expireStaleTopics } from "../src/desktop/topic-expiry.js";
 import { startInboxRuntime } from "../src/desktop/inbox-runtime.js";
 import { startDigestScheduler, stopDigestScheduler } from "../src/desktop/digest-scheduler.js";
 import { getInboxSettingsRaw } from "../src/desktop/settings-inbox.js";
-import { researchBusyCount, startResearchRuntime } from "../src/desktop/research-runtime.js";
+import { failRetiredEngineJobs } from "../src/modules/research/research-job-store.js";
 import { serveResearchAsset } from "../src/desktop/research-asset-route.js";
 import { serveCoverIdentityAsset } from "../src/desktop/cover-identity-asset-route.js";
 import { setVideoService } from "../src/desktop/video-handlers.js";
@@ -197,6 +202,12 @@ const ruleApproval = createRuleApprovalHandler({ authorize, originAllowed: req =
 const publishPrefs = createPublishPrefsHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody });
 const playbooks = createPlaybookHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody });
 const board = createBoardHandler({ authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody });
+const derivativeDispatch = createDerivativeDispatchHandler({
+  authorize, originAllowed: req => AUTH.originAllowed(req.headers.origin), resolveDataDir: activeDataDir, readBody,
+  readPolicy: readDerivativePolicy,
+  writePolicy: async (input, dir) => { const policy = await writeDerivativePolicy(input, dir); notifyDerivativePolicyChange(dir); return policy; },
+  dispatchStatus, prepareDispatch, inspectDispatchThread, resumeDispatchThread,
+});
 // 上次更新被硬生生打断（进程被杀 / 机器重启）：启动时认出来，写一份「上次更新中断」结果给页面（第 12 轮 P1）
 try {
   // 新起的服务、安装一致：上次虽然断了，现在能用，清掉记录不报（e2e 1002 P2-B）
@@ -224,7 +235,7 @@ const updateRoute = createUpdateHandler({
   runningVersion: RUNNING_VERSION, processStartedAt: PROCESS_STARTED_AT,
   // 对话轮 + 后台写稿 / 生图 / 推送等长任务（self-update，Codex 审第 2 轮 P1）
   // 剪辑与深调研的 runner 在跑也算（第 12 轮 P2：重启后它们要等 10 / 30 分钟才会被捡回，不能被重启打断）
-  inProcessTurns: () => activeTurnCount() + activeWorkCount() + (videoService?.busyCount() ?? 0) + researchBusyCount() + asrWarmupCount(),
+  inProcessTurns: () => activeTurnCount() + activeWorkCount() + (videoService?.busyCount() ?? 0) + asrWarmupCount() + derivativeActiveCount(),
   // 启动器记的是 tsx 的 pid，跑本文件的是 tsx 拉起的另一个 node：比启动器发给这一次启动的标记，不比 pid
   launcher: async () => ({ running: true, managed: launchedByLauncher(getMachineDir()), via: launchVia() }),
 });
@@ -436,6 +447,7 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
 
   if (await projectReview(req, res, url)) return;
   if (await board(req, res, url)) return;
+  if (await derivativeDispatch(req, res, url)) return;
   if (await updateRoute(req, res, url)) return;
   if (await connectRoute(req, res, url)) return;
   if (await libraryRoute(req, res, url)) return;
@@ -456,7 +468,8 @@ const handleRequest = async (req: http.IncomingMessage, res: http.ServerResponse
     try { parsed = JSON.parse(await readBody(req)); } catch { res.writeHead(400).end(JSON.stringify({ ok: false, error: "bad json" })); return; }
     const channel = parsed.channel;
     if (!channel || !CHANNELS.has(channel)) { res.writeHead(404).end(JSON.stringify({ ok: false, error: `unknown channel: ${channel}` })); return; }
-    const clean = sanitizePayload(parsed.payload ?? {}) as Record<string, unknown>;
+    // 令牌 ≠ 创始人：bearer 一律按模型调用算（见 stampCaller）
+    const clean = stampCaller(sanitizePayload(parsed.payload ?? {}) as Record<string, unknown>, authMethod);
     // 契约校验（channel-contracts 是通道形状的单一事实源）:必填缺失在边界拒,不进 handler
     const contractError = validatePayload(channel, clean);
     if (contractError) { res.writeHead(200, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: false, error: contractError })); return; }
@@ -511,6 +524,7 @@ server.requestTimeout = 0;
 server.timeout = 0;
 let stopCampaignHost: (() => void) | undefined;
 let stopMetricsPull: (() => void) | undefined;
+let stopDerivativeDispatch: (() => void) | undefined;
 let radarTimer: NodeJS.Timeout | undefined;
 let myContentTimer: NodeJS.Timeout | undefined;
 let archiveStartTimer: NodeJS.Timeout | undefined;
@@ -521,6 +535,7 @@ let digestBoundDir: string | null = null;
 server.on("close", () => {
   stopCampaignHost?.();
   stopMetricsPull?.();
+  stopDerivativeDispatch?.();
   stopDigestScheduler();
   if (radarTimer) clearInterval(radarTimer);
   if (myContentTimer) clearInterval(myContentTimer);
@@ -634,16 +649,12 @@ void (async () => {
   console.log(`  [digest] 每日选题摘要:${configured ? "已接线(到点自动发)" : "未配 bot,不发"}`);
 })().catch((err) => console.error("[digest] 摘要调度启动失败:", err instanceof Error ? err.message : err));
 
-// 深调研(deep-research spec §2):串行 runner 是进程内单例,启动回收中断的 job 并重排。
-// onResearchEvent 同时接 job 级落定与视角级进度 → SSE `research` 流,选题卡据此刷新。
-// onChatFollowupEvent → SSE `chat_followup`:简报落盘后总编辑回派活那段会话报了一轮,
-// 右栏据此重载（正看着那段）或提示（在别处）——不然回报落在盘上没人看见,等于没回。
-void startResearchRuntime({
-  onResearchEvent: (e) => broadcast("research", e),
-  onChatFollowupEvent: (e) => broadcast("chat_followup", { conversationId: e.conversationId, topicId: e.topicId }),
-})
-  .then((s) => console.log(`  [research] 深调研 runner:${s.state}${s.reclaimed ? ` —— 回收 ${s.reclaimed} 条中断任务` : ""}`))
-  .catch((err) => console.error("[research] 深调研启动失败:", err instanceof Error ? err.message : err));
+// 引擎调研已下线(2026-10-28):升级前排着/跑着的引擎调研任务再没人跑完,启动时一次落失败并写明原因
+// (research:status 读到漏网的也会当场落)。失败只打日志,不阻断启动。
+void activeDataDir()
+  .then((dir) => failRetiredEngineJobs(dir))
+  .then((n) => { if (n > 0) console.log(`  [research] ${n} 条旧引擎调研任务已标失败(引擎调研已下线)`); })
+  .catch((err) => console.error("[research] 旧引擎调研任务收尾失败:", err instanceof Error ? err.message : err));
 // 视频生产线(spec §8.3 SSE 四件套之一):状态每次落盘 → broadcast `video:updated`,
 // 订阅方收到后重拉 video:status。启动回收(心跳过期的 running 重排)在 service 内部,
 // 这里只管建与停。服务跟随**启动时**的工作区——切工作区后要重启(handler 会照实拒绝)。
@@ -681,7 +692,7 @@ try {
 async function rebindToActiveLibrary(): Promise<string[]> {
   const later: string[] = [];
   initEngineHealth(await activeDataDir());
-  if (videoService && videoService.busyCount() > 0) later.push("正在剪的视频跑完、重启 AutoCrew 后，剪辑才用新资料库");
+  if (videoService && videoService.busyCount() > 0) later.push("正在剪的视频跑完、重启导演椅后，剪辑才用新资料库");
   else {
     const old = videoService;
     videoService = null;
@@ -689,7 +700,7 @@ async function rebindToActiveLibrary(): Promise<string[]> {
     await old?.shutdown();
     await startVideoService();
   }
-  if (digestBoundDir) later.push("每日摘要重启 AutoCrew 后才用新资料库");
+  if (digestBoundDir) later.push("每日摘要重启导演椅后才用新资料库");
   return later;
 }
 
@@ -697,10 +708,10 @@ server.listen(PORT, HOST, () => {
   // 单写者检查（spec 2026-09-28 §3 D）：同一资料目录两个进程同时写会互相覆盖档案与审批
   void activeDataDir().then(async (dir) => {
     const lock = await acquireWriterLock(dir);
-    if (!lock.ok) console.error(`\n  [警告] 资料目录 ${dir} 已被另一个 AutoCrew 进程（pid ${lock.holder.pid}，${lock.holder.startedAt} 启动）占用写入。两个进程同时写会互相覆盖，请先停掉另一个。\n`);
+    if (!lock.ok) console.error(`\n  [警告] 资料目录 ${dir} 已被另一个导演椅进程（pid ${lock.holder.pid}，${lock.holder.startedAt} 启动）占用写入。两个进程同时写会互相覆盖，请先停掉另一个。\n`);
     else process.once("exit", () => releaseWriterLock(dir));
   }).catch((err) => console.error("[writer-lock] 单写者检查失败:", err instanceof Error ? err.message : err));
-  console.log("\n  AutoCrew 编辑部已启动 —— 在浏览器打开:\n");
+  console.log("\n  导演椅编辑部已启动 —— 在浏览器打开:\n");
   console.log(`  \x1b[1mhttp://${HOST}:${PORT}/?token=${BROWSER_BOOT_TOKEN}\x1b[0m\n`);
   console.log("  (链接中的启动 token 仅本进程首次打开有效；认证后会从地址栏移除)\n");
 
@@ -717,6 +728,7 @@ server.listen(PORT, HOST, () => {
       ).catch(() => {});
     },
   });
+  stopDerivativeDispatch = startDerivativeDispatchCycle({ resolveDataDir: activeDataDir });
 
   // 选题雷达:启动跑一轮 + 每 30 分钟一轮(进程内调度,详见 radar-cycle.ts)。
   // 一轮 = TTL 门刷新 → 真刷新了才入库与清理;缓存新鲜就整轮跳过,不烧付费源也不重评。
@@ -735,7 +747,7 @@ server.listen(PORT, HOST, () => {
   myContentTimer = startSweepLoop();
 
   // NAS 备份 + 归档(storage-layout.md「NAS 归档」;docs/specs/2026-09-29-nas-backup-on-publish.md):
-  // 启动 2 分钟后一轮,之后每 24 小时一轮。每轮先把到点的已发布稿增量备份到 NAS,再做 7 天腾空间。
+  // 启动 2 分钟后一轮,之后每 24 小时一轮。每轮先把到点的已发布稿增量备份到 NAS,再把发布满 24 小时、不在做了的搬去 NAS 腾空间。
   // 单飞;和「我的内容」对账共用进程内互斥,不同时碰同一个项目;出错只记日志,不让守护进程退出。
   let archiveRunning = false;
   const tickArchive = () => {
@@ -750,6 +762,7 @@ server.listen(PORT, HOST, () => {
       .then((r) => {
         if (!r) return;
         if (r.archived.length) console.log(`[nas-archive] 归档 ${r.archived.length} 条`);
+        if (r.cacheFreed?.length) console.log(`[nas-archive] 清掉已发布项目的 99-cache ${r.cacheFreed.length} 条，${(r.cacheFreed.reduce((n, x) => n + x.freedBytes, 0) / 1024 ** 3).toFixed(1)} GB`);
         if (r.errors.length) console.error(`[nas-archive] ${r.errors.length} 处问题:${r.errors[0]}`);
       })
       .catch((err) => console.error("[nas-archive] 归档失败:", err instanceof Error ? err.message : err))

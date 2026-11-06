@@ -19,6 +19,7 @@ describe("MCP protocol adapters", () => {
     expect(initialized?.result).toMatchObject({
       protocolVersion: "2025-11-25",
       capabilities: { tools: {}, resources: {}, prompts: {} },
+      serverInfo: { version: JSON.parse(readFileSync(path.resolve(__dirname, "..", "package.json"), "utf-8")).version },
     });
     const tools = await handleMcpRequest({ id: 2, method: "tools/list", params: {} });
     const names = ((tools?.result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name);
