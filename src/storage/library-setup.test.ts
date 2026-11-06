@@ -61,6 +61,13 @@ describe("setupLibrary", () => {
     expect(await setupLibrary({ target: path.join(home, "other"), home })).toMatchObject({ status: "refused", code: "other_library" });
   });
 
+  it("carries the rival (比稿) Gemini key config into the library", async () => {
+    await put(path.join(machine, "rival.json"), '{"geminiApiKey":"test-rival-key"}');
+    const r = await setupLibrary({ target: defaultLibraryPath(home), home });
+    expect(r.status).toBe("created");
+    expect(await fs.readFile(path.join(getConfigDir(), "rival.json"), "utf8")).toContain("test-rival-key");
+  });
+
   it("O14: refusal never falls back to ~/.autocrew", async () => {
     const r = await setupLibrary({ target: path.join(home, "Desktop", "lib"), home, platform: "darwin" });
     expect(r.status).toBe("refused");

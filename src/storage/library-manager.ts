@@ -12,7 +12,7 @@ import {
 import { acquireLibraryLock, WRITER_LOCK } from "./library-lock.js";
 
 export const PENDING_STORAGE = "storage-pending.json";
-export const CONFIG_FILES = ["engine.json", "publish.json", "search.json", "cover.json", "video.json"];
+export const CONFIG_FILES = ["engine.json", "publish.json", "search.json", "cover.json", "video.json", "rival.json"];
 const LOCAL_FILES = new Set(["inbox.json", "mcp.json", "server-token", "server.log", "autocrew.pid", "typesafe-key",
   "engine-health.json", STORAGE_CONFIG, PENDING_STORAGE]);
 const LOCAL_DIRS = new Set(["tokens", "bridge", "libraries", "cache", "migrations"]);
