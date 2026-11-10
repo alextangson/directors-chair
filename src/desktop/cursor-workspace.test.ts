@@ -1,31 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-const SKILLS = [
-  "calibrate",
-  "content-review",
-  "cover-generator",
-  "humanizer-zh",
-  "manage-pipeline",
-  "memory-distill",
-  "onboarding",
-  "platform-rewrite",
-  "pre-publish",
-  "publish-content",
-  "research",
-  "spawn-batch-writer",
-  "spawn-planner",
-  "spawn-writer",
-  "style-calibration",
-  "topic-ideas",
-  "video-session",
-  "write-script",
-  "xhs-cover-review",
-] as const;
+/**
+ * 技能名单从 skills/ 现读，不写死。
+ * 上游 2026-10-02 用 topic-meeting 换掉了 spawn-planner，写死的名单会留一个悬空链接
+ * 指向已删除的目录，Cursor 侧就发现不了那个技能。
+ */
+function editorialSkills(): string[] {
+  return readdirSync(path.join(REPO_ROOT, "skills"), { withFileTypes: true })
+    .filter((e) => e.isDirectory() && existsSync(path.join(REPO_ROOT, "skills", e.name, "SKILL.md")))
+    .map((e) => e.name)
+    .sort();
+}
 
 describe("cursor workspace host", () => {
   it("points project MCP at the forwarder as the cursor host", () => {
@@ -40,12 +30,22 @@ describe("cursor workspace host", () => {
 
   it("symlinks every editorial skill into .cursor/skills", () => {
     const dir = path.join(REPO_ROOT, ".cursor", "skills");
-    expect(SKILLS).toHaveLength(19);
-    for (const name of SKILLS) {
+    const skills = editorialSkills();
+    expect(skills.length).toBeGreaterThan(0);
+    for (const name of skills) {
       const link = path.join(dir, name);
       expect(lstatSync(link).isSymbolicLink(), name).toBe(true);
       expect(readlinkSync(link)).toBe(`../../skills/${name}`);
       expect(existsSync(path.join(REPO_ROOT, "skills", name, "SKILL.md")), name).toBe(true);
+    }
+  });
+
+  it("keeps .cursor/skills free of links that point nowhere", () => {
+    const dir = path.join(REPO_ROOT, ".cursor", "skills");
+    const linked = readdirSync(dir);
+    expect(linked.sort()).toEqual(editorialSkills());
+    for (const name of linked) {
+      expect(existsSync(path.join(dir, name)), name).toBe(true);
     }
   });
 
